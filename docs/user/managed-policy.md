@@ -300,10 +300,11 @@ the registry list. Codex installed through
 working once T3 Code no longer supports that version.
 
 `providers.allowedAcpAgents` lists the ACP Registry agents that may run, by registry ID, such as
-`["devin"]`. Other agents disappear from the add dialog, and instances already using them show an
-error. Users also cannot run a local command or override an agent's executable, since either would
-run something other than the listed agent. T3 Code does not check the IDs against the registry, so
-a misspelled ID matches nothing.
+`["devin"]`. Other agents disappear from the add dialog, and instances already using them show as
+unavailable with the policy as the reason. Users also cannot run a local command or override an
+agent's executable, since either would run something other than the listed agent, so instances
+that use a local command stop too. T3 Code does not check the IDs against the registry, so a
+misspelled ID matches nothing.
 
 This limit picks the agent, not everything around it. A user can still set variables on the
 provider, and `PATH` decides which `npm` or `uv` installs an agent. `maxRuntimeMode` locks those

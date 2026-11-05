@@ -4,6 +4,7 @@ import {
   AcpRegistryOperationErrorReason,
   managedProviderInstallDenial,
   managedAcpAgentDenial,
+  managedLocalAcpCommandDenial,
   TrimmedNonEmptyString,
   type AcpRegistryManagedBinaryUninstallInput,
   type AcpRegistryManagedBinaryUninstallResult,
@@ -471,6 +472,7 @@ export interface ResolvedAcpRegistryAgent {
 
 export type AcpRegistryInspection =
   | { readonly status: "unconfigured" }
+  | { readonly status: "denied"; readonly message: string }
   | { readonly status: "not_found"; readonly agentId: string }
   | {
       readonly status: "unsupported";
@@ -541,6 +543,7 @@ export const layerFromHost = Layer.merge(
         toolsDir: path.join(paths.baseDir, "tools"),
         ...(installDenial === undefined ? {} : { installDenial }),
         agentDenial: (agentId) => managedAcpAgentDenial(managedPolicy, agentId),
+        localCommandDenial: managedLocalAcpCommandDenial(managedPolicy),
       });
     }),
   ),
@@ -555,6 +558,8 @@ export interface AcpRegistryCatalogOptions {
   readonly installDenial?: string;
   /** Why policy keeps an agent from running, or undefined when it may. */
   readonly agentDenial?: (agentId: string) => string | undefined;
+  /** Why policy keeps a local command from running, or undefined when it may. */
+  readonly localCommandDenial?: string | undefined;
 }
 
 const INSTALL_LOCK_RETRY_COUNT = 300;
@@ -663,7 +668,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
   const resolveExecutable = yield* SpawnExecutableResolution;
   const platformTarget = resolveAcpRegistryPlatformTarget(platform, architecture);
   const registryUrl = input.registryUrl ?? ACP_REGISTRY_URL;
-  const { agentDenial } = input;
+  const { agentDenial, localCommandDenial } = input;
   const registryDirectory = path.join(input.cacheDir, "acp-registry");
   const registryCachePath = path.join(registryDirectory, "registry.json");
   const installsDirectory = input.toolsDir;
@@ -1749,7 +1754,11 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     function* (settings, environment) {
       if (settings.source === "local") {
         const command = settings.commandPath.trim();
-        if (!command) return { status: "unconfigured" } as const;
+        if (!command) {
+          return localCommandDenial === undefined
+            ? ({ status: "unconfigured" } as const)
+            : ({ status: "denied", message: localCommandDenial } as const);
+        }
         const executable = resolveExecutable(command, platform, environment ?? hostEnvironment);
         if (executable !== undefined) yield* validateLocalExecutable(executable);
         return executable === undefined
@@ -1762,7 +1771,8 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
       }
       const agentId = settings.agentId.trim();
       if (agentId.length === 0) return { status: "unconfigured" } as const;
-      yield* refuseUnderPolicy(agentId);
+      const denial = agentDenial?.(agentId);
+      if (denial !== undefined) return { status: "denied", message: denial } as const;
       const registry = yield* loadCachedRegistry();
       const agent = registry.agents.find((candidate) => candidate.id === agentId);
       if (agent === undefined) return { status: "not_found", agentId } as const;

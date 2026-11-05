@@ -53,6 +53,7 @@ import {
   disallowedProviderMessage,
   isManagedDriverAllowed,
   managedProviderInstallDenial,
+  managedAcpAgentsNotice,
 } from "@t3tools/contracts";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -778,6 +779,8 @@ export function ProviderInstanceCard({
   const managedPolicy = useManagedPolicy(environmentId);
   const instanceLocks = managedInstanceLocks(managedPolicy, instance.driver);
   const installDenial = managedProviderInstallDenial(managedPolicy);
+  const acpAgentsNotice =
+    instance.driver === "acpRegistry" ? managedAcpAgentsNotice(managedPolicy) : undefined;
   const managedDriverReason = isManagedDriverAllowed(managedPolicy, instance.driver)
     ? undefined
     : disallowedProviderMessage(
@@ -1342,6 +1345,11 @@ export function ProviderInstanceCard({
           aria-disabled={readOnly || undefined}
           className={readOnly ? "opacity-50 select-none" : undefined}
         >
+          {acpAgentsNotice ? (
+            <div className="px-3 pt-2 sm:px-4">
+              <ManagedNotice>{acpAgentsNotice}</ManagedNotice>
+            </div>
+          ) : null}
           {runtimeFields}
         </SettingsSection>
       ) : null}
