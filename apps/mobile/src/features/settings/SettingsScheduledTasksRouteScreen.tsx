@@ -1510,7 +1510,7 @@ function EnvironmentTasks({
                 {describeSchedule(task)}
                 {!task.enabled
                   ? " · Paused"
-                  : task.nextRunAt
+                  : task.nextRunAt && task.blockedByPolicy === undefined
                     ? ` · ${formatNextScheduledTaskRun(task.nextRunAt, now)}`
                     : ""}
               </Text>
