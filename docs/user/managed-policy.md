@@ -216,8 +216,8 @@ own `claude` earlier on their `PATH`. Pin an absolute `binaryPath` in `providers
 provider you allow.
 
 ACP agents' own mode menus have no effect under `maxRuntimeMode`, except Antigravity's, whose modes
-T3 Code can place under the limit. Users still choose which ACP Registry agent runs; leave
-`acpRegistry` out of `allowedDrivers` to stop that.
+T3 Code can place under the limit. Users still choose which ACP Registry agent runs; list the ones
+they may use in `providers.allowedAcpAgents`, or leave `acpRegistry` out of `allowedDrivers`.
 
 The limit decides which modes T3 Code asks the provider for. It is not a sandbox; see
 [What a policy does not cover](#what-a-policy-does-not-cover).
@@ -298,6 +298,12 @@ ACP Registry agents T3 Code already installed stay at their version, because T3 
 the registry list. Codex installed through
 [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt) gets no more updates, so it stops
 working once T3 Code no longer supports that version.
+
+`providers.allowedAcpAgents` lists the ACP Registry agents that may run, by registry ID, such as
+`["devin"]`. Other agents disappear from the add dialog, and instances already using them show an
+error. Users also cannot run a local command or override an agent's executable, since either would
+run something other than the listed agent. T3 Code does not check the IDs against the registry, so
+a misspelled ID matches nothing.
 
 ### Updates
 

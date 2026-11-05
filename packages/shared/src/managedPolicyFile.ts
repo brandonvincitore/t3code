@@ -118,6 +118,7 @@ export const WINDOWS_POLICY_VALUES = {
   SnapShot: { type: "boolean", path: ["limits", "snapShot"] },
   ProviderInstances: { type: "json", path: ["limits", "providers", "instances"] },
   ProviderInstalls: { type: "boolean", path: ["limits", "providers", "installs"] },
+  AllowedAcpAgents: { type: "json", path: ["limits", "providers", "allowedAcpAgents"] },
   UpdatesMode: { type: "string", path: ["limits", "updates", "mode"] },
   UpdatesFeedUrl: { type: "string", path: ["limits", "updates", "feedUrl"] },
   AllowNightly: { type: "boolean", path: ["limits", "updates", "allowNightly"] },

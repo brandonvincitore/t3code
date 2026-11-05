@@ -154,6 +154,7 @@ function summarizeLimits(
     ...(browserCookieImport === undefined ? {} : { browserCookieImport }),
     ...(providers?.allowedDrivers === undefined &&
     providers?.installs === undefined &&
+    providers?.allowedAcpAgents === undefined &&
     Object.keys(lockedInstanceFields).length === 0
       ? {}
       : {
@@ -162,6 +163,9 @@ function summarizeLimits(
               ? {}
               : { allowedDrivers: providers.allowedDrivers }),
             ...(providers?.installs === undefined ? {} : { installs: providers.installs }),
+            ...(providers?.allowedAcpAgents === undefined
+              ? {}
+              : { allowedAcpAgents: providers.allowedAcpAgents }),
             ...(Object.keys(lockedInstanceFields).length === 0 ? {} : { lockedInstanceFields }),
           },
         }),

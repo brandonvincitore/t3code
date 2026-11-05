@@ -7,6 +7,7 @@ import * as Stream from "effect/Stream";
 
 import {
   DEFAULT_SERVER_SETTINGS,
+  managedAcpAgentDenial,
   ProviderDriverKind,
   ProviderInstanceId,
   MANAGED_POLICY_SCHEMA_URL,
@@ -522,6 +523,41 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
       }
       assert.isNull((yield* instance.snapshot.resolveMaintenance()).update);
     }).pipe(Effect.scoped),
+  );
+
+  it.effect("takes the launch command from users when it limits ACP agents", () =>
+    Effect.gen(function* () {
+      const policy = yield* loadFrom(
+        JSON.stringify({
+          schemaVersion: 1,
+          organization: "Example Corp",
+          limits: { providers: { allowedAcpAgents: ["devin"] } },
+        }),
+      );
+      const acpRegistry = ProviderDriverKind.make("acpRegistry");
+      assert.deepEqual<unknown>(policy.summary?.limits?.providers, {
+        allowedAcpAgents: ["devin"],
+        lockedInstanceFields: { acpRegistry: ["config.commandPath", "config.commandArgs"] },
+      });
+      assert.isUndefined(managedAcpAgentDenial(policy.summary, "devin"));
+      assert.strictEqual(
+        managedAcpAgentDenial(policy.summary, "other"),
+        "Example Corp's policy does not allow the ACP agent other.",
+      );
+      assert.isUndefined(managedAcpAgentDenial(undefined, "other"));
+
+      const instanceId = ProviderInstanceId.make("acp_local");
+      const shown = policy.providers.applyLimits({
+        ...DEFAULT_SERVER_SETTINGS,
+        providerInstances: {
+          [instanceId]: {
+            driver: acpRegistry,
+            config: { source: "local", commandPath: "/bin/sh", commandArgs: ["-c", "x"] },
+          },
+        },
+      });
+      assert.deepEqual<unknown>(shown.providerInstances[instanceId]?.config, { source: "local" });
+    }),
   );
 
   it.effect("refuses provider limits it cannot enforce", () =>
