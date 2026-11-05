@@ -80,7 +80,7 @@ Locks and provider fields go in the two JSON policies, as the same objects a pol
 Machines pick up a change at the next Group Policy refresh; run `gpupdate /target:computer /force`
 to apply it now, then restart T3 Code.
 Setting **Allow T3 Connect**, **Allow scheduled tasks**, **Allow webhook tasks**, **Allow importing
-browser cookies**, **Allow SnapShots**, or **Allow usage data** to **Disabled** turns that feature off. Setting any other T3 Code policy to
+browser cookies**, **Allow SnapShots**, **Allow usage data**, or **Allow installing and updating providers** to **Disabled** turns that feature off. Setting any other T3 Code policy to
 **Disabled** restricts nothing, the same as **Not Configured**.
 
 **Windows registry value.** Instead of the template, set the `Policy` value (`REG_SZ`) to the whole policy as one line of JSON,
@@ -285,6 +285,10 @@ empty. A `codex` entry that is locked, or any `codex` entry under `maxRuntimeMod
 [Connect with ChatGPT](./providers-codex.md#connect-with-chatgpt), since that runtime would skip
 your fields. In the same way, an `opencode` entry like that rules out a server URL, so OpenCode
 starts the binary you set.
+
+`providers.installs: false` stops T3 Code from installing or updating provider software, including
+ACP Registry agents. Providers already on the machine keep running, and users can still remove what
+T3 Code installed. Set the provider up yourself, for example through your device management tool.
 
 ### Updates
 
