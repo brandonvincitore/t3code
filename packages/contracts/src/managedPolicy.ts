@@ -105,7 +105,6 @@ export const ManagedPolicySummaryLimits = Schema.Struct({
   webhookTasks: Schema.optionalKey(Schema.Boolean),
   telemetry: Schema.optionalKey(Schema.Boolean),
   browserCookieImport: Schema.optionalKey(Schema.Boolean),
-  snapShot: Schema.optionalKey(Schema.Boolean),
   providers: Schema.optionalKey(
     Schema.Struct({
       /** Absent means every driver is allowed. */
@@ -228,7 +227,6 @@ const CAPABILITY_LABELS = {
   scheduledTasks: "scheduled tasks",
   webhookTasks: "webhook tasks",
   browserCookieImport: "importing browser cookies",
-  snapShot: "SnapShots",
 } as const;
 
 /** Why a capability is unavailable on an environment with `summary`, or undefined when allowed. */
