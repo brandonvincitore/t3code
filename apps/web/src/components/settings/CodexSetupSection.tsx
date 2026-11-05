@@ -335,6 +335,7 @@ function ManagedCodexSetup({
   const [autoStartHandled, setAutoStartHandled] = useState(false);
   const installed = installation?.installedVersion != null;
   const authenticated = provider?.auth.status === "authenticated";
+  const canStartSetup = provider?.setup !== undefined && (installed || provider.setup.canInstall);
   const updateAvailable =
     installed &&
     installation?.source !== "local" &&
@@ -582,7 +583,7 @@ function ManagedCodexSetup({
     !unavailable &&
     !busy &&
     installation !== null &&
-    provider?.setup?.canInstall
+    canStartSetup
   ) {
     setAutoStartHandled(true);
   }
@@ -902,7 +903,7 @@ function ManagedCodexSetup({
               <Button
                 size="sm"
                 variant="ghost-muted"
-                disabled={unavailable || busy}
+                disabled={unavailable || busy || !canStartSetup}
                 onClick={() => void setup("chatgpt-change-account")}
               >
                 Use a different account
@@ -1018,7 +1019,7 @@ function ManagedCodexSetup({
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={unavailable || busy}
+                    disabled={unavailable || busy || !canStartSetup}
                     onClick={() => void setup("chatgpt-change-account")}
                   >
                     Use a different account
