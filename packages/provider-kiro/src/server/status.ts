@@ -21,7 +21,9 @@ import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_SUPPORTED_RUNTIME_MODES,
   makeKiroAcpRuntime,
+  kiroWorkflowSessionMeta,
 } from "./acpSupport.ts";
+import { kiroWorkflowPreferenceDescriptor } from "./workflowPreferences.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
@@ -62,15 +64,20 @@ const VERSION_PROBE_TIMEOUT_MS = 10_000;
 const kiroModels = (
   settings: KiroSettings,
   listed: ReadonlyArray<ServerProviderModel> = KIRO_BUILT_IN_MODELS,
-  agents?: ProviderOptionDescriptor,
+  options: ReadonlyArray<ProviderOptionDescriptor> = [],
 ) =>
   providerModelsFromSettings(listed, settings.customModels, EMPTY_CAPABILITIES).map((model) => {
     const descriptors = model.capabilities?.optionDescriptors ?? [];
-    return agents === undefined || descriptors.some((descriptor) => descriptor.id === agents.id)
+    const additions = options.filter(
+      (option) => !descriptors.some((descriptor) => descriptor.id === option.id),
+    );
+    return additions.length === 0
       ? model
       : {
           ...model,
-          capabilities: createModelCapabilities({ optionDescriptors: [...descriptors, agents] }),
+          capabilities: createModelCapabilities({
+            optionDescriptors: [...descriptors, ...additions],
+          }),
         };
   });
 
@@ -79,7 +86,7 @@ const snapshot = (
   checkedAt: string,
   probe: ProviderProbeResult,
   listed?: ReadonlyArray<ServerProviderModel>,
-  agents?: ProviderOptionDescriptor,
+  options: ReadonlyArray<ProviderOptionDescriptor> = [],
 ) =>
   buildServerProvider({
     // Gives the snapshot its version advisory; Kiro runs no enrichment pass.
@@ -87,7 +94,7 @@ const snapshot = (
     presentation: KIRO_PRESENTATION,
     enabled: settings.enabled,
     checkedAt,
-    models: kiroModels(settings, listed, agents),
+    models: kiroModels(settings, listed, options),
     // `/compact` runs `_kiro/session/compact`; see compactKiroSession.
     slashCommands: [COMPACT_SLASH_COMMAND],
     probe,
@@ -295,6 +302,9 @@ const KiroConfigTemplate = Schema.Struct({
   ),
 });
 const decodeKiroConfigTemplate = Schema.decodeUnknownOption(KiroConfigTemplate);
+const decodeKiroExtensionMethods = Schema.decodeUnknownOption(
+  Schema.Struct({ kiro: Schema.Struct({ extensionMethods: Schema.Array(Schema.String) }) }),
+);
 
 /**
  * The thread's agent picker, from Kiro's `_kiro/config/template` result, without
@@ -336,11 +346,10 @@ export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor
 }
 
 /**
- * Asks Kiro for its agents with `initialize` and `_kiro/config/template` and
- * nothing more: no `session/new`, so no MCP server starts and no session is
- * stored. The process runs in the server's working directory.
+ * Reads Kiro's agent and workflow options without opening a session, so no
+ * MCP server starts and no session is stored.
  */
-const probeKiroAgents = Effect.fn("KiroProvider.probeKiroAgents")(function* (
+const probeKiroOptions = Effect.fn("KiroProvider.probeKiroOptions")(function* (
   settings: KiroSettings,
   environment: NodeJS.ProcessEnv,
 ) {
@@ -350,8 +359,19 @@ const probeKiroAgents = Effect.fn("KiroProvider.probeKiroAgents")(function* (
     cwd: yield* HostProcess.WorkingDirectory,
     clientInfo: { name: "t3-code-provider-probe", version: "0.0.0" },
   });
-  yield* runtime.initialize();
-  return kiroAgentDescriptor(yield* runtime.request("_kiro/config/template", {}));
+  const initialized = yield* runtime.initialize();
+  const methods = Option.getOrUndefined(
+    decodeKiroExtensionMethods(initialized.agentCapabilities?._meta),
+  )?.kiro.extensionMethods;
+  if (!methods?.includes("_kiro/config/template")) return [];
+  const workflowMeta = kiroWorkflowSessionMeta(initialized.agentCapabilities?._meta);
+  const template = yield* runtime.request(
+    "_kiro/config/template",
+    workflowMeta === undefined ? {} : { _meta: workflowMeta },
+  );
+  return [kiroAgentDescriptor(template), kiroWorkflowPreferenceDescriptor(template)].filter(
+    (descriptor): descriptor is ProviderOptionDescriptor => descriptor !== undefined,
+  );
 }, Effect.scoped);
 
 export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(function* (
@@ -422,7 +442,7 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
   // Signed out, `--list-models` starts a browser login instead, and the agent
   // probe fails to start, so both run only once `whoami` has confirmed the
   // account. Without an agent list the composer shows no agent picker.
-  const [listed, agents] =
+  const [listed, options] =
     auth.status === "authenticated"
       ? yield* Effect.all(
           [
@@ -431,7 +451,7 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
               Effect.map((output) => kiroModelsFromList(Option.getOrUndefined(output))),
               Effect.orElseSucceed(() => undefined),
             ),
-            probeKiroAgents(settings, environment).pipe(
+            probeKiroOptions(settings, environment).pipe(
               Effect.timeoutOption(AUTH_PROBE_TIMEOUT_MS),
               Effect.map(Option.getOrUndefined),
               Effect.orElseSucceed(() => undefined),
@@ -453,6 +473,6 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
         : { message: "Could not confirm the Kiro sign-in. Run `kiro-cli whoami` to check." }),
     },
     listed,
-    agents,
+    options,
   );
 });

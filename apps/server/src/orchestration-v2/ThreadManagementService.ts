@@ -1364,11 +1364,11 @@ const make = Effect.gen(function* () {
         task === undefined ||
         task.threadId !== input.threadId ||
         task.workflow === undefined ||
-        task.status !== "running"
+        (task.status !== "running" && task.status !== "waiting")
       ) {
         return yield* new OrchestrationV2StopWorkflowError({ ...input, reason: "not-running" });
       }
-      if (task.origin !== "provider_native" || task.driver !== "claudeAgent") {
+      if (task.origin !== "provider_native") {
         return yield* new OrchestrationV2StopWorkflowError({ ...input, reason: "unsupported" });
       }
       const providerThreadId =

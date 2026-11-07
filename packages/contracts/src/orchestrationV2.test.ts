@@ -326,9 +326,15 @@ describe("orchestration V2 contracts", () => {
     expect(explicit.runtimePolicy).toEqual({ enforcement: "native" });
   });
 
-  it.each(["  indented prompt\n", "\n \t\n"])(
-    "preserves workflow prompt and result %j in stored and wire JSON",
-    (preview) => {
+  it.each([
+    { preview: "  indented prompt\n", state: "completed" as const },
+    { preview: "\n \t\n", state: "completed" as const },
+    { preview: "Paused step", state: "waiting" as const },
+    { preview: "Stopped step", state: "cancelled" as const },
+    { preview: "Interrupted step", state: "interrupted" as const },
+  ])(
+    "preserves workflow prompt, result and $state in stored and wire JSON",
+    ({ preview, state }) => {
       const subagent = {
         ...decodeOrchestrationV2Subagent({
           id: "workflow-coordinator",
@@ -352,12 +358,14 @@ describe("orchestration V2 contracts", () => {
           updatedAt: now,
         }),
         workflow: {
+          memberKind: "step" as const,
+          scriptLanguage: "json" as const,
           phases: [],
           agents: [
             {
               index: 1,
               label: "Member",
-              state: "completed" as const,
+              state,
               model: "claude-opus-5[1m]",
               effort: "xhigh",
               speed: "standard",
@@ -377,9 +385,14 @@ describe("orchestration V2 contracts", () => {
         const decode = Schema.decodeUnknownSync(codec);
         const json: unknown = JSON.parse(JSON.stringify(encode(subagent)));
         expect(json).toMatchObject({
-          workflow: { agents: [{ prompt: preview, result: preview }] },
+          workflow: {
+            memberKind: "step",
+            scriptLanguage: "json",
+            agents: [{ state, prompt: preview, result: preview }],
+          },
         });
         expect(decode(json).workflow?.agents[0]).toMatchObject({
+          state,
           prompt: preview,
           result: preview,
           model: "claude-opus-5[1m]",

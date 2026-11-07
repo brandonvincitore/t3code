@@ -744,9 +744,10 @@ export function ThreadRelationshipsPanel(props: {
     const providerDriver = agent?.driver ?? provider?.driver;
     const canStopWorkflow =
       canOperateWorkflow &&
-      workflowGroup?.workflow.status === "running" &&
+      (workflowGroup?.workflow.status === "running" ||
+        workflowGroup?.workflow.status === "waiting") &&
       agent?.origin === "provider_native" &&
-      providerDriver === "claudeAgent";
+      (providerDriver === "claudeAgent" || providerDriver === "kiro");
     const trailingVisibilityClass = (workflowGroup ? canStopWorkflow : canStop)
       ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"
       : "";

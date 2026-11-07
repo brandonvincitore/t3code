@@ -68,6 +68,7 @@ export interface RuntimeSubagent {
   readonly phaseTitle: string | null;
   readonly attempt: number | null;
   readonly workflowName: string | null;
+  readonly workflowMemberKind?: "agent" | "step";
   readonly phases: ReadonlyArray<SubagentWorkflowPhase>;
   readonly runHandles: SubagentRunHandles | null;
   readonly childThreadId: string | null;
@@ -132,7 +133,7 @@ function workflowMembersToRuntime(
 ): ReadonlyArray<RuntimeSubagent> {
   return workflow.agents.map((agent) => {
     const status =
-      (agent.state === "queued" || agent.state === "running") &&
+      (agent.state === "queued" || agent.state === "running" || agent.state === "waiting") &&
       isTerminalSubagentStatus(coordinator.status)
         ? coordinator.status
         : agent.state === "queued"
@@ -245,6 +246,7 @@ export function projectedSubagentsToRuntime(
       phaseTitle: null,
       attempt: null,
       workflowName: workflow?.name ?? null,
+      workflowMemberKind: workflow?.memberKind ?? "agent",
       phases: workflow?.phases ?? [],
       runHandles,
       childThreadId: subagent.childThreadId ?? null,
@@ -343,6 +345,7 @@ type ProjectedSubagent = Parameters<typeof projectedSubagentsToRuntime>[0][numbe
 export interface WorkflowOpening {
   readonly messageId: string;
   readonly script: string;
+  readonly scriptLanguage?: "javascript" | "json";
   readonly name: string | null;
   readonly description: string | null;
   readonly driver: OrchestrationV2Subagent["driver"] | null;
@@ -377,6 +380,7 @@ export function resolveWorkflowOpening(input: {
   return {
     messageId: first.id,
     script: first.text,
+    scriptLanguage: coordinator?.workflow?.scriptLanguage ?? "javascript",
     name: coordinator?.workflow?.name ?? null,
     description: coordinator?.title ?? null,
     driver: coordinator?.driver ?? null,
@@ -426,14 +430,20 @@ export function workflowOpeningHeadline(opening: WorkflowOpening): {
         : member.status === "failed"
           ? "failed"
           : "stopped"
-      : "working";
+      : member.status === "waiting"
+        ? "waiting"
+        : member.status === "pending"
+          ? "queued"
+          : "working";
     counts.set(key, (counts.get(key) ?? 0) + 1);
   }
   const agents =
     members.length === 0
       ? null
-      : `${members.length} ${members.length === 1 ? "agent" : "agents"} · ${[
+      : `${members.length} ${opening.group?.workflow.workflowMemberKind === "step" ? (members.length === 1 ? "step" : "steps") : members.length === 1 ? "agent" : "agents"} · ${[
           "working",
+          "waiting",
+          "queued",
           "done",
           "failed",
           "stopped",

@@ -50,6 +50,7 @@ import {
   kiroPermissionDisposition,
   makeKiroAcpRuntime,
 } from "./acpSupport.ts";
+import { makeKiroWorkflowSupport } from "./workflows.ts";
 
 export const KIRO_PROVIDER = ProviderDriverKind.make("kiro");
 /** T3's slug for "Kiro default", and Kiro's documented default model id. */
@@ -535,10 +536,15 @@ function makeKiroAcpAdapterFlavor(options: KiroAdapterV2Options): AcpAdapterV2Fl
       });
     });
   const stripSteeringNote = makeKiroSteeringNoteFilter();
+  const workflows = makeKiroWorkflowSupport();
   return {
     driver: KIRO_PROVIDER,
     runtimeHarness: "Kiro",
     capabilities: KiroProviderCapabilitiesV2,
+    supportsNativeWorkflows: true,
+    registerExtensions: workflows.registerExtensions,
+    consumeSessionUpdate: workflows.consumeSessionUpdate,
+    stopTask: workflows.stopTask,
     // Kiro V3 loads the user's hooks only when the client opts in. `v2` makes
     // Kiro run them itself; `enabled` alone hands them to the client as
     // `_kiro/hooks/*` requests, which T3 does not answer.

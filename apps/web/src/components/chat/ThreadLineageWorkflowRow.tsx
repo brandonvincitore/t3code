@@ -145,6 +145,7 @@ export function ThreadLineageWorkflowRow({
   const [expanded, setExpanded] = useState(false);
   const [phaseOpen, setPhaseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map());
   const label = group.workflow.workflowName ?? group.workflow.title;
+  const memberKind = group.workflow.workflowMemberKind ?? "agent";
   const phases = group.phases.filter((phase) => phase.members.length > 0);
   return (
     <li className="group" data-workflow-expanded={expanded ? "" : undefined}>
@@ -214,7 +215,7 @@ export function ThreadLineageWorkflowRow({
                       ) : null}
                       <span className="shrink-0 text-2xs font-normal tabular-nums">
                         {phase.settledCount}/{phase.members.length}{" "}
-                        {phase.members.length === 1 ? "agent" : "agents"}
+                        {phase.members.length === 1 ? memberKind : `${memberKind}s`}
                       </span>
                       <span className="shrink-0 text-2xs font-normal tabular-nums empty:hidden">
                         <AgentElapsed agent={phaseElapsed(phase)} />
@@ -256,7 +257,9 @@ export function ThreadLineageWorkflowRow({
             />
           ))}
           {phases.length === 0 && group.unphasedMembers.length === 0 ? (
-            <li className="px-2.5 py-1.5 text-2xs text-muted-foreground/70">No agents yet</li>
+            <li className="px-2.5 py-1.5 text-2xs text-muted-foreground/70">
+              No {memberKind}s yet
+            </li>
           ) : null}
         </ul>
       ) : null}

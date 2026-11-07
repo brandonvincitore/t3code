@@ -38,6 +38,21 @@ not listed yet. Refresh the Kiro provider after adding or removing an agent.
 The thread's model still applies when an agent sets its own `model`. An agent that was removed
 leaves the thread on Kiro's current agent.
 
+## Workflows
+
+Ask Kiro to run a native workflow. Its steps and their status appear in thread details and the
+mobile Agents sheet, including parallel groups, repeated steps, and watches. Open a step to read
+its conversation. The parent chat stays available while the workflow runs in the background.
+
+**Workflow use** beside the model controls when Kiro chooses a workflow: **When asked**,
+**Large tasks only**, or **Delegate all work**. The selection is saved with the thread and applies
+when its Kiro agent offers that preference. Refresh Kiro in provider settings if it is missing
+after upgrading the CLI.
+
+Paused workflows remain waiting, with Kiro's reason shown. **Stop workflow** cancels that run
+through Kiro without stopping another workflow or the parent chat. A server restart ends the
+running provider process; the recorded workflow history remains available.
+
 ## Permission Modes
 
 Kiro asks before tool calls such as writes and commands, and T3 Code answers by the permission mode:

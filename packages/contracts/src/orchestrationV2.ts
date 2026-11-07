@@ -814,7 +814,15 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
   label: TrimmedNonEmptyString,
   agentId: Schema.optional(TrimmedNonEmptyString),
   childThreadId: Schema.optional(ThreadId),
-  state: Schema.Literals(["queued", "running", "completed", "failed"]),
+  state: Schema.Literals([
+    "queued",
+    "running",
+    "waiting",
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+  ]),
   phaseIndex: Schema.optional(NonNegativeInt),
   phaseTitle: Schema.optional(TrimmedNonEmptyString),
   model: Schema.optional(TrimmedNonEmptyString),
@@ -841,6 +849,8 @@ export type OrchestrationV2WorkflowRunHandles = typeof OrchestrationV2WorkflowRu
 
 export const OrchestrationV2SubagentWorkflow = Schema.Struct({
   name: Schema.optional(TrimmedNonEmptyString),
+  memberKind: Schema.optional(Schema.Literals(["agent", "step"])),
+  scriptLanguage: Schema.optional(Schema.Literals(["javascript", "json"])),
   runHandles: Schema.optional(OrchestrationV2WorkflowRunHandles),
   phases: Schema.Array(OrchestrationV2WorkflowPhase),
   agents: Schema.Array(OrchestrationV2WorkflowAgent),

@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import { KiroSettings } from "../settings.ts";
-import { buildKiroAcpSpawnInput } from "./acpSupport.ts";
+import { buildKiroAcpSpawnInput, kiroWorkflowSessionMeta } from "./acpSupport.ts";
 import { kiroAuthFromWhoami } from "./status.ts";
 
 const decodeSettings = Schema.decodeUnknownSync(KiroSettings);
@@ -22,6 +22,16 @@ describe("KiroDriver", () => {
     assert.equal(custom.command, "/opt/kiro/bin/kiro-cli");
     assert.deepEqual(custom.args, ["acp", "--agent-engine=v3", "--auth-method=cli"]);
     assert.deepEqual(custom.env, { KIRO_API_KEY: "ksk_test" });
+    assert.deepEqual(
+      kiroWorkflowSessionMeta({
+        kiro: { extensionMethods: ["_kiro/workflow/new", "_kiro/workflow/cancel"] },
+      }),
+      { kiro: { settings: { workflows: { enabled: true } } } },
+    );
+    assert.isUndefined(kiroWorkflowSessionMeta(undefined));
+    assert.isUndefined(
+      kiroWorkflowSessionMeta({ kiro: { extensionMethods: ["_kiro/workflow/new"] } }),
+    );
   });
 
   // Outputs recorded from `kiro-cli whoami --format json` on Kiro CLI 2.27.0.

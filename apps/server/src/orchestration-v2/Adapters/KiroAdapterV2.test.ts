@@ -4,6 +4,7 @@ import { assert, describe, it } from "@effect/vitest";
 import {
   MessageId,
   type ModelSelection,
+  type OrchestrationV2ProviderTurn,
   NodeId,
   type ProviderApprovalDecision,
   ProjectId,
@@ -34,6 +35,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import { makeProviderEventRoutingState, routeProviderEvent } from "../RunExecutionService.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -323,6 +325,8 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       requestId: RuntimeRequestId,
       decision: ProviderApprovalDecision,
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly hasPendingBackgroundWork: Effect.Effect<boolean>;
+    readonly stopWorkflow: (taskId: string) => Effect.Effect<void, ProviderAdapterV2Error>;
   }) => Effect.Effect<void, ProviderAdapterV2Error>;
 }) {
   const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -441,6 +445,11 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       startTurnOn,
       interrupt: (providerTurnId) => session.interruptTurn({ providerThread, providerTurnId }),
       respond: (requestId, decision) => session.respondToRuntimeRequest({ requestId, decision }),
+      hasPendingBackgroundWork: session.hasPendingBackgroundWork ?? Effect.succeed(false),
+      stopWorkflow: (taskId) =>
+        session.stopTask === undefined
+          ? Effect.die("Kiro workflow cancellation is unavailable")
+          : session.stopTask({ providerThread, taskId }),
     });
   }).pipe(Effect.scoped);
   // Closing the session stops the replay agent; every scripted frame must be used.
@@ -460,6 +469,649 @@ const terminalStatus = (events: ReadonlyArray<ProviderAdapterV2Event>) => {
 };
 
 describe("KiroAdapterV2", () => {
+  it.effect.each([true, false])(
+    "applies workflow preference only when the session offers it (%s)",
+    (offered) => {
+      const preference = (currentValue: string) => ({
+        type: "select",
+        id: "workflowLaunch",
+        name: "Workflow use",
+        currentValue,
+        options: [
+          option("when-asked", "When asked"),
+          option("large-tasks", "Large tasks only"),
+          option("delegate-all", "Delegate all work"),
+        ],
+      });
+      const configs = (autopilot: "on" | "off", value: string) => [
+        modeOption,
+        autopilotOption(autopilot),
+        ...(offered ? [preference(value)] : []),
+      ];
+      const selection = (value: string) => [{ id: "workflowLaunch", value }];
+      return runKiroScript({
+        scenario: `workflow-preference-${offered}`,
+        options: selection("large-tasks"),
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          ...kiroSessionNoise,
+          answer("session/new", sessionSetup(configs("on", "when-asked"))),
+          ...(offered
+            ? [
+                setConfig("workflowLaunch", "large-tasks"),
+                configResult(configs("on", "large-tasks")),
+              ]
+            : []),
+          setConfig("autopilot", "off"),
+          configResult(configs("off", "large-tasks")),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...(offered
+            ? [
+                setConfig("workflowLaunch", "delegate-all"),
+                configResult(configs("off", "delegate-all")),
+              ]
+            : []),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...closeSession,
+        ],
+        drive: ({ events, startTurn, startTurnOn }) =>
+          Effect.gen(function* () {
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+            yield* startTurnOn(2, "default", selection("delegate-all"));
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped);
+    },
+  );
+
+  it.effect.each(["pending", "running", "paused"] as const)(
+    "keeps native workflow steps, approvals and Stop separate from later parent turns (%s member)",
+    (unfinishedStatus) => {
+      const workflowId = "wf-checks";
+      const childSessionId = "wf-step-inspect";
+      const secondSessionId = "wf-step-review";
+      const retrySessionId = "wf-step-review-retry";
+      const otherWorkflowId = "wf-other";
+      const otherSessionId = "wf-step-other";
+      const nodeTree = [
+        { nodeId: "inspect", type: "step", agentName: "general-task-execution" },
+        { nodeId: "review", type: "step", agentName: "general-task-execution" },
+      ];
+      const state = (status: string, sessionId = secondSessionId, memberStatus = status) => ({
+        workflowId,
+        workflowName: "Check the repository",
+        parentSessionId: SESSION_ID,
+        status,
+        inputs: {},
+        artifacts: {},
+        capturedOutputs: {},
+        root: {
+          nodeId: "root",
+          type: "sequence",
+          status,
+          children: [
+            { nodeId: "inspect", type: "step", status: "completed", sessionId: childSessionId },
+            { nodeId: "review", type: "step", status: memberStatus, sessionId },
+          ],
+        },
+      });
+      const workflowEvent = (name: string, params: Record<string, unknown>) =>
+        kiroNotification(`_kiro/workflow/${name}`, {
+          workflowId,
+          parentSessionId: SESSION_ID,
+          ...params,
+        });
+      const childSessionUpdate = (
+        sessionId: string,
+        sessionUpdate: Record<string, unknown>,
+      ): Frame => ({
+        type: "emit_inbound",
+        label: `child.${sessionId}`,
+        frame: {
+          kind: "notification",
+          method: "session/update",
+          params: {
+            sessionId,
+            update: sessionUpdate,
+          },
+        },
+      });
+      const childUpdate = (sessionId: string, text: string) =>
+        childSessionUpdate(sessionId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text },
+        });
+      const childToolOutput = (sessionId: string, text: string) => [
+        childSessionUpdate(sessionId, {
+          sessionUpdate: "tool_call",
+          toolCallId: "workflow-tool",
+          title: "Inspect workflow changes",
+          kind: "execute",
+          status: "inProgress",
+        }),
+        childSessionUpdate(sessionId, {
+          sessionUpdate: "tool_call_content_chunk",
+          toolCallId: "workflow-tool",
+          content: { type: "content", content: { type: "text", text } },
+        }),
+        childSessionUpdate(sessionId, {
+          sessionUpdate: "tool_call_content_chunk",
+          toolCallId: "workflow-tool",
+          content: { type: "diff", changes: [], patch: { format: "git_patch", text: "after" } },
+        }),
+      ];
+      const permission = (sessionId: string, toolCallId: string): Frame => ({
+        type: "emit_inbound",
+        label: `permission.${toolCallId}`,
+        frame: {
+          kind: "request",
+          method: "session/request_permission",
+          params: {
+            sessionId,
+            toolCall: { toolCallId, title: "Write changes", kind: "edit" },
+            options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+          },
+        },
+      });
+      const permissionAccepted: Frame = {
+        type: "expect_outbound",
+        label: "unrelated.permission.accepted",
+        frame: {
+          kind: "response",
+          method: "session/request_permission",
+          result: { outcome: { outcome: "selected", optionId: "allow" } },
+        },
+      };
+      const replayGate = makeProviderReplayGate(["terminal-permission-drained"]);
+      return runKiroScript({
+        scenario: "native-workflow-background",
+        replayGate,
+        frames: [
+          ...openSessionFrames({
+            initialize: {
+              ...KIRO_V3_INITIALIZE,
+              agentCapabilities: {
+                ...KIRO_V3_INITIALIZE.agentCapabilities,
+                _meta: {
+                  kiro: { extensionMethods: ["_kiro/workflow/cancel", "_kiro/workflow/inspect"] },
+                },
+              },
+            },
+            configOptions: [modeOption, autopilotOption("on")],
+          }),
+          turnPrompt,
+          workflowEvent("run_start", {
+            workflowName: "Check the repository",
+            inputs: {},
+            nodeTree: nodeTree.slice(0, 1),
+          }),
+          workflowEvent("node_start", {
+            nodeId: "inspect",
+            nodePath: [workflowId, "inspect"],
+            type: "step",
+          }),
+          workflowEvent("node_start", {
+            nodeId: "inspect",
+            nodePath: [workflowId, "inspect"],
+            type: "step",
+            sessionId: childSessionId,
+          }),
+          answer("session/prompt", { stopReason: "end_turn" }),
+          {
+            type: "emit_inbound",
+            label: "workflow.permission",
+            frame: {
+              kind: "request",
+              method: "session/request_permission",
+              params: {
+                sessionId: childSessionId,
+                toolCall: { toolCallId: "wf-write", title: "Write inspection", kind: "edit" },
+                options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            label: "workflow.permission.result",
+            frame: {
+              kind: "response",
+              method: "session/request_permission",
+              result: { outcome: { outcome: "selected", optionId: "allow" } },
+            },
+          },
+          turnPrompt,
+          ...childToolOutput(childSessionId, "Inspection stdout\n"),
+          childSessionUpdate(childSessionId, {
+            sessionUpdate: "tool_call_update",
+            toolCallId: "workflow-tool",
+            status: "completed",
+          }),
+          childUpdate(childSessionId, "Inspection complete"),
+          workflowEvent("node_complete", {
+            nodeId: "inspect",
+            nodePath: [workflowId, "inspect"],
+            status: "completed",
+            capturedOutput: "Inspection complete",
+          }),
+          workflowEvent("node_start", {
+            nodeId: "review",
+            nodePath: [workflowId, "review"],
+            type: "step",
+            sessionId: secondSessionId,
+          }),
+          childUpdate(secondSessionId, "Review in progress"),
+          ...childToolOutput(secondSessionId, "Review stdout\n"),
+          workflowEvent("run_start", {
+            workflowId: otherWorkflowId,
+            workflowName: "Other workflow",
+            nodeTree: [{ nodeId: "audit", type: "step" }],
+          }),
+          workflowEvent("node_start", {
+            workflowId: otherWorkflowId,
+            nodeId: "audit",
+            nodePath: [otherWorkflowId, "audit"],
+            type: "step",
+            sessionId: otherSessionId,
+          }),
+          ...childToolOutput(otherSessionId, "Other stdout\n"),
+          permission(SESSION_ID, "parent-write"),
+          permission(otherSessionId, "other-write"),
+          update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "Parent reply" },
+          }),
+          {
+            type: "emit_inbound",
+            label: "workflow.review.permission",
+            frame: {
+              kind: "request",
+              method: "session/request_permission",
+              params: {
+                sessionId: secondSessionId,
+                toolCall: { toolCallId: "wf-review-write", title: "Write review", kind: "edit" },
+                options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+              },
+            },
+          },
+          workflowEvent("paused", { pauseReason: "Needs another review" }),
+          workflowEvent("run_complete", {
+            status: "paused",
+            finalState: state("paused", secondSessionId, unfinishedStatus),
+          }),
+          outbound("_kiro/workflow/cancel", { workflowId, initiator: "user" }),
+          answer("_kiro/workflow/cancel", { ok: true, previousStatus: "paused" }),
+          workflowEvent("run_complete", {
+            status: "aborted",
+            finalState: state("aborted", secondSessionId, unfinishedStatus),
+          }),
+          {
+            type: "expect_outbound",
+            label: "workflow.review.permission.cancelled",
+            frame: {
+              kind: "response",
+              method: "session/request_permission",
+              result: { outcome: { outcome: "cancelled" } },
+            },
+          },
+          {
+            type: "emit_inbound",
+            label: "workflow.terminal.permission",
+            frame: {
+              kind: "request",
+              method: "session/request_permission",
+              params: {
+                sessionId: secondSessionId,
+                toolCall: { toolCallId: "wf-late-write", title: "Late write", kind: "edit" },
+                options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+              },
+            },
+          },
+          {
+            type: "expect_outbound",
+            label: "workflow.terminal.permission.cancelled",
+            frame: {
+              kind: "response",
+              method: "session/request_permission",
+              result: { outcome: { outcome: "cancelled" } },
+            },
+          },
+          {
+            ...workflowEvent("paused", { pauseReason: "Late duplicate pause" }),
+            label: "terminal-permission-drained",
+          },
+          permissionAccepted,
+          permissionAccepted,
+          workflowEvent("run_complete", {
+            workflowId: otherWorkflowId,
+            status: "completed",
+            finalState: {
+              workflowId: otherWorkflowId,
+              workflowName: "Other workflow",
+              parentSessionId: SESSION_ID,
+              status: "completed",
+              root: {
+                nodeId: "root",
+                type: "sequence",
+                status: "completed",
+                children: [
+                  { nodeId: "audit", type: "step", status: "completed", sessionId: otherSessionId },
+                ],
+              },
+            },
+          }),
+          answer("session/prompt", { stopReason: "end_turn" }),
+          turnPrompt,
+          workflowEvent("run_start", {
+            workflowName: "Check the repository",
+            inputs: {},
+            nodeTree,
+          }),
+          outbound("_kiro/workflow/inspect", { workflowId }),
+          {
+            type: "emit_inbound",
+            label: "workflow.retry.permission",
+            frame: {
+              kind: "request",
+              method: "session/request_permission",
+              params: {
+                sessionId: retrySessionId,
+                toolCall: { toolCallId: "wf-retry-write", title: "Write retry", kind: "edit" },
+                options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }],
+              },
+            },
+          },
+          answer("_kiro/workflow/inspect", {
+            workflowId,
+            state: state("running", retrySessionId),
+            nodePlan: nodeTree,
+          }),
+          {
+            type: "expect_outbound",
+            label: "workflow.retry.permission.result",
+            frame: {
+              kind: "response",
+              method: "session/request_permission",
+              result: { outcome: { outcome: "selected", optionId: "allow" } },
+            },
+          },
+          childUpdate(secondSessionId, "Stale prior attempt"),
+          ...childToolOutput(retrySessionId, "Retry stdout\n"),
+          childUpdate(retrySessionId, "Retry complete"),
+          answer("session/prompt", { stopReason: "end_turn" }),
+          workflowEvent("run_complete", {
+            status: "completed",
+            finalState: state("completed", retrySessionId),
+          }),
+          ...closeSession,
+        ],
+        drive: ({
+          events,
+          startTurn,
+          startTurnOn,
+          respond,
+          hasPendingBackgroundWork,
+          stopWorkflow,
+        }) =>
+          Effect.gen(function* () {
+            const firstDone = yield* Deferred.make<void>();
+            const secondDone = yield* Deferred.make<void>();
+            const paused = yield* Deferred.make<void>();
+            const cancelled = yield* Deferred.make<void>();
+            const approval = yield* Deferred.make<{ id: RuntimeRequestId; threadId: ThreadId }>();
+            const reviewApproval = yield* Deferred.make<RuntimeRequestId>();
+            const retryApproval = yield* Deferred.make<RuntimeRequestId>();
+            const parentApproval = yield* Deferred.make<RuntimeRequestId>();
+            const otherApproval = yield* Deferred.make<RuntimeRequestId>();
+            const requestStates = new Map<RuntimeRequestId, string>();
+            const requestOwners = new Map<RuntimeRequestId, ThreadId>();
+            const memberStates = new Map<ThreadId, string>();
+            const toolStates = new Map<ThreadId, string>();
+            let terminalCount = 0;
+            const collected = yield* events.pipe(
+              Stream.tap((event) => {
+                if (event.type === "subagent.updated" && event.subagent.childThreadId !== null) {
+                  memberStates.set(event.subagent.childThreadId, event.subagent.status);
+                }
+                if (event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool") {
+                  toolStates.set(event.turnItem.threadId, event.turnItem.status);
+                }
+                if (event.type === "turn.terminal") {
+                  terminalCount += 1;
+                  return Deferred.succeed(terminalCount === 1 ? firstDone : secondDone, undefined);
+                }
+                if (event.type === "runtime_request.updated") {
+                  requestStates.set(event.runtimeRequest.id, event.runtimeRequest.status);
+                  if (event.threadId !== undefined)
+                    requestOwners.set(event.runtimeRequest.id, event.threadId);
+                  if (event.runtimeRequest.status !== "pending") return Effect.void;
+                  if (event.runtimeRequest.nativeRequestRef?.nativeId === "parent-write") {
+                    return Deferred.succeed(parentApproval, event.runtimeRequest.id);
+                  }
+                  if (event.runtimeRequest.nativeRequestRef?.nativeId?.includes("other-write")) {
+                    return Deferred.succeed(otherApproval, event.runtimeRequest.id);
+                  }
+                  if (event.runtimeRequest.nativeRequestRef?.nativeId?.includes("wf-retry-write")) {
+                    return Deferred.succeed(retryApproval, event.runtimeRequest.id);
+                  }
+                  if (
+                    event.runtimeRequest.nativeRequestRef?.nativeId?.includes("wf-review-write")
+                  ) {
+                    return Deferred.succeed(reviewApproval, event.runtimeRequest.id);
+                  }
+                  return Deferred.succeed(approval, {
+                    id: event.runtimeRequest.id,
+                    threadId: event.threadId!,
+                  });
+                }
+                if (
+                  event.type === "subagent.updated" &&
+                  event.subagent.workflow !== undefined &&
+                  event.subagent.status === "waiting"
+                ) {
+                  return Deferred.succeed(paused, undefined);
+                }
+                if (
+                  event.type === "subagent.updated" &&
+                  event.subagent.workflow !== undefined &&
+                  event.subagent.status === "cancelled"
+                ) {
+                  return Deferred.succeed(cancelled, undefined);
+                }
+                return Effect.void;
+              }),
+              Stream.takeUntil(
+                (event) =>
+                  event.type === "subagent.updated" &&
+                  event.subagent.workflow !== undefined &&
+                  event.subagent.nativeTaskRef?.nativeId === workflowId &&
+                  event.subagent.status === "completed",
+              ),
+              Stream.runCollect,
+              Effect.forkChild,
+            );
+            yield* startTurn;
+            yield* Deferred.await(firstDone);
+            assert.isTrue(yield* hasPendingBackgroundWork);
+            const request = yield* Deferred.await(approval);
+            assert.isDefined(request.threadId);
+            assert.notEqual(String(request.threadId), "thread-kiro-native-workflow-background");
+            yield* respond(request.id, "accept");
+            yield* startTurnOn(2, "default");
+            yield* Deferred.await(paused);
+            const reviewRequestId = yield* Deferred.await(reviewApproval);
+            const parentRequestId = yield* Deferred.await(parentApproval);
+            const otherRequestId = yield* Deferred.await(otherApproval);
+            assert.isTrue(yield* hasPendingBackgroundWork);
+            yield* stopWorkflow(workflowId);
+            yield* Deferred.await(cancelled);
+            assert.equal(requestStates.get(reviewRequestId), "cancelled");
+            assert.equal(memberStates.get(request.threadId), "completed");
+            assert.equal(toolStates.get(request.threadId), "completed");
+            const reviewThreadId = requestOwners.get(reviewRequestId)!;
+            assert.equal(memberStates.get(reviewThreadId), "cancelled");
+            assert.equal(toolStates.get(reviewThreadId), "interrupted");
+            assert.equal(requestStates.get(parentRequestId), "pending");
+            assert.equal(requestStates.get(otherRequestId), "pending");
+            assert.equal(toolStates.get(requestOwners.get(otherRequestId)!), "running");
+            assert.isTrue(yield* hasPendingBackgroundWork);
+            assert.equal(
+              (yield* Effect.result(respond(reviewRequestId, "accept")))._tag,
+              "Failure",
+            );
+            yield* Effect.promise(() => replayGate.waitForReached("terminal-permission-drained"));
+            replayGate.release("terminal-permission-drained");
+            yield* respond(parentRequestId, "accept");
+            yield* respond(otherRequestId, "accept");
+            yield* Deferred.await(secondDone);
+            assert.isFalse(yield* hasPendingBackgroundWork);
+            yield* startTurnOn(3, "default");
+            const retryRequestId = yield* Deferred.await(retryApproval);
+            assert.equal(requestOwners.get(retryRequestId), requestOwners.get(reviewRequestId));
+            yield* respond(retryRequestId, "accept");
+            const recorded = Array.from(yield* Fiber.join(collected));
+            const workflows = recorded.flatMap((event) =>
+              event.type === "subagent.updated" &&
+              event.subagent.workflow !== undefined &&
+              event.subagent.nativeTaskRef?.nativeId === workflowId
+                ? [event.subagent]
+                : [],
+            );
+            const memberThreadIds = new Set(
+              workflows.flatMap((workflow) =>
+                (workflow.workflow?.agents ?? []).flatMap((member) =>
+                  member.childThreadId === undefined ? [] : [member.childThreadId],
+                ),
+              ),
+            );
+            const makeRoute = (providerTurn: OrchestrationV2ProviderTurn) => {
+              const identity = {
+                threadId: ThreadId.make("thread-kiro-native-workflow-background"),
+                runId: RunId.make(
+                  `run:thread-kiro-native-workflow-background:${providerTurn.ordinal}`,
+                ),
+                attemptId: providerTurn.runAttemptId!,
+                providerThreadId: providerTurn.providerThreadId,
+              };
+              return {
+                identity,
+                state: makeProviderEventRoutingState({ identity, providerTurnId: providerTurn.id }),
+              };
+            };
+            const routes = new Map<number, ReturnType<typeof makeRoute>>();
+            for (const event of recorded) {
+              if (
+                event.type === "provider_turn.updated" &&
+                event.providerTurn.status === "running" &&
+                !routes.has(event.providerTurn.ordinal)
+              ) {
+                routes.set(event.providerTurn.ordinal, makeRoute(event.providerTurn));
+              }
+              let accepted = false;
+              let originalRunAccepted = false;
+              for (const [ordinal, route] of routes) {
+                const [admitted, next] = routeProviderEvent(event, route.identity, route.state);
+                route.state = next;
+                accepted ||= admitted;
+                if (ordinal === 1) originalRunAccepted = admitted;
+              }
+              if (event.type === "app_thread.created") {
+                assert.isTrue(
+                  memberThreadIds.has(event.appThread.id) ? originalRunAccepted : accepted,
+                  `must create linked thread ${event.appThread.id} through its owner`,
+                );
+              }
+            }
+            assert.isFalse(yield* hasPendingBackgroundWork);
+            assert.isFalse(
+              recorded.some(
+                (event) =>
+                  event.type === "runtime_request.updated" &&
+                  event.runtimeRequest.nativeRequestRef?.nativeId?.includes("wf-late-write"),
+              ),
+            );
+            assert.isTrue(workflows.length > 0);
+            assert.deepEqual(
+              [...new Set(workflows.map((entry) => entry.runId))],
+              [RunId.make("run:thread-kiro-native-workflow-background:1")],
+            );
+            assert.equal(workflows.at(-1)?.workflow?.agents.length, 2);
+            assert.isTrue(
+              workflows
+                .at(-1)
+                ?.workflow?.agents.every((member) => member.childThreadId !== undefined),
+            );
+            const childMessages = recorded.flatMap((event) =>
+              event.type === "message.updated" && event.message.role === "assistant"
+                ? [event.message]
+                : [],
+            );
+            const parentReply = childMessages.find((message) => message.text === "Parent reply");
+            const tools = recorded.flatMap((event) =>
+              event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool"
+                ? [event.turnItem]
+                : [],
+            );
+            const inspectionThreadId = childMessages.find(
+              (message) => message.text === "Inspection complete",
+            )?.threadId;
+            const retryThreadId = childMessages.find(
+              (message) => message.text === "Retry complete",
+            )?.threadId;
+            const inspectionTool = tools
+              .filter((tool) => tool.threadId === inspectionThreadId)
+              .at(-1);
+            const retryTool = tools.filter((tool) => tool.threadId === retryThreadId).at(-1);
+            const previousAttemptTool = tools.find((tool) => tool.threadId === retryThreadId);
+            assert.isDefined(inspectionTool);
+            assert.isDefined(retryTool);
+            assert.deepEqual(inspectionTool?.output, {
+              type: "Text",
+              text: "Inspection stdout\nafter",
+            });
+            assert.deepEqual(retryTool?.output, { type: "Text", text: "Retry stdout\nafter" });
+            assert.isDefined(previousAttemptTool);
+            assert.notEqual(previousAttemptTool?.id, retryTool?.id);
+            assert.notEqual(inspectionTool?.id, retryTool?.id);
+            assert.notEqual(inspectionTool?.threadId, retryTool?.threadId);
+            assert.notEqual(inspectionTool?.threadId, parentReply?.threadId);
+            assert.equal(
+              parentReply?.threadId,
+              ThreadId.make("thread-kiro-native-workflow-background"),
+            );
+            assert.isTrue(
+              childMessages.some(
+                (message) =>
+                  message.text === "Inspection complete" &&
+                  message.threadId !== parentReply?.threadId,
+              ),
+            );
+            assert.isFalse(
+              childMessages.some((message) => message.text.includes("Stale prior attempt")),
+            );
+            assert.isTrue(childMessages.some((message) => message.text === "Retry complete"));
+            assert.deepEqual(
+              workflows
+                .find((workflow) => workflow.status === "waiting")
+                ?.workflow?.agents.map((member) => member.childThreadId),
+              workflows.at(-1)?.workflow?.agents.map((member) => member.childThreadId),
+            );
+            assert.isTrue(
+              childMessages.some(
+                (message) =>
+                  message.text === "Review in progress" &&
+                  message.threadId !== parentReply?.threadId,
+              ),
+            );
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped);
+    },
+  );
+
   it.effect("opens a session on a deployment that advertises no Kiro extensions", () =>
     runKiroScript({
       scenario: "no-extensions",

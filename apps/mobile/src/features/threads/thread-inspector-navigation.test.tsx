@@ -4,6 +4,8 @@ import * as React from "react";
 import { act, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
 import { expect, it, vi } from "vite-plus/test";
+import * as DateTime from "effect/DateTime";
+import type { SubagentWorkflowGroup } from "@t3tools/client-runtime/state/subagentRuntime";
 
 const harness = vi.hoisted(() => ({
   dispatch: (_action: unknown) => {},
@@ -11,7 +13,82 @@ const harness = vi.hoisted(() => ({
   getRoute: (): unknown => undefined,
 }));
 
-vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
+vi.mock("react-native", () => ({
+  Platform: { OS: "ios" },
+  Pressable: (props: {
+    readonly children?: React.ReactNode;
+    readonly accessibilityLabel?: string;
+    readonly disabled?: boolean;
+    readonly onPress?: () => void;
+  }) => (
+    <button
+      type="button"
+      aria-label={props.accessibilityLabel}
+      disabled={props.disabled}
+      onClick={props.onPress}
+    >
+      {props.children}
+    </button>
+  ),
+  ScrollView: (props: { readonly children?: React.ReactNode }) => <div>{props.children}</div>,
+  View: (props: { readonly children?: React.ReactNode }) => <div>{props.children}</div>,
+}));
+vi.mock("../../components/ui/AppText", () => ({
+  AppText: (props: { readonly children?: React.ReactNode }) => <span>{props.children}</span>,
+}));
+vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
+vi.mock("../../components/ui/Chip", () => ({
+  Chip: (props: {
+    readonly accessibilityLabel?: string;
+    readonly label: string;
+    readonly onPress?: () => void;
+  }) => (
+    <button
+      type="button"
+      aria-label={props.accessibilityLabel ?? props.label}
+      onClick={props.onPress}
+    />
+  ),
+}));
+vi.mock("../../components/ui/ListRowLayout", () => ({
+  ListRowLayout: (props: { readonly label: string; readonly description: string }) => (
+    <span>{`${props.label} ${props.description}`}</span>
+  ),
+}));
+vi.mock("../../components/ui/ListSection", () => ({
+  ListSection: (props: { readonly children?: React.ReactNode }) => <div>{props.children}</div>,
+}));
+vi.mock("../../components/ui/RowPressable", () => ({
+  RowPressable: (props: {
+    readonly children?: React.ReactNode;
+    readonly accessibilityLabel?: string;
+    readonly disabled?: boolean;
+    readonly onPress?: () => void;
+  }) => (
+    <button
+      type="button"
+      aria-label={props.accessibilityLabel}
+      disabled={props.disabled}
+      onClick={props.onPress}
+    >
+      {props.children}
+    </button>
+  ),
+}));
+vi.mock("../../state/entities", () => ({
+  useEnvironmentServerConfig: () => null,
+  useThreadShell: () => null,
+}));
+vi.mock("./SubagentStatusDot", () => ({
+  SUBAGENT_TONE_TEXT_CLASS: { working: "", completed: "", failed: "", stopped: "" },
+  SubagentStatusDot: () => null,
+}));
+vi.mock("./SubagentStopButton", () => ({ SubagentStopButton: () => null }));
+vi.mock("./use-visible-second-clock", () => ({ useVisibleSecondClock: () => 0 }));
+vi.mock("@t3tools/shared/orchestrationTiming", () => ({
+  deriveSubagentElapsedMs: () => null,
+  formatDuration: () => "",
+}));
 vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
   useAdaptiveWorkspaceLayout: () => ({ fileInspector: { supported: true } }),
 }));
@@ -29,6 +106,14 @@ vi.mock("@react-navigation/native", async () => {
 
 import { useOpenThreadInspector } from "./thread-inspector-navigation";
 import { useOpenLinkedThread } from "./useOpenLinkedThread";
+import { ThreadWorkflowGroup } from "./ThreadWorkflowGroup";
+import {
+  EnvironmentId,
+  NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 
 const requireNavigation = NodeModule.createRequire(
   NodeModule.createRequire(import.meta.url).resolve("@react-navigation/native/package.json"),
@@ -130,6 +215,107 @@ it("opens a completion link in the parent inspector", () => {
     params: {
       ...screen.source,
       inspector: { type: "thread", environmentId: screen.source.environmentId, threadId: "child" },
+    },
+  });
+});
+
+it("opens a workflow member from Agents while its child shell is not cached", () => {
+  using screen = setup(true);
+  const childThreadId = ThreadId.make("workflow-child");
+  const member = {
+    id: "workflow:agent:0",
+    kind: "workflow_agent",
+    title: "Review implementation",
+    role: null,
+    model: null,
+    effort: null,
+    status: "completed",
+    activationCount: 1,
+    usage: null,
+    progress: null,
+    lastToolName: null,
+    result: null,
+    error: null,
+    outputFile: null,
+    parentAgentId: "workflow",
+    agentIndex: 0,
+    phaseIndex: 0,
+    phaseTitle: "Review",
+    attempt: null,
+    workflowName: "Review workflow",
+    phases: [],
+    runHandles: null,
+    childThreadId,
+    recentActivity: [],
+    firstSeenAt: "2026-11-01T00:00:00.000Z",
+    startedAt: "2026-11-01T00:00:00.000Z",
+    completedAt: "2026-11-01T00:00:01.000Z",
+    updatedAt: "2026-11-01T00:00:01.000Z",
+  } as const;
+  const coordinator = {
+    id: NodeId.make("workflow-node"),
+    threadId: ThreadId.make("parent"),
+    runId: null,
+    parentNodeId: NodeId.make("root-node"),
+    origin: "provider_native" as const,
+    createdBy: "agent" as const,
+    driver: ProviderDriverKind.make("kiro"),
+    providerInstanceId: ProviderInstanceId.make("kiro"),
+    providerThreadId: null,
+    childThreadId: ThreadId.make("workflow-coordinator"),
+    nativeTaskRef: null,
+    prompt: "Run workflow",
+    title: "Review workflow",
+    model: null,
+    status: "completed" as const,
+    result: null,
+    startedAt: null,
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe("2026-11-01T00:00:01.000Z"),
+  };
+  const group = {
+    workflow: { ...member, id: "workflow", kind: "workflow", title: "Review workflow" },
+    phases: [{ index: 0, title: "Review", members: [member], state: "done", settledCount: 1 }],
+    unphasedMembers: [],
+  } satisfies SubagentWorkflowGroup;
+  function WorkflowProbe() {
+    const open = useOpenThreadInspector();
+    return (
+      <ThreadWorkflowGroup
+        environmentId={EnvironmentId.make(screen.source.environmentId)}
+        subagent={coordinator}
+        group={group}
+        onOpen={(threadId) =>
+          open(screen.source, {
+            type: "thread",
+            environmentId: screen.source.environmentId,
+            threadId,
+          })
+        }
+      />
+    );
+  }
+  const container = document.createElement("div");
+  const root = createRoot(container);
+  using _root = { [Symbol.dispose]: () => act(() => root.unmount()) };
+  act(() => root.render(<WorkflowProbe />));
+  act(() =>
+    container.querySelector<HTMLButtonElement>('button[aria-label*="Review workflow"]')?.click(),
+  );
+  const memberRow = container.querySelector<HTMLButtonElement>(
+    'button[aria-label*="Review implementation"]',
+  );
+  expect(memberRow?.disabled).toBe(false);
+  act(() => memberRow?.click());
+  expect(screen.state.routes.at(-1)).toMatchObject({
+    key: screen.parentKey,
+    params: {
+      ...screen.source,
+      inspector: {
+        type: "thread",
+        environmentId: screen.source.environmentId,
+        threadId: childThreadId,
+      },
     },
   });
 });

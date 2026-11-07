@@ -3,6 +3,7 @@ import {
   CommandId,
   EnvironmentId,
   MessageId,
+  NodeId,
   type OrchestrationV2Command,
   type OrchestrationV2Run,
   type OrchestrationV2ProviderThread,
@@ -871,5 +872,76 @@ it.effect("Force stop refuses once a newer run has started, before killing anyth
     }).pipe(Effect.provide(layerTest));
     expect(error.reason).toBe("superseded");
     expect(killed).toBe(false);
+  }),
+);
+
+it.effect("stops a waiting native Kiro workflow through its provider runtime", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:thread-management:kiro-workflow");
+    const providerThreadId = ProviderThreadId.make("provider-thread:kiro-workflow");
+    const providerSessionId = ProviderSessionId.make("provider-session:kiro-workflow");
+    const subagentId = NodeId.make("node:kiro-workflow");
+    const taskId = "kiro-task";
+    const providerThread = {
+      id: providerThreadId,
+      appThreadId: threadId,
+      providerInstanceId: ProviderInstanceId.make("kiro"),
+      driver: ProviderDriverKind.make("kiro"),
+      providerSessionId,
+    } as unknown as OrchestrationV2ProviderThread;
+    const subagent = {
+      id: subagentId,
+      threadId,
+      origin: "provider_native",
+      driver: ProviderDriverKind.make("kiro"),
+      providerInstanceId: ProviderInstanceId.make("kiro"),
+      providerThreadId,
+      runId: null,
+      nativeTaskRef: {
+        driver: ProviderDriverKind.make("kiro"),
+        nativeId: taskId,
+        strength: "strong",
+      },
+      workflow: { phases: [], agents: [] },
+      status: "waiting",
+    };
+    const stopped: Array<{ providerThreadId: ProviderThreadId; taskId: string }> = [];
+    const runtime = {
+      stopTask: ({
+        providerThread: target,
+        taskId: targetId,
+      }: {
+        readonly providerThread: OrchestrationV2ProviderThread;
+        readonly taskId: string;
+      }) =>
+        Effect.sync(() => stopped.push({ providerThreadId: target.id, taskId: targetId })).pipe(
+          Effect.asVoid,
+        ),
+    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    const layerTest = ThreadManagementService.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(Orchestrator.OrchestratorV2)({
+            getThreadRecords: () =>
+              Effect.succeed({
+                thread: { id: threadId, deletedAt: null },
+                runs: [],
+                subagents: [subagent],
+                providerThreads: [providerThread],
+              } as unknown as OrchestrationV2ThreadProjection),
+          }),
+          Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+            get: () => Effect.succeedSome(runtime),
+          }),
+        ),
+      ),
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(layerReceiptsTest),
+    );
+    yield* Effect.gen(function* () {
+      const service = yield* ThreadManagementService.ThreadManagementService;
+      yield* service.stopWorkflow({ threadId, subagentId });
+    }).pipe(Effect.provide(layerTest));
+    expect(stopped).toEqual([{ providerThreadId, taskId }]);
   }),
 );
