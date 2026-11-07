@@ -382,7 +382,7 @@ export interface AcpAdapterV2Flavor {
     selection: ModelSelection,
     session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
   ) => number | undefined;
-  /** Null clears the saved reading; undefined keeps one measured under the same model. */
+  /** Null clears the reading; undefined permits compatible cached or persisted usage. */
   readonly contextUsageFromSession?: (input: {
     readonly selection: ModelSelection;
     readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
@@ -1977,13 +1977,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           });
         });
         /**
-         * Settles a session's reading for the model about to run; undefined leaves it as it is.
-         * A window and threshold from another or an unknown model never carry over. A reading newer
-         * than a pending load wins; an older one only outlives a load that reports nothing.
+         * Persisted readings have no model tag, so their window must match before reuse.
+         * Once accepted, a reading stays bound to that selection until fresh telemetry arrives.
          */
         const settleContextUsage = Effect.fnUntraced(function* (
           sessionId: string,
           selection: ModelSelection,
+          fallbackUsage: ThreadTokenUsageSnapshot | null | undefined,
         ) {
           if (flavor.contextUsageFromSession === undefined) return undefined;
           const pending = yield* Ref.modify(pendingLoadedSession, (current) =>
@@ -1992,16 +1992,29 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               : ([null, current] as const),
           );
           const cached = (yield* Ref.get(contextUsageBySessionId)).get(sessionId);
-          const fromOtherModel =
-            cached !== undefined && contextUsageModelBySessionId.get(sessionId) !== selection.model;
-          if (pending === null && !fromOtherModel) return undefined;
+          const hasCurrentModelReading =
+            cached !== undefined && contextUsageModelBySessionId.get(sessionId) === selection.model;
+          if (pending === null && hasCurrentModelReading) return undefined;
           const loaded =
             pending === null
               ? undefined
               : flavor.contextUsageFromSession({ selection, session: pending.setup });
-          const usage = fromOtherModel
-            ? (loaded ?? null)
-            : cached !== undefined && cached !== pending?.savedUsage
+          const session = yield* Ref.get(activeSessionSetup);
+          const knownWindow =
+            session === null ? undefined : flavor.getModelContextWindow?.(selection, session);
+          const compatibleFallback =
+            cached === undefined &&
+            !contextUsageModelBySessionId.has(sessionId) &&
+            fallbackUsage != null &&
+            knownWindow !== undefined &&
+            fallbackUsage.maxTokens === knownWindow
+              ? fallbackUsage
+              : null;
+          const usage = !hasCurrentModelReading
+            ? loaded === undefined
+              ? compatibleFallback
+              : loaded
+            : cached !== pending?.savedUsage
               ? cached
               : loaded;
           if (usage === undefined) return undefined;
@@ -8245,6 +8258,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   const settledContextUsage = yield* settleContextUsage(
                     requestedSessionId,
                     turnInput.modelSelection,
+                    turnInput.providerThread.contextUsage,
                   );
                   const rememberedContextUsage = (yield* Ref.get(contextUsageBySessionId)).get(
                     requestedSessionId,
@@ -8850,7 +8864,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     yield* Ref.set(activeInteractionMode, nextRuntimePolicy.interactionMode);
                   }
                   const settledContextUsage = yield* runtimeCallbackPermit.withPermit(
-                    settleContextUsage(sessionId, nextSelection),
+                    settleContextUsage(
+                      sessionId,
+                      nextSelection,
+                      threadInput.providerThread.contextUsage,
+                    ),
                   );
                   const now = yield* DateTime.now;
                   return {

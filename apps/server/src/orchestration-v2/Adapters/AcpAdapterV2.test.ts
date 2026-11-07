@@ -414,6 +414,7 @@ describe("acpToolCallDiffPatch", () => {
 const openContextUsageRuntime = Effect.fnUntraced(function* (input: {
   readonly name: string;
   readonly initialNativeThreadId?: string;
+  readonly getModelContextWindow?: AcpAdapterV2Flavor["getModelContextWindow"];
   readonly contextUsageFromSession: NonNullable<AcpAdapterV2Flavor["contextUsageFromSession"]>;
   readonly contextUsageFromSessionUpdate?: AcpAdapterV2Flavor["contextUsageFromSessionUpdate"];
   /** Sent while a session activates, as an agent replays history before answering the load. */
@@ -440,6 +441,9 @@ const openContextUsageRuntime = Effect.fnUntraced(function* (input: {
       driver: ACP_TEST_DRIVER,
       capabilities: AcpProviderCapabilitiesV2,
       contextUsageFromSession: input.contextUsageFromSession,
+      ...(input.getModelContextWindow === undefined
+        ? {}
+        : { getModelContextWindow: input.getModelContextWindow }),
       ...(input.contextUsageFromSessionUpdate === undefined
         ? {}
         : { contextUsageFromSessionUpdate: input.contextUsageFromSessionUpdate }),
@@ -4056,6 +4060,10 @@ describe("AcpAdapterV2", () => {
         });
       const sessionId = providerThread.nativeThreadRef?.nativeId ?? "";
       const reading = { usedTokens: 900, maxTokens: 1_000 };
+      yield* update({
+        sessionId,
+        update: { sessionUpdate: "usage_update", used: 900, size: 1_000 },
+      });
       const now = yield* DateTime.now;
       yield* runtime.startTurn(
         makeTurnInput({
@@ -4105,7 +4113,7 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.live("keeps the saved reading when a load reports nothing", () =>
+  it.live("keeps a model-attributed reading when a load reports nothing", () =>
     Effect.gen(function* () {
       const { runtime, threadId, instanceId, runtimePolicy, selection, providerThread, update } =
         yield* openContextUsageRuntime({
@@ -4270,6 +4278,56 @@ describe("AcpAdapterV2", () => {
       const afterUnattributed = threadUsages(yield* turnOn("small", 5, usageThread));
       assert.isNotEmpty(afterUnattributed);
       assert.isEmpty(afterUnattributed.filter((usage) => usage != null));
+
+      const restored = yield* openContextUsageRuntime({
+        name: "restored-model-change",
+        initialNativeThreadId: "persisted-session",
+        getModelContextWindow: (selection) => contextWindow(selection.model),
+        contextUsageFromSession: () => undefined,
+      });
+      const resumedAfterRestart = yield* restored.runtime.resumeThread({
+        providerThread: {
+          ...restored.providerThread,
+          contextUsage: { usedTokens: 900, maxTokens: 1_000 },
+        },
+        modelSelection: restored.selection("small"),
+        runtimePolicy: restored.runtimePolicy,
+      });
+      assert.deepEqual(resumedAfterRestart.contextUsage, { usedTokens: 900, maxTokens: 1_000 });
+      const restartedAt = yield* DateTime.now;
+      yield* restored.runtime.startTurn(
+        makeTurnInput({
+          threadId: restored.threadId,
+          providerThread: resumedAfterRestart,
+          instanceId: restored.instanceId,
+          runtimePolicy: restored.runtimePolicy,
+          now: restartedAt,
+          ordinal: 1,
+          modelSelection: restored.selection("large"),
+        }),
+      );
+      const afterRestart = threadUsages(yield* collectUntilTerminal(restored.runtime));
+      assert.isNotEmpty(afterRestart);
+      assert.isEmpty(afterRestart.filter((usage) => usage != null));
+
+      for (const model of ["large", "unknown"]) {
+        const changed = yield* openContextUsageRuntime({
+          name: `restored-${model}`,
+          initialNativeThreadId: "persisted-session",
+          getModelContextWindow: (selection) =>
+            selection.model === "small" ? 1_000 : selection.model === "large" ? 2_000 : undefined,
+          contextUsageFromSession: () => undefined,
+        });
+        const resumed = yield* changed.runtime.resumeThread({
+          providerThread: {
+            ...changed.providerThread,
+            contextUsage: { usedTokens: 900, maxTokens: 1_000 },
+          },
+          modelSelection: changed.selection(model),
+          runtimePolicy: changed.runtimePolicy,
+        });
+        assert.isNull(resumed.contextUsage);
+      }
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
