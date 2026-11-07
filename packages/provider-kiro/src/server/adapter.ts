@@ -61,8 +61,8 @@ const KIRO_FALLBACK_DEFAULT_MODEL = "auto";
 const DEFAULT_KIRO_SETTINGS = Schema.decodeSync(KiroSettings)({});
 
 /**
- * Kiro model ids and context windows documented at https://kiro.dev/docs/models/.
- * The docs round GPT-5.6 to 1M; `--list-models --format json` reports its exact window.
+ * Kiro windows: https://kiro.dev/docs/models/; exact GPT windows come from the CLI catalog.
+ * DeepSeek and MiniMax values were read from kiro-cli 3.1.0.
  */
 const KIRO_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   "gpt-5.6-sol": 986_000,
@@ -83,10 +83,10 @@ const KIRO_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
   "claude-sonnet-4.0": 200_000,
   "claude-haiku-4.5": 200_000,
   "kimi-k3": 1_000_000,
-  "deepseek-3.2": 128_000,
-  "minimax-m2.5": 200_000,
+  "deepseek-3.2": 164_000,
+  "minimax-m2.5": 196_000,
   "glm-5": 200_000,
-  "minimax-m2.1": 200_000,
+  "minimax-m2.1": 196_000,
   "qwen3-coder-next": 256_000,
 };
 

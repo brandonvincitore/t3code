@@ -85,6 +85,9 @@ it("reports context windows only for explicit known Kiro models", () => {
   assert.equal(kiroModelContextWindow(selection("claude-opus-5.5")), 1_000_000);
   assert.equal(kiroModelContextWindow(selection("claude-haiku-4.5")), 200_000);
   assert.equal(kiroModelContextWindow(selection("gpt-5.6-sol")), 986_000);
+  assert.equal(kiroModelContextWindow(selection("deepseek-3.2")), 164_000);
+  assert.equal(kiroModelContextWindow(selection("minimax-m2.5")), 196_000);
+  assert.equal(kiroModelContextWindow(selection("minimax-m2.1")), 196_000);
   assert.isUndefined(kiroModelContextWindow(selection("auto")));
   assert.isUndefined(kiroModelContextWindow(selection("default")));
   assert.isUndefined(kiroModelContextWindow(selection("custom-model")));
