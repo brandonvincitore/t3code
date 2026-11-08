@@ -44,6 +44,14 @@ Kiro threads load the MCP servers in your Kiro configuration. To use one that si
 sign in to it once with `kiro-cli` on the machine running the T3 Code server (`/mcp`, then
 re-authenticate). Kiro threads in T3 Code reuse that sign-in.
 
+## Skills
+
+Your Kiro skills in `~/.kiro/skills` appear in the `/` and `$` menus once a Kiro session has started
+on this server, for example after the first message in a Kiro thread. Skills in a project's
+`.kiro/skills` are not listed in the menus. Kiro runs a skill only when it starts the message, so
+put the skill first. A skill you add later appears after a Kiro session reports it, and one you
+remove stays listed until the server restarts.
+
 ## Permission Modes
 
 Kiro asks before tool calls such as writes and commands, and T3 Code answers by the permission mode:

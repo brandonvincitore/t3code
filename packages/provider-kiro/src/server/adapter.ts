@@ -51,6 +51,12 @@ import {
   makeKiroAcpRuntime,
 } from "./acpSupport.ts";
 import { makeKiroSecretStorage } from "./secretStorage.ts";
+import {
+  type KiroSkills,
+  kiroSkillCommandText,
+  makeKiroSkills,
+  recordKiroSkills,
+} from "./skills.ts";
 
 export const KIRO_PROVIDER = ProviderDriverKind.make("kiro");
 /** T3's slug for "Kiro default", and Kiro's documented default model id. */
@@ -194,6 +200,8 @@ export interface KiroAdapterV2Options {
    * default). Absent, it is `auto`.
    */
   readonly defaultModel?: Effect.Effect<string>;
+  /** Where the adapter records the skills Kiro sessions advertise; the driver publishes them. */
+  readonly skills?: KiroSkills;
   /** Replaces the `kiro-cli` launch (replay tests). Kiro's session setup still applies. */
   readonly makeRuntime?: (
     input: AcpAdapterV2RuntimeInput,
@@ -527,6 +535,7 @@ function kiroPromptFailure(cause: unknown) {
 function makeKiroAcpAdapterFlavor(
   options: KiroAdapterV2Options,
   secretStorage: Effect.Success<ReturnType<typeof makeKiroSecretStorage>>,
+  skills: KiroSkills,
 ): AcpAdapterV2Flavor {
   const makeNativeRuntime =
     options.makeRuntime ??
@@ -557,6 +566,8 @@ function makeKiroAcpAdapterFlavor(
     normalizeSessionUpdate: (notification) =>
       stripSteeringNote(normalizeKiroSessionUpdate(notification)),
     extractSubagentUpdate: extractKiroSubagentUpdate,
+    onAvailableCommandsUpdate: (commands) => recordKiroSkills(skills, commands),
+    rewriteUserText: (text) => kiroSkillCommandText(skills, text),
     // See applyKiroModelSelection: `model` arrives after session/new.
     modelOptionArrivesLate: true,
     applyModelSelection: applyKiroModelSelection(
@@ -590,7 +601,11 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
   const secretStorage = yield* makeKiroSecretStorage(options.environment);
   return yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
-    flavor: makeKiroAcpAdapterFlavor(options, secretStorage),
+    flavor: makeKiroAcpAdapterFlavor(
+      options,
+      secretStorage,
+      options.skills ?? (yield* makeKiroSkills()),
+    ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.testHooks === undefined ? {} : { testHooks: options.testHooks }),
@@ -610,6 +625,7 @@ export type KiroAdapterV2DriverEnv =
 /** `defaultModel` reads Kiro's id for "Kiro default" from the provider snapshot. */
 export const makeKiroAdapterV2Driver = (
   defaultModel: Effect.Effect<string>,
+  skills: KiroSkills,
 ): ProviderAdapterDriver<KiroSettings, KiroAdapterV2DriverEnv> => ({
   driverKind: KIRO_PROVIDER,
   configSchema: KiroSettings,
@@ -626,6 +642,7 @@ export const makeKiroAdapterV2Driver = (
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
         selfInvocation,
         defaultModel,
+        skills,
         nativeLogging: (threadId) =>
           makeNativeLogger({
             nativeEventLogger: providerEventLoggers.native,
