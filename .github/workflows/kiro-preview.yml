@@ -1,15 +1,15 @@
-name: Kiro preview
+name: Kiro refinement
 
 on:
   push:
-    branches: [codex/kiro-preview]
+    branches: [codex/kiro-refinement]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: kiro-preview-${{ github.ref }}
+  group: kiro-refinement-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
