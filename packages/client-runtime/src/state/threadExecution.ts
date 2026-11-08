@@ -621,6 +621,9 @@ export interface ProviderGoalPresentation {
   readonly objective: string;
   readonly usage: string | null;
   readonly canResume: boolean;
+  readonly progressPercent: number | null;
+  readonly progressLabel: string;
+  readonly progressSummary: string | null;
 }
 
 const PROVIDER_GOAL_TITLES: Record<OrchestrationV2ProviderGoal["status"], string> = {
@@ -643,6 +646,7 @@ export function presentProviderGoal(
   goal: OrchestrationV2ProviderGoal,
   working: boolean,
 ): ProviderGoalPresentation {
+  const progressPercent = goal.status === "complete" ? 100 : (goal.progress?.percent ?? null);
   const usage: Array<string> = [];
   if (goal.tokensUsed !== undefined && goal.tokensUsed > 0) {
     usage.push(
@@ -662,6 +666,12 @@ export function presentProviderGoal(
     objective: goal.objective,
     usage: usage.length === 0 ? null : usage.join(" · "),
     canResume: goal.status !== "active" && goal.status !== "complete",
+    progressPercent,
+    progressLabel:
+      progressPercent === null
+        ? "Progress unknown"
+        : `${goal.status === "complete" ? "" : "~"}${progressPercent}% complete`,
+    progressSummary: goal.status === "complete" ? null : (goal.progress?.summary ?? null),
   };
 }
 

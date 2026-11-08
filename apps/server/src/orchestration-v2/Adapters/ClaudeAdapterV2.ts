@@ -1986,6 +1986,7 @@ export const CLAUDE_T3_MCP_TOOL_WILDCARD = "mcp__t3-code__*";
 
 // Keep in sync with OrchestratorToolkit Tool.Readonly annotations; ClaudeAdapterV2.test.ts checks this.
 export const CLAUDE_READ_ONLY_T3_MCP_ALLOWED_TOOLS: ReadonlyArray<string> = [
+  "mcp__t3-code__get_goal_progress",
   "mcp__t3-code__orchestrator_capabilities",
   "mcp__t3-code__list_scheduled_tasks",
   "mcp__t3-code__t3_thread_list",
@@ -2086,7 +2087,9 @@ function nextClaudeGoal(
     const text = textFromClaudeContent(message.message.content).trim();
     if (text.startsWith(CLAUDE_GOAL_SET_PREFIX)) {
       const objective = text.slice(CLAUDE_GOAL_SET_PREFIX.length).trim();
-      return objective.length === 0 ? undefined : { objective, status: "active", checks: 0 };
+      return objective.length === 0
+        ? undefined
+        : { id: message.uuid, objective, status: "active", checks: 0 };
     }
     if (text.startsWith("Goal cleared: ") || text.startsWith("No goal set")) return null;
     const active = CLAUDE_GOAL_ACTIVE.exec(text);
@@ -8204,6 +8207,7 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
                   )
                 ) {
                   goalsByNativeThread.set(nativeThreadId, {
+                    ...(goal.id === undefined ? {} : { id: goal.id }),
                     objective: goal.objective,
                     status: "complete",
                     ...(goal.checks === undefined ? {} : { checks: goal.checks }),

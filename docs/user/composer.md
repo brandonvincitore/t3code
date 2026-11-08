@@ -299,6 +299,11 @@ until it judges the goal met. The thread shows **Goal** while it works, and a
 line at the end of the thread (above the composer on mobile) shows the goal and
 its progress.
 
+The battery shows the agent's estimated completion percentage. Open the goal's
+details for what remains. Progress stays unknown until the agent reports an
+estimate, and can decrease if it discovers more work. A full battery means the
+goal is complete; token usage is tracked separately.
+
 - `/goal` alone shows the current goal. `/goal clear` removes it.
 - Codex also supports `/goal pause` and `/goal resume`. Stopping a Codex goal
   pauses it, and so does Codex ending its work without meeting the goal.

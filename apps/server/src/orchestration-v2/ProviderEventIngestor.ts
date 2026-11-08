@@ -502,10 +502,36 @@ export const layer: Layer.Layer<
               ];
             case "provider_thread.updated": {
               const threadId = input.event.providerThread.appThreadId ?? input.threadId;
+              const incoming = input.event.providerThread;
+              const previous =
+                incoming.goal == null ||
+                (incoming.driver !== "codex" && incoming.driver !== "claudeAgent")
+                  ? undefined
+                  : (yield* projections.getThreadRecords(threadId, [
+                      "providerThreads",
+                    ])).providerThreads.find((thread) => thread.id === incoming.id);
+              const sameGoal =
+                incoming.goal != null &&
+                previous?.goal != null &&
+                incoming.goal.objective === previous.goal.objective &&
+                (incoming.goal.id === previous.goal.id || incoming.goal.id === undefined);
               const updated = yield* makeDomainEvent(input, {
                 type: "provider-thread.updated",
                 threadId,
-                payload: input.event.providerThread,
+                payload: {
+                  ...incoming,
+                  ...(sameGoal
+                    ? {
+                        goal: {
+                          ...incoming.goal!,
+                          ...(previous?.goal?.id === undefined ? {} : { id: previous.goal.id }),
+                          ...(previous?.goal?.progress === undefined
+                            ? {}
+                            : { progress: previous.goal.progress }),
+                        },
+                      }
+                    : {}),
+                },
               });
               return input.event.retainedNativeTurnIds === undefined
                 ? [updated]
@@ -819,7 +845,13 @@ export const layer: Layer.Layer<
               (effect) =>
                 input.event.type === "app_thread.created"
                   ? threadCommands.withLock(input.event.appThread.id, effect)
-                  : effect,
+                  : input.event.type === "provider_thread.updated" &&
+                      (input.event.driver === "codex" || input.event.driver === "claudeAgent")
+                    ? threadCommands.withLock(
+                        input.event.providerThread.appThreadId ?? input.threadId,
+                        effect,
+                      )
+                    : effect,
             ),
         ),
     });

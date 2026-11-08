@@ -1,5 +1,7 @@
 import {
   OrchestratorMcpCapabilitiesInput,
+  OrchestratorMcpGoalProgressInput,
+  OrchestratorMcpGoalProgressResult,
   OrchestratorMcpCapabilitiesResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpEnvironmentLinkInput,
@@ -55,6 +57,27 @@ const dependencies = [
   ThreadManagementService.ThreadManagementService,
   OrchestratorMcpService.OrchestratorMcpService,
 ];
+
+const GetGoalProgressTool = Tool.make("get_goal_progress", {
+  description:
+    "Read the calling thread's active native goal and its latest estimated progress. Keep goalId for report_goal_progress during this turn. Only agents inside a T3 thread with an active Codex or Claude goal can use this.",
+  success: OrchestratorMcpGoalProgressResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false);
+
+const ReportGoalProgressTool = Tool.make("report_goal_progress", {
+  description:
+    "Record your estimate of progress toward the calling thread's active goal. First get_goal_progress this turn. Use 0–99 percent and a brief factual summary of completed work and what remains. Estimates may decrease when scope changes. This does not change native goal status or token usage; only native completion displays 100%. Report after meaningful milestones, not every tool call.",
+  parameters: OrchestratorMcpGoalProgressInput,
+  success: OrchestratorMcpGoalProgressResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+}).annotate(Tool.Destructive, false);
 /** Listing this environment's links. */
 const linkDependencies = [...dependencies, PeerForwarding.PeerForwarding];
 /** Making and forgetting links. */
@@ -350,6 +373,8 @@ const EnvironmentUnlinkTool = Tool.make("t3_environment_unlink", {
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenWhileLinksOff);
 
 export const OrchestratorToolkit = Toolkit.make(
+  GetGoalProgressTool,
+  ReportGoalProgressTool,
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
   TaskStatusTool,

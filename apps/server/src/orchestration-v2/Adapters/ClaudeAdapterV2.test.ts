@@ -18832,14 +18832,15 @@ describe("ClaudeAdapterV2 background wake turns", () => {
         const terminal = yield* Queue.take(harness.terminalReceipts);
         assert.equal(terminal.status, "completed");
         assert.deepEqual(goalStatuses(harness.events), [
-          { objective: condition, status: "active", checks: 0 },
+          { id: "goal-set", objective: condition, status: "active", checks: 0 },
           {
+            id: "goal-set",
             objective: condition,
             status: "active",
             checks: 1,
             lastCheck: "One test still fails.",
           },
-          { objective: condition, status: "complete", checks: 1 },
+          { id: "goal-set", objective: condition, status: "complete", checks: 1 },
         ]);
       }).pipe(
         Effect.scoped,
@@ -18890,6 +18891,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           }
           assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
           assert.deepEqual(goalStatuses(harness.events).at(-1), {
+            id: "goal-background-set",
             objective: condition,
             status: "active",
             checks: 0,
@@ -18931,6 +18933,7 @@ describe("ClaudeAdapterV2 background wake turns", () => {
           );
           assert.equal((yield* Queue.take(harness.terminalReceipts)).status, "completed");
           assert.deepEqual(goalStatuses(harness.events).at(-1), {
+            id: "goal-background-set",
             objective: condition,
             status: "complete",
             checks: 0,

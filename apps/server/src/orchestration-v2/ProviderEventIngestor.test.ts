@@ -503,6 +503,57 @@ layer("ProviderEventIngestorV2", (it) => {
         ["provider-thread.updated"],
       );
       assert.equal(latestThreadSequence, 2);
+
+      const progress = {
+        percent: 60,
+        summary: "Core implementation complete",
+        updatedAt: DateTime.formatIso(now),
+      };
+      const goal = { id: "goal:original", objective: "Ship it", status: "active" as const };
+      yield* eventSink.write({
+        events: [
+          {
+            id: yield* idAllocator.allocate.event({ threadId: threadEvent.threadId }),
+            type: "provider-thread.updated",
+            threadId: threadEvent.threadId,
+            occurredAt: now,
+            payload: { ...providerThread, goal: { ...goal, progress } },
+          },
+        ],
+      });
+      const refresh = (next: OrchestrationV2ProviderThread["goal"]) =>
+        ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+          event: {
+            type: "provider_thread.updated",
+            driver: CODEX_DRIVER,
+            providerThread: { ...providerThread, goal: next },
+          },
+        });
+      for (const status of ["active", "paused", "active", "complete"] as const) {
+        yield* refresh({ ...goal, status, tokensUsed: 123 });
+        const refreshed = (yield* projectionStore.getThreadProjection(threadEvent.threadId))
+          .providerThreads[0]?.goal;
+        assert.deepEqual(refreshed?.progress, progress);
+        assert.equal(refreshed?.tokensUsed, 123);
+        assert.equal(refreshed?.status, status);
+      }
+      yield* refresh({ ...goal, id: "goal:replacement" });
+      assert.isUndefined(
+        (yield* projectionStore.getThreadProjection(threadEvent.threadId)).providerThreads[0]?.goal
+          ?.progress,
+      );
+      yield* refresh(null);
+      assert.isNull(
+        (yield* projectionStore.getThreadProjection(threadEvent.threadId)).providerThreads[0]?.goal,
+      );
+      yield* refresh(goal);
+      assert.isUndefined(
+        (yield* projectionStore.getThreadProjection(threadEvent.threadId)).providerThreads[0]?.goal
+          ?.progress,
+      );
     }),
   );
 

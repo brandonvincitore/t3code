@@ -175,7 +175,8 @@ export function FloatingWorkingControl(props: {
     props.status?.kind === "connection" ||
     props.status?.kind === "extension" ||
     props.status?.kind === "child-input" ||
-    props.status?.kind === "background";
+    props.status?.kind === "background" ||
+    props.status?.kind === "goal";
   const capsuleInteractive =
     statusInteractive ||
     extensionStatus !== null ||
@@ -555,15 +556,27 @@ function FloatingStatusLabel(props: {
       <StatusLabelRow
         key="goal"
         accessibilityLabel={props.status.accessibilityLabel}
+        accessibilityRole="button"
         className="gap-2"
         onLayout={props.onLayout}
+        onPress={props.status.onPress}
       >
-        <SymbolView
-          name="target"
-          size={13}
-          tintColorClassName="accent-foreground"
-          type="monochrome"
-        />
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          className="h-2 w-3.5 justify-center rounded-[2px] border border-foreground px-px"
+        >
+          <View
+            className="h-[4px] rounded-[1px] bg-foreground"
+            style={{
+              width: props.status.progressPercent === null ? 0 : `${props.status.progressPercent}%`,
+            }}
+          />
+          <View className="absolute -right-[3px] top-px h-1 w-px rounded-r-[1px] bg-foreground" />
+        </View>
+        {props.status.progressPercent === null ? (
+          <Text className="font-t3-medium text-[9px] text-foreground">?</Text>
+        ) : null}
         <Text className="shrink font-t3-medium text-xs text-foreground" numberOfLines={1}>
           {props.status.label}
         </Text>

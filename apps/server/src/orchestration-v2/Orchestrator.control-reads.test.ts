@@ -5,6 +5,7 @@ import {
   EventId,
   NodeId,
   type OrchestrationV2DomainEvent,
+  type OrchestrationV2ProviderThread,
   PlanId,
   ProjectId,
   ProviderDriverKind,
@@ -37,6 +38,7 @@ import * as EffectOutbox from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { goalProgressId } from "./goalProgress.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -60,6 +62,131 @@ const layerTest = Layer.mergeAll(
     ProviderAdapterRegistry.layerFromAdapters([adapter]),
     { databaseLayer: layerDatabase, runEffectWorker: false },
   ),
+);
+
+it.effect("persists revised goal estimates and rejects reports from stale goals or callers", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:goal-progress");
+    const sessionId = ProviderSessionId.make("session:goal-progress");
+    const now = yield* DateTime.now;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      commandId: CommandId.make("create:goal-progress"),
+      threadId,
+      projectId: ProjectId.make("project:goal-progress"),
+      title: "Goal progress",
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      createdBy: "user",
+      creationSource: "web",
+    });
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: ProviderThreadId.make("provider-thread:goal-progress"),
+      driver: adapter.driver,
+      providerInstanceId: instanceId,
+      providerSessionId: sessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: null,
+      nativeConversationHeadRef: null,
+      status: "active",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+      goal: { id: "goal:first", objective: "Ship the feature", status: "active" },
+    };
+    const setProviderThread = (thread: OrchestrationV2ProviderThread, suffix: string) =>
+      projections.apply({
+        id: EventId.make(`goal-progress:${suffix}`),
+        type: "provider-thread.updated",
+        threadId,
+        occurredAt: now,
+        payload: thread,
+      });
+    yield* setProviderThread(providerThread, "initial");
+    const report = {
+      type: "goal.progress.report" as const,
+      threadId,
+      providerInstanceId: instanceId,
+      providerSessionId: sessionId,
+      goalId: goalProgressId(providerThread),
+      percent: 70,
+      summary: "Implementation finished; validation remains",
+    };
+    for (const percent of [70, 30]) {
+      const result = yield* orchestrator.dispatch({
+        ...report,
+        percent,
+        commandId: CommandId.make(`goal-progress:${percent}`),
+      });
+      const stored = result.storedEvents[0]?.event;
+      assert.equal(stored?.type, "provider-thread.updated");
+      const current = (yield* projections.getThreadProjection(threadId)).providerThreads[0]!;
+      assert.deepEqual(current.goal?.progress, {
+        percent,
+        summary: report.summary,
+        updatedAt: DateTime.formatIso(now),
+      });
+      assert.equal(current.goal?.status, "active");
+    }
+    for (const [index, changed] of [
+      { providerSessionId: ProviderSessionId.make("session:old") },
+      { providerInstanceId: ProviderInstanceId.make("other") },
+      { goalId: "old-goal" },
+    ].entries()) {
+      const rejected = yield* orchestrator
+        .dispatch({
+          ...report,
+          ...changed,
+          commandId: CommandId.make(`goal-progress:invalid:${index}`),
+        })
+        .pipe(Effect.result);
+      assert.isTrue(Result.isFailure(rejected));
+    }
+    for (const [index, changed] of [
+      { goal: { ...providerThread.goal!, id: "goal:replacement" } },
+      { lastRunOrdinal: 2 },
+      { goal: { ...providerThread.goal!, status: "paused" as const } },
+      { goal: { ...providerThread.goal!, status: "complete" as const } },
+      { goal: null },
+      { status: "idle" as const },
+      { providerSessionId: ProviderSessionId.make("session:new") },
+      { driver: ProviderDriverKind.make("cursor") },
+    ].entries()) {
+      yield* setProviderThread({ ...providerThread, ...changed }, `changed:${index}`);
+      const rejected = yield* orchestrator
+        .dispatch({
+          ...report,
+          commandId: CommandId.make(`goal-progress:late:${index}`),
+        })
+        .pipe(Effect.result);
+      assert.isTrue(Result.isFailure(rejected));
+    }
+    yield* setProviderThread(providerThread, "restored");
+    yield* orchestrator.dispatch({
+      type: "thread.delete",
+      threadId,
+      commandId: CommandId.make("delete:goal-progress"),
+    });
+    assert.isTrue(
+      Result.isFailure(
+        yield* orchestrator
+          .dispatch({
+            ...report,
+            commandId: CommandId.make("goal-progress:deleted"),
+          })
+          .pipe(Effect.result),
+      ),
+    );
+  }).pipe(Effect.provide(layerTest)),
 );
 
 it.effect(

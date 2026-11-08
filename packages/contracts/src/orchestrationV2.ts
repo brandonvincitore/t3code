@@ -1071,7 +1071,13 @@ export const OrchestrationV2ProviderGoalStatus = Schema.Literals([
 ]);
 export type OrchestrationV2ProviderGoalStatus = typeof OrchestrationV2ProviderGoalStatus.Type;
 
+export const OrchestrationV2GoalProgressReport = Schema.Struct({
+  percent: NonNegativeInt.check(Schema.isLessThanOrEqualTo(99)),
+  summary: TrimmedNonEmptyString.check(Schema.isMaxLength(240)),
+});
+
 export const OrchestrationV2ProviderGoal = Schema.Struct({
+  id: Schema.optional(TrimmedNonEmptyString),
   objective: TrimmedNonEmptyString,
   status: OrchestrationV2ProviderGoalStatus,
   tokensUsed: Schema.optional(NonNegativeInt),
@@ -1079,6 +1085,12 @@ export const OrchestrationV2ProviderGoal = Schema.Struct({
   timeUsedSeconds: Schema.optional(NonNegativeInt),
   checks: Schema.optional(NonNegativeInt),
   lastCheck: Schema.optional(Schema.String),
+  progress: Schema.optional(
+    Schema.Struct({
+      ...OrchestrationV2GoalProgressReport.fields,
+      updatedAt: IsoDateTime,
+    }),
+  ),
 });
 export type OrchestrationV2ProviderGoal = typeof OrchestrationV2ProviderGoal.Type;
 
@@ -3533,6 +3545,15 @@ const OrchestrationV2InternalCommand = Schema.Union([
         }),
       }),
     ),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("goal.progress.report"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    providerSessionId: ProviderSessionId,
+    providerInstanceId: ProviderInstanceId,
+    goalId: TrimmedNonEmptyString,
+    ...OrchestrationV2GoalProgressReport.fields,
   }),
   /**
    * Internal so no client can mark a request saved without the value being

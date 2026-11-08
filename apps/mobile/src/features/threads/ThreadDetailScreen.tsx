@@ -744,6 +744,32 @@ function ThreadDetailBody(
           Dialog.alert("Pi", props.extensionStatuses?.map((status) => status.text).join("\n\n")),
       }
     : null;
+  const goalStatus = ((): FloatingWorkingStatus | null => {
+    if (props.selectedThread.goal !== null && contentPresentationKind === "ready") {
+      const goal = presentProviderGoal(
+        props.selectedThread.goal,
+        props.activeWorkStartedAt !== null,
+      );
+      return {
+        kind: "goal",
+        label: `${goal.title} · ${goal.progressLabel}`,
+        progressPercent: goal.progressPercent,
+        progressLabel: goal.progressLabel,
+        accessibilityLabel: `${goal.title}: ${goal.progressLabel}. ${goal.objective}${
+          goal.progressSummary ? `. ${goal.progressSummary}` : ""
+        }`,
+        onPress: () =>
+          Dialog.alert(
+            goal.title,
+            `${goal.progressLabel}\n\n${goal.objective}${
+              goal.progressSummary ? `\n\n${goal.progressSummary}` : ""
+            }`,
+            [{ text: "OK" }],
+          ),
+      };
+    }
+    return null;
+  })();
   const floatingStatus = ((): FloatingWorkingStatus | null => {
     const connectionStatus = connectionFloatingStatus({
       connectionError: connectionRetrying ? retryConnectionError : props.connectionError,
@@ -812,6 +838,7 @@ function ThreadDetailBody(
       return { kind: "compacting" };
     }
     if (props.activeWorkStartedAt !== null && contentPresentationKind === "ready") {
+      if (props.selectedThread.goal?.status === "active" && goalStatus !== null) return goalStatus;
       return { kind: "working", startedAt: props.activeWorkStartedAt };
     }
     if (pendingBackgroundWork !== null && contentPresentationKind === "ready") {
@@ -865,14 +892,7 @@ function ThreadDetailBody(
         },
       };
     }
-    if (props.selectedThread.goal !== null && contentPresentationKind === "ready") {
-      const goal = presentProviderGoal(props.selectedThread.goal, false);
-      return {
-        kind: "goal",
-        label: goal.title,
-        accessibilityLabel: `${goal.title}: ${goal.objective}`,
-      };
-    }
+    if (goalStatus !== null) return goalStatus;
     if (extensionStatus !== null && contentPresentationKind === "ready") {
       return { kind: "extension", ...extensionStatus };
     }

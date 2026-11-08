@@ -144,6 +144,7 @@ import { withCommandMetrics } from "../observability/Metrics.ts";
 import type { OrchestrationEffectRequestV2, PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+import { currentGoalProviderThread, goalProgressId } from "./goalProgress.ts";
 import {
   DispatchModeLimit,
   exceededDispatchModeLimit,
@@ -620,6 +621,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
       return command.parentThreadId;
     case "secret_request.record":
     case "link_request.record":
+    case "goal.progress.report":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -8964,6 +8966,52 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     },
   );
 
+  const dispatchGoalProgressReport = Effect.fn("Orchestrator.dispatchGoalProgressReport")(
+    function* (
+      command: Extract<OrchestrationV2InternalCommand, { readonly type: "goal.progress.report" }>,
+      events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    ) {
+      const projection = yield* projectionStore
+        .getThreadRecords(command.threadId, ["providerThreads"])
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+          ),
+        );
+      const providerThread = currentGoalProviderThread(projection, command);
+      if (providerThread?.goal == null || goalProgressId(providerThread) !== command.goalId) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause:
+            "The goal or calling turn is no longer active. Read get_goal_progress again before reporting.",
+        });
+      }
+      const now = yield* DateTime.now;
+      yield* emit(
+        events,
+        command,
+      )({
+        type: "provider-thread.updated",
+        threadId: command.threadId,
+        providerInstanceId: command.providerInstanceId,
+        occurredAt: now,
+        payload: {
+          ...providerThread,
+          goal: {
+            ...providerThread.goal,
+            progress: {
+              percent: command.percent,
+              summary: command.summary,
+              updatedAt: DateTime.formatIso(now),
+            },
+          },
+          updatedAt: now,
+        },
+      });
+    },
+  );
+
   const dispatchSecretRequestRecord = Effect.fn("orchestrationV2.dispatch.secretRequestRecord")(
     function* (
       command: Extract<OrchestrationV2InternalCommand, { readonly type: "secret_request.record" }>,
@@ -13747,6 +13795,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
+        break;
+      case "goal.progress.report":
+        yield* dispatchGoalProgressReport(command, events);
         break;
       case "link_request.record":
         yield* dispatchLinkRequestRecord(command, events, effects);

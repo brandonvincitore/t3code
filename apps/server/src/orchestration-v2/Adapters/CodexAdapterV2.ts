@@ -951,6 +951,7 @@ function providerGoalFromCodex(goal: CodexThreadGoal): OrchestrationV2ProviderGo
   const objective = goal.objective.trim();
   if (objective.length === 0) return null;
   return {
+    id: `${goal.threadId}:${goal.createdAt}`,
     objective,
     status: CODEX_GOAL_STATUSES[goal.status],
     tokensUsed: Math.max(0, goal.tokensUsed),
@@ -1990,6 +1991,22 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
         // Serialize native completion and interrupt timeout so only one publishes terminal events.
         const turnTerminalizationPermit = yield* Semaphore.make(1);
         const goalsByNativeThread = new Map<string, OrchestrationV2ProviderGoal | null>();
+        let nextGoalGeneration = 0;
+        const readCodexGoal = (goal: CodexThreadGoal): OrchestrationV2ProviderGoal | null => {
+          const normalized = providerGoalFromCodex(goal);
+          if (normalized === null) return null;
+          const previous = goalsByNativeThread.has(goal.threadId)
+            ? goalsByNativeThread.get(goal.threadId)
+            : rootProviderThreads.get(goal.threadId)?.goal;
+          const sameGoal =
+            previous?.objective === normalized.objective &&
+            previous.id?.startsWith(`${normalized.id}:`) === true &&
+            !(previous.status === "complete" && normalized.status === "active");
+          return {
+            ...normalized,
+            id: sameGoal ? previous.id : `${normalized.id}:${session.id}:${++nextGoalGeneration}`,
+          };
+        };
         const rootProviderThreads = new Map<string, OrchestrationV2ProviderThread>();
         const goalHolds = new Map<string, CodexGoalHold>();
         const continuedRuns = new Map<ProviderTurnId, Array<ActiveCodexTurnContext>>();
@@ -4684,7 +4701,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
 
         yield* client.handleServerNotification("thread/goal/updated", (payload) =>
           Effect.gen(function* () {
-            goalsByNativeThread.set(payload.threadId, providerGoalFromCodex(payload.goal));
+            goalsByNativeThread.set(payload.threadId, readCodexGoal(payload.goal));
             yield* emitGoalUpdate(payload.threadId);
             if (payload.goal.status !== "active") yield* releaseGoalHold(payload.threadId);
           }).pipe(turnTerminalizationPermit.withPermits(1)),
@@ -6003,7 +6020,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               // The hold is already claimed, so an unanswered pause must not keep the run open.
               Effect.timeout("10 seconds"),
               Effect.flatMap(({ goal }) => {
-                goalsByNativeThread.set(nativeThreadId, providerGoalFromCodex(goal));
+                goalsByNativeThread.set(nativeThreadId, readCodexGoal(goal));
                 return emitGoalUpdate(nativeThreadId);
               }),
               Effect.catch((cause) =>
@@ -6718,9 +6735,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 .request("thread/goal/set", { threadId: goalThreadId, status: "paused" })
                 .pipe(
                   Effect.tap(({ goal }) =>
-                    Effect.sync(() =>
-                      goalsByNativeThread.set(goalThreadId, providerGoalFromCodex(goal)),
-                    ),
+                    Effect.sync(() => goalsByNativeThread.set(goalThreadId, readCodexGoal(goal))),
                   ),
                   Effect.catch((cause) =>
                     Effect.logWarning("orchestration-v2.codex-goal-pause-failed", { cause }),
@@ -6867,7 +6882,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               .request("thread/goal/get", { threadId })
               .pipe(
                 Effect.map((response) =>
-                  response.goal == null ? null : providerGoalFromCodex(response.goal),
+                  response.goal == null ? null : readCodexGoal(response.goal),
                 ),
               );
             const current = yield* readGoal;
@@ -6891,7 +6906,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 threadId,
                 status: "paused",
               });
-              goalsByNativeThread.set(threadId, providerGoalFromCodex(goal));
+              goalsByNativeThread.set(threadId, readCodexGoal(goal));
               return yield* completeGoalCommandTurn(turnInput, null);
             }
             if (command.type === "set") {
@@ -6903,7 +6918,10 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 objective: command.objective,
                 status: "paused",
               });
-              goalsByNativeThread.set(threadId, providerGoalFromCodex(goal));
+              goalsByNativeThread.set(threadId, {
+                ...readCodexGoal(goal)!,
+                id: `${goal.threadId}:${goal.createdAt}:${turnInput.runId}`,
+              });
             }
             // Hold fast first turns until activation; Stop cancels activation.
             const activation = { stopped: false };
@@ -6927,13 +6945,13 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 threadId,
                 status: "active",
               });
-              goalsByNativeThread.set(threadId, providerGoalFromCodex(goal));
+              goalsByNativeThread.set(threadId, readCodexGoal(goal));
               if (activation.stopped) {
                 const paused = yield* client.request("thread/goal/set", {
                   threadId,
                   status: "paused",
                 });
-                goalsByNativeThread.set(threadId, providerGoalFromCodex(paused.goal));
+                goalsByNativeThread.set(threadId, readCodexGoal(paused.goal));
               }
             }).pipe(
               Effect.ensuring(

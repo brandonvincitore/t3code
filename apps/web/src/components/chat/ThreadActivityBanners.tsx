@@ -21,7 +21,6 @@ import {
   GitBranchIcon,
   MessageCircleIcon,
   ShieldQuestionIcon,
-  TargetIcon,
   TerminalIcon,
   TriangleAlertIcon,
 } from "lucide-react";
@@ -30,6 +29,7 @@ import { tickTextContent } from "~/lib/tickTextContent";
 import { Button, InlineButton } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { ComposerBannerStackItem } from "./ComposerBannerStack";
+import { GoalProgressBattery } from "./GoalProgressBattery";
 import type { ThreadNowItem } from "./ThreadNow";
 
 export function extensionStatusBannerItem(
@@ -94,14 +94,17 @@ export function goalNowItem(input: {
 }): ThreadNowItem {
   const { isWorking, onSendCommand } = input;
   const presentation = presentProviderGoal(input.goal, isWorking);
+  const progress = presentation.progressLabel;
   return {
     id: `goal:${input.threadId}`,
-    icon: <TargetIcon />,
+    icon: <GoalProgressBattery percent={presentation.progressPercent} />,
     title:
       presentation.usage === null
-        ? presentation.title
-        : `${presentation.title} · ${presentation.usage}`,
-    description: presentation.objective,
+        ? `${presentation.title} · ${progress}`
+        : `${presentation.title} · ${progress} · ${presentation.usage}`,
+    description: presentation.progressSummary
+      ? `${presentation.objective} · ${presentation.progressSummary}`
+      : presentation.objective,
     // Clear stops goal work; Resume would stop unrelated work, so it waits.
     actions: (
       <>

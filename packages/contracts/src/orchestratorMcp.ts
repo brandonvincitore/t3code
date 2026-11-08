@@ -37,9 +37,25 @@ import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
+  OrchestrationV2GoalProgressReport,
+  OrchestrationV2ProviderGoal,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
 } from "./orchestrationV2.ts";
+
+export const OrchestratorMcpGoalProgressResult = Schema.Struct({
+  goalId: TrimmedNonEmptyString,
+  goal: OrchestrationV2ProviderGoal,
+});
+export type OrchestratorMcpGoalProgressResult = typeof OrchestratorMcpGoalProgressResult.Type;
+
+export const OrchestratorMcpGoalProgressInput = Schema.Struct({
+  goalId: TrimmedNonEmptyString.annotate({
+    description: "The goalId returned by get_goal_progress in this turn.",
+  }),
+  ...OrchestrationV2GoalProgressReport.fields,
+});
+export type OrchestratorMcpGoalProgressInput = typeof OrchestratorMcpGoalProgressInput.Type;
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 

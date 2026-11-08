@@ -15,6 +15,8 @@ import {
   type OrchestrationV2TurnItem,
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
+  type OrchestratorMcpGoalProgressInput,
+  type OrchestratorMcpGoalProgressResult,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpModelOption,
   type OrchestratorMcpCreateThreadsInput,
@@ -36,6 +38,7 @@ import {
   type OrchestratorMcpUpdateScheduledTaskInput,
   type OrchestratorMcpListScheduledTasksInput,
   type ProjectId,
+  ProviderSessionId,
   type OrchestratorMcpThreadDetail,
   type OrchestratorMcpThreadPullRequest,
   type OrchestratorMcpThreadInterruptInput,
@@ -87,6 +90,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
+import { currentGoalProviderThread, goalProgressId } from "../orchestration-v2/goalProgress.ts";
 import {
   subagentResultForRun,
   delegatedTaskProgress,
@@ -155,6 +159,13 @@ type TerminalTaskStatus = Extract<
 >;
 
 export interface OrchestratorMcpServiceShape {
+  readonly getGoalProgress: (
+    scope: McpInvocationScope,
+  ) => Effect.Effect<OrchestratorMcpGoalProgressResult, OrchestratorMcpFailure>;
+  readonly reportGoalProgress: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGoalProgressInput,
+  ) => Effect.Effect<OrchestratorMcpGoalProgressResult, OrchestratorMcpFailure>;
   readonly capabilities: (
     scope: McpInvocationScope,
     input?: OrchestratorMcpCapabilitiesInput,
@@ -1986,6 +1997,51 @@ const make = Effect.gen(function* () {
   });
 
   return OrchestratorMcpService.of({
+    getGoalProgress: Effect.fn("OrchestratorMcpService.getGoalProgress")(function* (scope) {
+      yield* requireCapability(scope);
+      const caller = yield* requireThreadScope(scope, "get_goal_progress");
+      const projection = yield* threadManagement
+        .getThreadRecords(caller.thread.threadId, ["providerThreads"])
+        .pipe(Effect.mapError(threadManagementFailure));
+      const providerThread = currentGoalProviderThread(projection, caller.thread);
+      if (providerThread?.goal == null) {
+        return yield* failure("invalid_request", "This calling thread has no active native goal.");
+      }
+      return { goalId: goalProgressId(providerThread), goal: providerThread.goal };
+    }),
+    reportGoalProgress: Effect.fn("OrchestratorMcpService.reportGoalProgress")(
+      function* (scope, input) {
+        yield* requireCapability(scope);
+        const caller = yield* requireThreadScope(scope, "report_goal_progress");
+        const result = yield* threadManagement
+          .dispatch({
+            type: "goal.progress.report",
+            commandId: CommandId.make(`goal-progress:${yield* random.uuidV4()}`),
+            threadId: caller.thread.threadId,
+            providerSessionId: ProviderSessionId.make(caller.thread.providerSessionId),
+            providerInstanceId: caller.thread.providerInstanceId,
+            ...input,
+          })
+          .pipe(
+            Effect.mapError(() =>
+              failure(
+                "invalid_request",
+                "The goal or calling turn is no longer active. Read get_goal_progress again before reporting.",
+              ),
+            ),
+          );
+        const providerThread = result.storedEvents.find(
+          (stored) => stored.event.type === "provider-thread.updated",
+        )?.event;
+        if (
+          providerThread?.type !== "provider-thread.updated" ||
+          providerThread.payload.goal == null
+        ) {
+          return yield* failure("orchestration_error", "Goal progress was not recorded.");
+        }
+        return { goalId: input.goalId, goal: providerThread.payload.goal };
+      },
+    ),
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);

@@ -8480,9 +8480,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           scenario: "goal-continuation",
           entries: [
             ...sessionStart,
-            ...request(3, "thread/goal/get", { threadId: nativeThreadId }, { goal: null }),
             ...request(
-              4,
+              3,
+              "thread/goal/get",
+              { threadId: nativeThreadId },
+              { goal: codexGoal("active", 0) },
+            ),
+            ...request(4, "thread/goal/clear", { threadId: nativeThreadId }, { cleared: true }),
+            ...request(
+              5,
               "thread/goal/set",
               { threadId: nativeThreadId, objective, status: "paused" },
               { goal: codexGoal("paused", 0) },
@@ -8494,10 +8500,10 @@ describe("CodexAdapterV2 post-settle continuation", () => {
                 prompt: objective,
                 sentPrompt: `Start working toward this goal: ${objective}`,
               }).slice(5),
-              5,
+              6,
             ),
             ...request(
-              6,
+              7,
               "thread/goal/set",
               { threadId: nativeThreadId, status: "active" },
               { goal: codexGoal("active", 0) },
@@ -8527,7 +8533,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ],
         });
         const harness = yield* makeCodexReplayHarness(transcript);
-        yield* harness.runtime.startTurn(yield* goalTurnInput(harness, `/goal ${objective}`));
+        const turnInput = yield* goalTurnInput(harness, `/goal ${objective}`);
+        const previousGoalId = `${nativeThreadId}:1782622440:previous-generation`;
+        yield* harness.runtime.startTurn({
+          ...turnInput,
+          providerThread: {
+            ...turnInput.providerThread,
+            goal: { id: previousGoalId, objective, status: "active" },
+          },
+        });
         yield* harness.firstTerminal;
 
         const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -8560,6 +8574,15 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         // The goal is set paused until its first turn starts; only the result shows.
         assert.notInclude(providerGoals(harness.events), "paused");
         assert.equal(providerGoals(harness.events).at(-1), "complete");
+        const goalIds = harness.events.flatMap((event) =>
+          event.type === "provider_thread.updated" && event.providerThread.goal != null
+            ? [event.providerThread.goal.id]
+            : [],
+        );
+        assert.isAbove(goalIds.length, 0);
+        assert.equal(new Set(goalIds).size, 1);
+        assert.notEqual(goalIds[0], previousGoalId);
+        assert.match(goalIds[0]!, new RegExp(`^${nativeThreadId}:1782622440:`));
       }).pipe(
         Effect.scoped,
         Effect.provide(

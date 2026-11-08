@@ -8,6 +8,7 @@ import {
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
+  OrchestrationV2ProviderGoal,
   OrchestrationV2RpcSchemas,
   OrchestrationV2Subagent,
   OrchestrationV2ThreadShellJson,
@@ -444,6 +445,24 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+    const decodeGoal = Schema.decodeUnknownSync(OrchestrationV2ProviderGoal);
+    const goal = {
+      id: "goal:first",
+      objective: "Ship it",
+      status: "active",
+      progress: {
+        percent: 99,
+        summary: "Validation remains",
+        updatedAt: "2026-04-20T00:00:00.000Z",
+      },
+    };
+    expect(decodeGoal(goal)).toEqual(goal);
+    for (const percent of [-1, 100, 0.5]) {
+      expect(() => decodeGoal({ ...goal, progress: { ...goal.progress, percent } })).toThrow();
+    }
+    for (const summary of ["", " ", "x".repeat(241)]) {
+      expect(() => decodeGoal({ ...goal, progress: { ...goal.progress, summary } })).toThrow();
+    }
   });
 });
 

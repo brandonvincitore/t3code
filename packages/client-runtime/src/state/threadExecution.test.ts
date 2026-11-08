@@ -610,6 +610,49 @@ describe("isBackgroundWorkStopPending", () => {
 });
 
 describe("presentProviderGoal", () => {
+  it("keeps estimates separate from usage and reserves full progress for completion", () => {
+    const goal = {
+      objective: "Ship the feature",
+      status: "active" as const,
+      tokensUsed: 100,
+      tokenBudget: 100,
+    };
+    const progress = {
+      percent: 65,
+      summary: "Mobile verification remains.",
+      updatedAt: DateTime.formatIso(now),
+    };
+    for (const status of [
+      "active",
+      "paused",
+      "blocked",
+      "usage_limited",
+      "budget_limited",
+    ] as const) {
+      const unknown = presentProviderGoal({ ...goal, status }, false);
+      expect(unknown.progressPercent).toBeNull();
+      expect(unknown.progressLabel).toBe("Progress unknown");
+      expect(unknown.progressSummary).toBeNull();
+      const estimated = presentProviderGoal({ ...goal, status, progress }, true);
+      expect(estimated.progressPercent).toBe(65);
+      expect(estimated.progressLabel).toBe("~65% complete");
+      expect(estimated.progressSummary).toBe(progress.summary);
+    }
+    expect(
+      presentProviderGoal({ ...goal, progress: { ...progress, percent: 40 } }, true)
+        .progressPercent,
+    ).toBe(40);
+    for (const report of [undefined, progress]) {
+      const completed = presentProviderGoal(
+        { ...goal, status: "complete", progress: report },
+        false,
+      );
+      expect(completed.progressPercent).toBe(100);
+      expect(completed.progressLabel).toBe("100% complete");
+      expect(completed.progressSummary).toBeNull();
+    }
+  });
+
   it("rolls token counts that round to 1000k over to 1m", () => {
     const usage = (tokensUsed: number) =>
       presentProviderGoal(
