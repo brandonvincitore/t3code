@@ -3195,7 +3195,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const projectSubagentNotification = Effect.fnUntraced(function* (
           subagent: ActiveAcpSubagent,
           notification: EffectAcpSchema.SessionNotification,
-          owner: ActiveAcpTurn,
+          owner?: ActiveAcpTurn,
         ) {
           const update = notification.update;
           if (update.sessionUpdate === "agent_message_chunk") {
@@ -3545,7 +3545,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             context.pendingSubagentNotifications.delete(childSessionId);
             yield* Effect.forEach(
               buffered,
-              (notification) => projectRegisteredSubagentNotification(subagent, notification, context),
+              (notification) =>
+                projectRegisteredSubagentNotification(subagent, notification, context),
               { concurrency: 1, discard: true },
             );
           }

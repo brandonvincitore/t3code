@@ -4581,6 +4581,7 @@ describe("AcpAdapterV2", () => {
       const usageThread = withNativeSession(providerThread, "usage-session");
       yield* resume(usageThread, "small");
       yield* usageUpdate("usage-session", 700, 1_000);
+      yield* drainReading(700);
       const afterFirstReading = threadUsages(yield* turnOn("large", 3, usageThread));
       assert.isNotEmpty(afterFirstReading);
       assert.isEmpty(afterFirstReading.filter((usage) => usage != null));
