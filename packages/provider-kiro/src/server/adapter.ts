@@ -5,6 +5,7 @@ import {
   type ModelSelection,
   ProviderDriverKind,
   type OrchestrationV2ProviderCapabilities,
+  type ThreadTokenUsageSnapshot,
 } from "@t3tools/contracts";
 import { KiroSettings } from "../settings.ts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
@@ -66,6 +67,123 @@ const KIRO_COMPACT_METHOD = "_kiro/session/compact";
 const KIRO_STEER_METHOD = "_session/steer";
 const KIRO_FALLBACK_DEFAULT_MODEL = "auto";
 const DEFAULT_KIRO_SETTINGS = Schema.decodeSync(KiroSettings)({});
+
+/**
+ * Kiro windows: https://kiro.dev/docs/models/; exact GPT windows come from the CLI catalog.
+ * DeepSeek and MiniMax values were read from kiro-cli 3.1.0.
+ */
+const KIRO_MODEL_CONTEXT_WINDOWS: Readonly<Record<string, number>> = {
+  "gpt-5.6-sol": 986_000,
+  "gpt-5.6-terra": 986_000,
+  "gpt-5.6-luna": 986_000,
+  "claude-fable-5.1": 1_000_000,
+  "claude-opus-5.5": 1_000_000,
+  "claude-sonnet-5.5": 1_000_000,
+  "claude-haiku-5.5": 1_000_000,
+  "claude-opus-5": 1_000_000,
+  "claude-opus-4.8": 1_000_000,
+  "claude-opus-4.7": 1_000_000,
+  "claude-opus-4.6": 1_000_000,
+  "claude-opus-4.5": 200_000,
+  "claude-sonnet-5": 1_000_000,
+  "claude-sonnet-4.6": 1_000_000,
+  "claude-sonnet-4.5": 200_000,
+  "claude-sonnet-4.0": 200_000,
+  "claude-haiku-4.5": 200_000,
+  "kimi-k3": 1_000_000,
+  "deepseek-3.2": 164_000,
+  "minimax-m2.5": 196_000,
+  "glm-5": 200_000,
+  "minimax-m2.1": 196_000,
+  "qwen3-coder-next": 256_000,
+};
+
+export function kiroModelContextWindow(selection: ModelSelection): number | undefined {
+  const model = selection.model.trim();
+  return Object.hasOwn(KIRO_MODEL_CONTEXT_WINDOWS, model)
+    ? KIRO_MODEL_CONTEXT_WINDOWS[model]
+    : undefined;
+}
+
+const KiroContextPercentage = Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 }));
+const decodeKiroSessionContextUsage = Schema.decodeUnknownOption(
+  Schema.Struct({
+    contextUsage: Schema.Struct({
+      usagePercentage: KiroContextPercentage,
+      summarizationThreshold: Schema.optional(KiroContextPercentage),
+      truncationThreshold: Schema.optional(KiroContextPercentage),
+    }),
+  }),
+);
+const decodeKiroLiveContextUsage = Schema.decodeUnknownOption(
+  Schema.Struct({
+    kiro: Schema.Struct({
+      contextUsage: Schema.Struct({ usagePercentage: KiroContextPercentage }),
+    }),
+  }),
+);
+
+function kiroContextUsageSnapshot(input: {
+  readonly selection: ModelSelection;
+  readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
+  readonly usagePercentage: number;
+}): ThreadTokenUsageSnapshot | null {
+  const maxTokens = kiroModelContextWindow(input.selection);
+  if (maxTokens === undefined) return null;
+  const metadata = Option.getOrUndefined(
+    decodeKiroSessionContextUsage(input.session.sessionSetupResult._meta),
+  );
+  const threshold = metadata?.contextUsage.summarizationThreshold;
+  return {
+    usedTokens: Math.round((input.usagePercentage / 100) * maxTokens),
+    maxTokens,
+    ...(threshold === undefined || threshold <= 0
+      ? {}
+      : {
+          compactsAutomatically: true,
+          autoCompactThreshold: Math.round((threshold / 100) * maxTokens),
+        }),
+  };
+}
+
+export function kiroContextUsageFromSession(input: {
+  readonly selection: ModelSelection;
+  readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
+}): ThreadTokenUsageSnapshot | null | undefined {
+  const modelOption = findKiroModelOption(input.session.sessionSetupResult.configOptions ?? []);
+  const loadedModel = (
+    modelOption?.type === "select"
+      ? modelOption.currentValue
+      : input.session.sessionSetupResult.models?.currentModelId
+  )?.trim();
+  // Kiro's load can name no model, which says nothing against the reading T3 already saved.
+  if (!loadedModel) return undefined;
+  const metadata = Option.getOrUndefined(
+    decodeKiroSessionContextUsage(input.session.sessionSetupResult._meta),
+  );
+  if (metadata === undefined || loadedModel !== input.selection.model.trim()) return null;
+  return kiroContextUsageSnapshot({
+    ...input,
+    usagePercentage: metadata.contextUsage.usagePercentage,
+  });
+}
+
+export function kiroContextUsageFromSessionUpdate(input: {
+  readonly selection: ModelSelection;
+  readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
+  readonly notification: EffectAcpSchema.SessionNotification;
+}): ThreadTokenUsageSnapshot | null | undefined {
+  if (input.notification.update.sessionUpdate !== "session_info_update") return undefined;
+  const metadata = Option.getOrUndefined(
+    decodeKiroLiveContextUsage(input.notification.update._meta),
+  );
+  if (metadata === undefined) return undefined;
+  return kiroContextUsageSnapshot({
+    selection: input.selection,
+    session: input.session,
+    usagePercentage: metadata.kiro.contextUsage.usagePercentage,
+  });
+}
 
 const KiroProviderCapabilitiesV2 = {
   ...AcpProviderCapabilitiesV2,
@@ -556,6 +674,9 @@ function makeKiroAcpAdapterFlavor(
     driver: KIRO_PROVIDER,
     runtimeHarness: "Kiro",
     capabilities: KiroProviderCapabilitiesV2,
+    getModelContextWindow: kiroModelContextWindow,
+    contextUsageFromSession: kiroContextUsageFromSession,
+    contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,
     // Kiro V3 loads the user's hooks only when the client opts in. `v2` makes
     // Kiro run them itself; `enabled` alone hands them to the client as
     // `_kiro/hooks/*` requests, which T3 does not answer. Kiro keeps MCP OAuth
