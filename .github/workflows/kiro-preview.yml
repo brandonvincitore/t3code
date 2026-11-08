@@ -21,7 +21,6 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 100
-          persist-credentials: false
           sparse-checkout: |
             /*
             !/.repos/
