@@ -1,0 +1,49 @@
+name: Kiro preview
+
+on:
+  push:
+    branches: [codex/kiro-preview]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kiro-preview-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    if: github.repository == 'brandonvincitore/t3code'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 100
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-ci-deps
+
+      - name: Use the repository's Vite+ version
+        run: echo "$GITHUB_WORKSPACE/node_modules/.bin" >> "$GITHUB_PATH"
+
+      - name: Install the browser test runtime
+        working-directory: apps/web
+        run: vp exec playwright install --with-deps chromium --only-shell
+
+      - name: Fetch the preview's upstream baseline
+        run: git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git 09a54f01bc0ae83865347a965ced50f8c8ec2953
+
+      - name: Check the integrated changes
+        run: vp run check:changed 09a54f01bc0ae83865347a965ced50f8c8ec2953 --concurrency 1
+
+      - name: Replay the Kiro protocol fixtures
+        working-directory: apps/server
+        run: vp test run src/orchestration-v2/testkit/KiroReplayFixtures.integration.test.ts --maxWorkers=1
+
+      - name: Build the bundled web client and server
+        run: vp run --filter t3 --concurrency-limit 1 build
+
+      - name: Check the preview version
+        run: node apps/server/dist/bin.mjs --version
