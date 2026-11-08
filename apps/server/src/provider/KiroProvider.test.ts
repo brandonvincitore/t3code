@@ -337,6 +337,7 @@ describe("KiroProvider", () => {
       "auto",
       "claude-fable-5.1",
       "claude-opus-5.5",
+      "claude-haiku-5.5",
       "claude-opus-4.6",
       "kimi-k3",
       "claude-sonnet-4.5",
@@ -379,6 +380,13 @@ describe("KiroProvider", () => {
         },
         {
           slug: "claude-opus-5.5",
+          label: "Reasoning",
+          levels: ["low", "medium", "high", "xhigh", "max"],
+          defaults: ["medium"],
+          currentValue: "medium",
+        },
+        {
+          slug: "claude-haiku-5.5",
           label: "Reasoning",
           levels: ["low", "medium", "high", "xhigh", "max"],
           defaults: ["medium"],
