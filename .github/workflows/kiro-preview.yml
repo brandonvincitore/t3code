@@ -22,6 +22,11 @@ jobs:
         with:
           fetch-depth: 100
           persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+            !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
+          sparse-checkout-cone-mode: false
 
       - uses: ./.github/actions/setup-ci-deps
 
