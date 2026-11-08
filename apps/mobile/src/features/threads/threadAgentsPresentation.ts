@@ -222,9 +222,9 @@ export function resolveSubagentStopTarget(
 ) {
   if (!isActiveSubagentStatus(subagent.status)) return null;
   if (subagent.workflow !== undefined) {
-    return subagent.status === "running" &&
+    return (subagent.status === "running" || subagent.status === "waiting") &&
       subagent.origin === "provider_native" &&
-      subagent.driver === "claudeAgent" &&
+      (subagent.driver === "claudeAgent" || subagent.driver === "kiro") &&
       Boolean(subagent.nativeTaskRef?.nativeId)
       ? {
           kind: "workflow" as const,

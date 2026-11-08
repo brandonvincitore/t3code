@@ -60,6 +60,8 @@ import {
   recordKiroSkills,
 } from "./skills.ts";
 
+import { makeKiroWorkflowSupport } from "./workflows.ts";
+
 export const KIRO_PROVIDER = ProviderDriverKind.make("kiro");
 /** T3's slug for "Kiro default", and Kiro's documented default model id. */
 const KIRO_DEFAULT_MODEL = "default";
@@ -670,6 +672,7 @@ function makeKiroAcpAdapterFlavor(
   const makeRuntime = (input: AcpAdapterV2RuntimeInput) =>
     makeNativeRuntime(input).pipe(Effect.tap(secretStorage.installHandlers));
   const stripSteeringNote = makeKiroSteeringNoteFilter();
+  const workflows = makeKiroWorkflowSupport();
   return {
     driver: KIRO_PROVIDER,
     runtimeHarness: "Kiro",
@@ -677,6 +680,11 @@ function makeKiroAcpAdapterFlavor(
     getModelContextWindow: kiroModelContextWindow,
     contextUsageFromSession: kiroContextUsageFromSession,
     contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,
+
+    supportsNativeWorkflows: true,
+    registerExtensions: workflows.registerExtensions,
+    consumeSessionUpdate: workflows.consumeSessionUpdate,
+    stopTask: workflows.stopTask,
     // Kiro V3 loads the user's hooks only when the client opts in. `v2` makes
     // Kiro run them itself; `enabled` alone hands them to the client as
     // `_kiro/hooks/*` requests, which T3 does not answer. Kiro keeps MCP OAuth

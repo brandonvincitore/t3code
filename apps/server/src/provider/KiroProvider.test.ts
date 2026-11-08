@@ -73,10 +73,19 @@ function processHandle(output: CliOutput) {
 const KIRO_ACP_ARGS = "acp --agent-engine=v3 --auth-method=cli";
 const decodeRequest = Schema.decodeUnknownSync(
   Schema.fromJsonString(
-    Schema.Struct({ id: Schema.Union([Schema.String, Schema.Number]), method: Schema.String }),
+    Schema.Struct({
+      id: Schema.Union([Schema.String, Schema.Number]),
+      method: Schema.String,
+      params: Schema.optional(Schema.Unknown),
+    }),
   ),
 );
 const KIRO_SESSION_ID = "sess_kiro-skills";
+const KIRO_EXTENSION_METHODS = [
+  "_kiro/config/template",
+  "_kiro/workflow/new",
+  "_kiro/workflow/cancel",
+];
 
 /**
  * A `kiro-cli acp` that answers `initialize` and `_kiro/config/template` and
@@ -84,7 +93,12 @@ const KIRO_SESSION_ID = "sess_kiro-skills";
  * `afterSessionNew`, it also opens sessions, sends those updates right after
  * `session/new`, and answers each prompt with one line of text.
  */
-const acpProcess = (template: unknown, afterSessionNew?: ReadonlyArray<unknown>) =>
+const acpProcess = (
+  template: unknown,
+  templateParams: Array<unknown>,
+  extensionMethods: ReadonlyArray<string>,
+  afterSessionNew?: ReadonlyArray<unknown>,
+) =>
   Effect.gen(function* () {
     const output = yield* Queue.unbounded<Uint8Array>();
     const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
@@ -118,9 +132,15 @@ const acpProcess = (template: unknown, afterSessionNew?: ReadonlyArray<unknown>)
       }
       const response =
         request.method === "initialize"
-          ? { result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] } }
+          ? {
+              result: {
+                protocolVersion: 1,
+                agentCapabilities: { _meta: { kiro: { extensionMethods } } },
+                authMethods: [],
+              },
+            }
           : request.method === "_kiro/config/template"
-            ? { result: template }
+            ? (templateParams.push(request.params), { result: template })
             : { error: { code: -32601, message: `${request.method} is not scripted` } };
       yield* send({ id: request.id, ...response });
     });
@@ -152,28 +172,34 @@ function kiroCli(
   outputs: Record<string, CliOutput>,
   template?: unknown,
   afterSessionNew?: ReadonlyArray<unknown>,
+  extensionMethods: ReadonlyArray<string> = KIRO_EXTENSION_METHODS,
 ) {
   const invoked: Array<string> = [];
+  const templateParams: Array<unknown> = [];
   const spawner = ChildProcessSpawner.make((command) => {
     const args = ChildProcess.isStandardCommand(command) ? command.args.join(" ") : "";
     invoked.push(args);
     return args === KIRO_ACP_ARGS && (template !== undefined || afterSessionNew !== undefined)
-      ? acpProcess(template, afterSessionNew)
+      ? acpProcess(template, templateParams, extensionMethods, afterSessionNew)
       : Effect.succeed(processHandle(outputs[args] ?? { stdout: "", code: 127 }));
   });
-  return { invoked, spawner };
+  return { invoked, templateParams, spawner };
 }
 
 const check = (
   outputs: Record<string, CliOutput>,
-  options: { readonly template?: unknown; readonly settings?: KiroSettings } = {},
+  options: {
+    readonly template?: unknown;
+    readonly settings?: KiroSettings;
+    readonly extensionMethods?: ReadonlyArray<string>;
+  } = {},
 ) =>
   Effect.gen(function* () {
-    const cli = kiroCli(outputs, options.template);
+    const cli = kiroCli(outputs, options.template, undefined, options.extensionMethods);
     const snapshot = yield* checkKiroProviderStatus(options.settings ?? settings, {}).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
     );
-    return { snapshot, invoked: cli.invoked };
+    return { snapshot, invoked: cli.invoked, templateParams: cli.templateParams };
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 describe("KiroProvider", () => {
@@ -456,6 +482,88 @@ describe("KiroProvider", () => {
         ],
       );
     }),
+  );
+
+  it.effect("advertises Kiro's actual workflow launch preference with its native default", () =>
+    Effect.gen(function* () {
+      const workflowOptions = [
+        { value: "when-asked", name: "When asked" },
+        { value: "large-tasks", name: "Large tasks only" },
+        { value: "delegate-all", name: "Delegate all work" },
+      ];
+      const { snapshot, templateParams } = yield* check(
+        {
+          "--version": { stdout: "kiro-cli 2.32.0\n", code: 0 },
+          "whoami --format json": { stdout: '{"accountType":"ApiKey"}\n', code: 0 },
+        },
+        {
+          template: {
+            configOptions: [
+              {
+                type: "select",
+                id: "workflowLaunch",
+                name: "Workflow use",
+                currentValue: "when-asked",
+                options: workflowOptions,
+              },
+            ],
+          },
+        },
+      );
+      assert.deepEqual(templateParams, [
+        { _meta: { kiro: { settings: { workflows: { enabled: true } } } } },
+      ]);
+      const descriptor = snapshot.models[0]?.capabilities?.optionDescriptors?.find(
+        (option) => option.id === "workflowLaunch",
+      );
+      assert.deepEqual(descriptor, {
+        id: "workflowLaunch",
+        label: "Workflow use",
+        type: "select",
+        currentValue: "when-asked",
+        options: [
+          { id: "when-asked", label: "When asked", isDefault: true },
+          { id: "large-tasks", label: "Large tasks only" },
+          { id: "delegate-all", label: "Delegate all work" },
+        ],
+      });
+    }),
+  );
+
+  it.effect(
+    "does not request or advertise workflow preferences without a template capability",
+    () =>
+      Effect.gen(function* () {
+        const { snapshot, templateParams } = yield* check(
+          {
+            "--version": { stdout: "kiro-cli 2.32.0\n", code: 0 },
+            "whoami --format json": { stdout: '{"accountType":"ApiKey"}\n', code: 0 },
+          },
+          {
+            template: {
+              configOptions: [
+                {
+                  type: "select",
+                  id: "workflowLaunch",
+                  name: "Workflow use",
+                  currentValue: "when-asked",
+                  options: [
+                    { value: "when-asked", name: "When asked" },
+                    { value: "delegate-all", name: "Delegate all work" },
+                  ],
+                },
+              ],
+            },
+            extensionMethods: ["_kiro/workflow/new", "_kiro/workflow/cancel"],
+          },
+        );
+        assert.deepEqual(templateParams, []);
+        assert.isUndefined(
+          snapshot.models[0]?.capabilities?.optionDescriptors?.find(
+            (option) => option.id === "workflowLaunch",
+          ),
+        );
+      }),
   );
 
   it("offers Kiro's agents from its config template, Default first", () => {

@@ -29,10 +29,10 @@ import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 
 const FOLDED_SCRIPT_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)";
 
-function scriptMarkdown(script: string) {
+function scriptMarkdown(script: string, language: "javascript" | "json") {
   const longestRun = Math.max(2, ...(script.match(/`+/g) ?? []).map((run) => run.length));
   const fence = "`".repeat(longestRun + 1);
-  return `${fence}javascript\n${script.trimEnd()}\n${fence}`;
+  return `${fence}${language}\n${script.trimEnd()}\n${fence}`;
 }
 
 export function WorkflowOpeningBlock(props: {
@@ -97,7 +97,7 @@ export function WorkflowOpeningBlock(props: {
       {opening.group && opening.group.unphasedMembers.length > 0 ? (
         <ul className="m-0 list-none p-0">{opening.group.unphasedMembers.map(memberRow)}</ul>
       ) : null}
-      <WorkflowScript script={opening.script} />
+      <WorkflowScript script={opening.script} language={opening.scriptLanguage ?? "javascript"} />
     </section>
   );
 }
@@ -201,7 +201,10 @@ function WorkflowMemberRow(props: {
   );
 }
 
-function WorkflowScript(props: { readonly script: string }) {
+function WorkflowScript(props: {
+  readonly script: string;
+  readonly language: "javascript" | "json";
+}) {
   const [expanded, setExpanded] = useState(false);
   const revealRef = findRevealRef(() => setExpanded(true));
   const canFold = shouldCollapseUserMessage(props.script);
@@ -219,7 +222,7 @@ function WorkflowScript(props: { readonly script: string }) {
             : undefined
         }
       >
-        <ChatMarkdown text={scriptMarkdown(props.script)} cwd={undefined} />
+        <ChatMarkdown text={scriptMarkdown(props.script, props.language)} cwd={undefined} />
       </div>
       {canFold ? (
         <div className="-ms-1">
@@ -231,7 +234,11 @@ function WorkflowScript(props: { readonly script: string }) {
             data-scroll-anchor-ignore
             onClick={() => setExpanded((value) => !value)}
           >
-            {expanded ? "Show less" : "Show full script"}
+            {expanded
+              ? "Show less"
+              : props.language === "json"
+                ? "Show full plan"
+                : "Show full script"}
           </Button>
         </div>
       ) : null}

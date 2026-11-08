@@ -1,4 +1,3 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isActiveSubagentStatus,
   type RuntimeSubagent,
@@ -21,7 +20,7 @@ import { ListRowLayout } from "../../components/ui/ListRowLayout";
 import { ListSection } from "../../components/ui/ListSection";
 import { RowPressable } from "../../components/ui/RowPressable";
 import { cn } from "../../lib/cn";
-import { useEnvironmentServerConfig, useThreadShell } from "../../state/entities";
+import { useEnvironmentServerConfig } from "../../state/entities";
 import { SUBAGENT_TONE_TEXT_CLASS, SubagentStatusDot } from "./SubagentStatusDot";
 import { SubagentStopButton } from "./SubagentStopButton";
 import {
@@ -121,7 +120,7 @@ export function ThreadWorkflowGroup(props: {
             textRole="footnote"
             className="border-t border-border-subtle px-4 py-3 text-foreground-muted"
           >
-            No agents yet
+            No {group.workflow.workflowMemberKind ?? "agent"}s yet
           </Text>
         ) : (
           open.members.map((member) => (
@@ -147,10 +146,7 @@ function WorkflowMemberRow(props: {
 }) {
   const { member } = props;
   const threadId = member.childThreadId === null ? null : ThreadId.make(member.childThreadId);
-  const shell = useThreadShell(
-    threadId === null ? null : scopeThreadRef(props.environmentId, threadId),
-  );
-  const canOpen = threadId !== null && shell !== null;
+  const canOpen = threadId !== null;
   const presentation = resolveSubagentRowPresentation({
     title: member.title,
     prompt: "",

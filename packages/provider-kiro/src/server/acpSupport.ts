@@ -4,6 +4,8 @@ import type { KiroSettings } from "../settings.ts";
 import type * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpErrors from "effect-acp/errors";
@@ -73,6 +75,17 @@ export function kiroAutopilotValue(policy: {
 }
 
 type KiroAcpRuntimeSettings = Pick<KiroSettings, "binaryPath">;
+
+const decodeWorkflowMethods = Schema.decodeUnknownOption(
+  Schema.Struct({ kiro: Schema.Struct({ extensionMethods: Schema.Array(Schema.String) }) }),
+);
+
+export function kiroWorkflowSessionMeta(capabilities: unknown) {
+  const methods = Option.getOrUndefined(decodeWorkflowMethods(capabilities))?.kiro.extensionMethods;
+  return methods?.includes("_kiro/workflow/new") && methods.includes("_kiro/workflow/cancel")
+    ? { kiro: { settings: { workflows: { enabled: true } } } }
+    : undefined;
+}
 
 export function buildKiroAcpSpawnInput(
   settings: KiroAcpRuntimeSettings | null | undefined,
@@ -144,6 +157,8 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
   const context = yield* Layer.build(
     AcpSessionRuntime.layer({
       ...runtimeOptions,
+      // ACP sessions do not inherit the CLI's workflow feature setting.
+      sessionMeta: (initialized) => kiroWorkflowSessionMeta(initialized.agentCapabilities?._meta),
       spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment),
     }),
   );

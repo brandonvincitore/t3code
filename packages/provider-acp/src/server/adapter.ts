@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ProviderTurn,
   type OrchestrationV2RuntimeRequest,
   type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2TurnItem,
   type OrchestrationV2UserInputQuestion,
   type OrchestrationV2WebSearchResult,
@@ -32,6 +33,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ThreadId,
   isRuntimeModeAbove,
+  isOrchestrationV2WorkActive,
   type TurnTokenUsage,
 } from "@t3tools/contracts";
 import { AgentScope, AgentScopeThreadId } from "@t3tools/shared/AgentScope";
@@ -202,7 +204,29 @@ export interface AcpAdapterV2UserInputRequest {
   readonly questions: ReadonlyArray<OrchestrationV2UserInputQuestion>;
 }
 
+export interface AcpAdapterV2WorkflowUpdate {
+  readonly sessionId: string;
+  readonly workflowId: string;
+  readonly title: string | null;
+  readonly prompt: string;
+  readonly status: AcpAdapterV2SubagentUpdate["status"];
+  readonly progress?: string;
+  readonly verifiedRestart?: true;
+  readonly workflow: OrchestrationV2SubagentWorkflow;
+  readonly members: ReadonlyArray<AcpAdapterV2SubagentUpdate & { readonly index: number }>;
+}
+
 export interface AcpAdapterV2ExtensionContext {
+  readonly currentSessionId: Effect.Effect<string | null>;
+  readonly handleSessionStarted: (
+    handler: (
+      session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+    ) => Effect.Effect<void, EffectAcpErrors.AcpError>,
+  ) => Effect.Effect<void>;
+  readonly upsertWorkflow: (update: AcpAdapterV2WorkflowUpdate) => Effect.Effect<boolean>;
+  readonly forkBackground: (
+    effect: Effect.Effect<void, EffectAcpErrors.AcpError>,
+  ) => Effect.Effect<void>;
   readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
   readonly reportProviderRetry: (input: {
     readonly sessionId: string;
@@ -335,6 +359,16 @@ export interface AcpAdapterV2Flavor {
     EffectAcpSchema.InitializeRequest["clientCapabilities"]
   >["_meta"];
   readonly mcpOverHttp?: boolean;
+  readonly supportsNativeWorkflows?: boolean;
+  readonly stopTask?: (
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+    sessionId: string,
+    taskId: string,
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  readonly consumeSessionUpdate?: (
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+    notification: EffectAcpSchema.SessionNotification,
+  ) => Effect.Effect<boolean>;
   readonly normalizeSessionUpdate?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => EffectAcpSchema.SessionNotification;
@@ -620,6 +654,7 @@ export interface AcpAdapterV2SubagentUpdate {
     | "pending"
     | "running"
     | "idle"
+    | "waiting"
     | "completed"
     | "failed"
     | "interrupted"
@@ -627,6 +662,8 @@ export interface AcpAdapterV2SubagentUpdate {
   readonly childSessionId: string | null;
   readonly result: string | null;
   readonly suppressNormalTool?: boolean;
+  readonly progress?: string;
+  readonly workflow?: OrchestrationV2SubagentWorkflow;
 }
 
 export interface AcpAdapterV2Options {
@@ -1362,6 +1399,7 @@ interface ActiveAcpTurn {
     compactionMarker: symbol | undefined;
   };
   readonly input: ProviderAdapter.ProviderAdapterV2TurnInput;
+  readonly projectionRunId?: null;
   readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
   readonly nativeThreadId: string;
   readonly nativeTurnId: string;
@@ -1592,10 +1630,25 @@ interface ActiveAcpSubagent {
   readonly childItemOrdinals: Map<string, number>;
   nextChildOrdinal: number;
   terminalStatusProjected: boolean;
+  projectionAttempt?: number;
   readonly toolState: Pick<ActiveAcpTurn, "tools" | "toolUpdatesSkipped" | "toolStartedAt">;
   // ACP has no interrupted tool status; keep forced interruption across late updates.
   readonly interruptedToolIds: Set<string>;
   readonly toolSessionIds: Map<string, string>;
+}
+
+function acpSubagentExecutionNativeId(subagent: ActiveAcpSubagent): string {
+  const nativeId = subagent.task.nativeTaskRef?.nativeId ?? String(subagent.task.id);
+  return subagent.projectionAttempt === undefined
+    ? nativeId
+    : `${nativeId}:attempt:${subagent.projectionAttempt}`;
+}
+
+function acpSubagentToolKey(subagent: ActiveAcpSubagent, sessionId: string, toolCallId: string) {
+  const nativeTaskId = acpSubagentExecutionNativeId(subagent);
+  return sessionId === subagent.childSessionId
+    ? `${nativeTaskId}:tool:${toolCallId}`
+    : `${nativeTaskId}:session:${sessionId}:tool:${toolCallId}`;
 }
 
 interface AcpNativeChildSession {
@@ -1897,6 +1950,49 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           input.runtimePolicy;
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveAcpTurn | null>(null);
+        const extensionBackgroundWork = yield* Ref.make(0);
+        let lastWorkflowAnchor: ActiveAcpTurn | null = null;
+        let terminalizeNativeWorkflows: (
+          status: "failed" | "interrupted" | "cancelled",
+        ) => Effect.Effect<void> = () => Effect.void;
+        const retiredWorkflowSessions = new Set<string>();
+        const pendingWorkflowNotifications = new Map<
+          string,
+          Array<EffectAcpSchema.SessionNotification>
+        >();
+        const workflows = new Map<
+          string,
+          {
+            readonly owner: ActiveAcpTurn;
+            readonly members: ActiveAcpTurn;
+            readonly coordinator: ActiveAcpSubagent;
+            readonly memberIds: Map<number, string>;
+          }
+        >();
+        const workflowSessions = new Map<
+          string,
+          {
+            readonly rootSessionId: string;
+            readonly owner: ActiveAcpTurn;
+            readonly subagent: ActiveAcpSubagent;
+          }
+        >();
+        const workflowSessionDiscoveries = new Map<string, Deferred.Deferred<boolean>>();
+        const settleWorkflowSessionDiscoveries = Effect.sync(() => {
+          if (Ref.getUnsafe(extensionBackgroundWork) > 0) return;
+          for (const [sessionId, discovery] of workflowSessionDiscoveries) {
+            Deferred.doneUnsafe(discovery, Effect.succeed(workflowSessions.has(sessionId)));
+          }
+          workflowSessionDiscoveries.clear();
+        });
+        const sessionStartedHandlers = new Map<
+          number,
+          Array<
+            (
+              session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+            ) => Effect.Effect<void, EffectAcpErrors.AcpError>
+          >
+        >();
         // Keyed by the agent's steer id; an injection can arrive before its send returns.
         const steerInjections = new Map<string, Deferred.Deferred<void>>();
         const steerInjection = (steerId: string) => {
@@ -1948,6 +2044,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           agentRequests.clear();
           nativeChildren.clear();
           yield* Ref.set(activeSessionSetup, setup);
+          const generation = yield* Ref.get(runtimeCallbackGeneration);
+          for (const previousGeneration of sessionStartedHandlers.keys()) {
+            if (previousGeneration !== generation)
+              sessionStartedHandlers.delete(previousGeneration);
+          }
+          for (const handler of sessionStartedHandlers.get(generation) ?? []) {
+            yield* handler(setup).pipe(
+              Effect.catchCause(() =>
+                Effect.logWarning("ACP extension session restore failed", { driver }),
+              ),
+              Effect.forkIn(runtimeScope ?? sessionScope),
+            );
+          }
         });
         const activeSelection = yield* Ref.make<ModelSelection | null>(null);
         const activeInteractionMode = yield* Ref.make<ProviderInteractionMode | null>(null);
@@ -2239,6 +2348,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         });
         const closeNativeTransport = runtimeCallbackPermit.withPermit(
           Effect.gen(function* () {
+            yield* terminalizeNativeWorkflows("cancelled");
             yield* advanceRuntimeCallbackGeneration;
             const acknowledgements = yield* Ref.getAndSet(
               nativeResponseAcknowledgements,
@@ -2435,6 +2545,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             runtimeGeneration,
             Effect.gen(function* () {
               yield* Ref.set(runtimeRestartRequired, true);
+              yield* terminalizeNativeWorkflows("failed");
               if (!followsAgentWorkState) return;
               agentWork = { sessionUpdate: "state_update", state: "idle", stopReason: "error" };
               for (const child of nativeChildren.values()) {
@@ -3053,7 +3164,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           messageId?: string | null,
         ) {
           if (text.length === 0 && mode === "append") return;
-          const nativeItemId = `${subagent.task.nativeTaskRef?.nativeId ?? subagent.task.id}:message:${messageId ?? "result"}`;
+          const nativeItemId = `${acpSubagentExecutionNativeId(subagent)}:message:${messageId ?? "result"}`;
           const previous = subagent.assistantMessages.get(nativeItemId) ?? "";
           const messageText = mode === "replace" ? text : `${previous}${text}`;
           subagent.assistantMessages.set(nativeItemId, messageText);
@@ -3115,11 +3226,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           projectedStatus?: ProjectedToolStatus,
           owner?: ActiveAcpTurn,
         ) {
-          const nativeTaskId = subagent.task.nativeTaskRef?.nativeId ?? String(subagent.task.id);
-          const key =
-            sessionId === subagent.childSessionId
-              ? `${nativeTaskId}:tool:${toolCall.toolCallId}`
-              : `${nativeTaskId}:session:${sessionId}:tool:${toolCall.toolCallId}`;
+          const key = acpSubagentToolKey(subagent, sessionId, toolCall.toolCallId);
           const context = subagent.toolState;
           const rootSessionId = yield* Ref.get(activeSessionId);
           subagent.toolSessionIds.set(key, sessionId);
@@ -3262,7 +3369,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             existing !== undefined &&
             existing.task.status === update.status &&
             updateIsTerminal &&
-            existing.terminalStatusProjected
+            existing.terminalStatusProjected &&
+            (update.result === null || update.result === existing.task.result) &&
+            update.workflow === undefined &&
+            update.progress === undefined
           ) {
             return;
           }
@@ -3298,7 +3408,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             ...(existing?.task ?? {
               id: nodeId,
               threadId: context.input.threadId,
-              runId: context.input.runId,
+              runId: context.projectionRunId === null ? null : context.input.runId,
               parentNodeId: context.input.rootNodeId,
               origin: "provider_native" as const,
               createdBy: "agent" as const,
@@ -3313,9 +3423,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               startedAt: now,
             }),
             model: update.model?.trim() || existing?.task.model || null,
+            ...(update.workflow === undefined ? {} : { workflow: update.workflow }),
+            ...(update.progress === undefined ? {} : { progress: update.progress }),
             status: taskStatus,
             result: update.result ?? existing?.task.result ?? null,
-            completedAt: acpSubagentStatusIsTerminal(taskStatus) ? now : null,
+            completedAt: acpSubagentStatusIsTerminal(taskStatus)
+              ? (existing?.task.completedAt ?? now)
+              : null,
             updatedAt: now,
           };
           const subagent: ActiveAcpSubagent = existing ?? {
@@ -3380,6 +3494,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               nativeItemRef: { driver, nativeId: promptNativeItemId, strength: "weak" },
               role: "user",
               text: update.prompt,
+              ...(update.workflow === undefined ? {} : { workflowScript: true }),
               ordinal: 100,
               now,
             });
@@ -3422,11 +3537,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               driver,
               providerThread: { ...providerThread, status: "idle" },
             });
-            const buffered = context.pendingSubagentNotifications.get(childSessionId) ?? [];
+            const buffered = [
+              ...(pendingWorkflowNotifications.get(childSessionId) ?? []),
+              ...(context.pendingSubagentNotifications.get(childSessionId) ?? []),
+            ];
+            pendingWorkflowNotifications.delete(childSessionId);
             context.pendingSubagentNotifications.delete(childSessionId);
             yield* Effect.forEach(
               buffered,
-              (notification) => projectSubagentNotification(subagent, notification, context),
+              (notification) => projectRegisteredSubagentNotification(subagent, notification, context),
               { concurrency: 1, discard: true },
             );
           }
@@ -3443,7 +3562,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             ...subagent.task,
             status: taskStatus,
             result,
-            completedAt: acpSubagentStatusIsTerminal(taskStatus) ? now : null,
+            completedAt: acpSubagentStatusIsTerminal(taskStatus)
+              ? (existing?.task.completedAt ?? now)
+              : null,
             updatedAt: now,
           };
           const providerThreadId = subagent.task.providerThreadId;
@@ -3522,6 +3643,384 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             subagent.terminalStatusProjected = true;
           }
         });
+
+        // Session frames can precede the snapshot that identifies their workflow member.
+        const projectRegisteredSubagentNotification = Effect.fnUntraced(function* (
+          subagent: ActiveAcpSubagent,
+          notification: EffectAcpSchema.SessionNotification,
+          owner?: ActiveAcpTurn,
+        ) {
+          if (subagent.task.status === "cancelled" || subagent.task.status === "interrupted")
+            return;
+          const update = notification.update;
+          if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+            for (const event of parseSessionUpdateEvent(notification).events) {
+              if (event._tag !== "ToolCallUpdated") continue;
+              const tool = flavor.normalizeToolCall?.(event.toolCall) ?? event.toolCall;
+              const status = toolStatus(tool.status);
+              yield* projectSubagentTool(
+                subagent,
+                notification.sessionId,
+                tool,
+                acpSubagentStatusIsTerminal(subagent.task.status) &&
+                  (status === "pending" || status === "running" || status === "waiting")
+                  ? "interrupted"
+                  : status,
+                owner,
+              );
+            }
+          } else if (update.sessionUpdate === "tool_call_content_chunk") {
+            const text =
+              update.content.type === "content"
+                ? acpContentBlockDisplayText(update.content.content)
+                : update.content.type === "diff"
+                  ? "changes" in update.content
+                    ? update.content.patch?.text
+                    : update.content.newText
+                  : undefined;
+            if (text === undefined) return;
+            const key = acpSubagentToolKey(subagent, notification.sessionId, update.toolCallId);
+            const previous = subagent.toolState.tools.get(key) ?? {
+              toolCallId: update.toolCallId,
+              status: "inProgress" as const,
+              data: { toolCallId: update.toolCallId },
+            };
+            const status = toolStatus(previous.status);
+            yield* projectSubagentTool(
+              subagent,
+              notification.sessionId,
+              appendToolOutputText(previous, text),
+              acpSubagentStatusIsTerminal(subagent.task.status) &&
+                (status === "pending" || status === "running" || status === "waiting")
+                ? "interrupted"
+                : undefined,
+              owner,
+            );
+          } else {
+            yield* projectSubagentNotification(subagent, notification, owner);
+          }
+        });
+
+        // Native workflow executions outlive the prompt that launched them.
+        const workflowProjectionContext = (
+          anchor: ActiveAcpTurn,
+          overrides: Partial<ActiveAcpTurn> = {},
+        ): ActiveAcpTurn => ({
+          ...anchor,
+          interrupted: false,
+          user: { current: null, nextSegment: 0 },
+          assistant: { current: null, nextSegment: 0 },
+          reasoning: { current: null, nextSegment: 0 },
+          subagents: new Map(),
+          subagentsBySessionId: new Map(),
+          pendingSubagentNotifications: new Map(),
+          ...overrides,
+        });
+
+        const upsertWorkflow = Effect.fn("AcpAdapterV2.upsertWorkflow")(function* (
+          update: AcpAdapterV2WorkflowUpdate,
+        ) {
+          if (flavor.supportsNativeWorkflows !== true) return false;
+          if (update.sessionId !== (yield* Ref.get(activeSessionId))) return false;
+          let entry = workflows.get(update.workflowId);
+          if (entry === undefined) {
+            const anchor = (yield* Ref.get(activeTurn)) ?? lastWorkflowAnchor;
+            if (anchor === null || anchor.nativeThreadId !== update.sessionId) return false;
+            const owner = workflowProjectionContext(anchor);
+            yield* emitSubagent(owner, {
+              nativeTaskId: update.workflowId,
+              childSessionId: null,
+              prompt: update.prompt,
+              title: update.title,
+              model: null,
+              status: update.status,
+              result: null,
+              workflow: update.workflow,
+              suppressNormalTool: true,
+            });
+            const coordinator = owner.subagents.get(update.workflowId);
+            if (coordinator === undefined) return false;
+            const parentThread = makeSubagentChildThread({
+              parentThread: anchor.input.appThread,
+              childThreadId: coordinator.childThreadId,
+              parentNodeId: coordinator.task.id,
+              activeProviderThreadId: null,
+              providerInstanceId: options.instanceId,
+              modelSelection: anchor.input.modelSelection,
+              title: update.title ?? update.prompt,
+              now: coordinator.task.startedAt ?? coordinator.task.updatedAt,
+              createdBy: "agent",
+              creationSource: "provider",
+            });
+            const members = workflowProjectionContext(anchor, {
+              projectionRunId: null,
+              nativeThreadId: `${anchor.nativeThreadId}:workflow:${update.workflowId}`,
+              itemOrdinals: new Map(),
+              input: {
+                ...anchor.input,
+                appThread: parentThread,
+                threadId: coordinator.childThreadId,
+                rootNodeId: coordinator.childRootNodeId,
+              },
+            });
+            entry = { owner, members, coordinator, memberIds: new Map() };
+            workflows.set(update.workflowId, entry);
+          } else if (
+            entry.owner.nativeThreadId !== update.sessionId ||
+            (acpSubagentStatusIsTerminal(entry.coordinator.task.status) &&
+              !acpSubagentStatusIsTerminal(update.status) &&
+              update.verifiedRestart !== true)
+          )
+            return false;
+
+          if (
+            update.verifiedRestart === true &&
+            acpSubagentStatusIsTerminal(entry.coordinator.task.status)
+          ) {
+            entry.coordinator.task = {
+              ...entry.coordinator.task,
+              status: update.status,
+              completedAt: null,
+              result: null,
+              progress: undefined,
+            };
+            entry.coordinator.terminalStatusProjected = false;
+          }
+
+          const childThreads = new Map<number, ThreadId>();
+          for (const [index, nativeTaskId] of entry.memberIds) {
+            const childThreadId = entry.members.subagents.get(nativeTaskId)?.childThreadId;
+            if (childThreadId !== undefined) childThreads.set(index, childThreadId);
+          }
+          const members = update.members.flatMap((member) => {
+            const reportedTaskId = `${update.workflowId}:member:${member.nativeTaskId}`;
+            const previous =
+              entry.members.subagents.get(reportedTaskId) ??
+              (member.childSessionId === null
+                ? undefined
+                : entry.members.subagentsBySessionId.get(member.childSessionId));
+            const existingSession =
+              member.childSessionId === null
+                ? undefined
+                : workflowSessions.get(member.childSessionId);
+            if (existingSession !== undefined && previous !== existingSession.subagent) return [];
+            if (
+              previous === undefined &&
+              ((member.prompt === "" && member.title === null) ||
+                member.suppressNormalTool === false)
+            )
+              return [];
+            const nativeTaskId = previous?.task.nativeTaskRef?.nativeId ?? reportedTaskId;
+            const childThreadId =
+              previous?.childThreadId ??
+              idAllocator.derive.threadFromProviderThread({
+                driver,
+                providerInstanceId: entry.members.input.modelSelection.instanceId,
+                nativeThreadId: `${entry.members.nativeThreadId}:task:${nativeTaskId}`,
+              });
+            entry.memberIds.set(member.index, nativeTaskId);
+            childThreads.set(member.index, childThreadId);
+            return [{ member, nativeTaskId, previous, childThreadId }];
+          });
+          const workflow = {
+            ...update.workflow,
+            agents: update.workflow.agents.map((agent) => {
+              const childThreadId = childThreads.get(agent.index);
+              return childThreadId === undefined ? agent : { ...agent, childThreadId };
+            }),
+          };
+          const coordinatorUpdate = {
+            nativeTaskId: update.workflowId,
+            childSessionId: null,
+            prompt: update.prompt,
+            title: update.title,
+            model: null,
+            status: update.status,
+            result: null,
+            ...(update.progress === undefined ? {} : { progress: update.progress }),
+            workflow,
+            suppressNormalTool: true,
+          } satisfies AcpAdapterV2SubagentUpdate;
+          const knownChildren = new Set(
+            entry.coordinator.task.workflow?.agents.map((agent) => agent.childThreadId),
+          );
+          const preannounceMembers = members.some(
+            ({ childThreadId }) => !knownChildren.has(childThreadId),
+          );
+          // Completed roots admit new member threads only after the coordinator announces their ownership.
+          if (preannounceMembers) yield* emitSubagent(entry.owner, coordinatorUpdate);
+
+          for (const { member, nativeTaskId, previous } of members) {
+            if (
+              update.verifiedRestart === true &&
+              previous !== undefined &&
+              acpSubagentStatusIsTerminal(previous.task.status) &&
+              (isOrchestrationV2WorkActive(member.status) ||
+                (member.childSessionId !== null &&
+                  member.childSessionId !== previous.childSessionId))
+            ) {
+              yield* terminalizeSubagentTools(previous);
+              if (previous.childSessionId !== null) {
+                workflowSessions.delete(previous.childSessionId);
+                entry.members.subagentsBySessionId.delete(previous.childSessionId);
+                pendingWorkflowNotifications.delete(previous.childSessionId);
+                retiredWorkflowSessions.add(previous.childSessionId);
+              }
+              previous.childSessionId = null;
+              previous.projectionAttempt = (previous.projectionAttempt ?? 0) + 1;
+              previous.terminalStatusProjected = false;
+              previous.assistantText = "";
+              previous.assistantMessages.clear();
+              previous.toolState.tools.clear();
+              previous.toolState.toolUpdatesSkipped.clear();
+              previous.toolState.toolStartedAt.clear();
+              previous.toolSessionIds.clear();
+              const restartedAt = yield* DateTime.now;
+              previous.task = {
+                ...previous.task,
+                providerThreadId: null,
+                status: member.status,
+                result: null,
+                startedAt: restartedAt,
+                completedAt: null,
+              };
+              const promptNativeItemId = `${acpSubagentExecutionNativeId(previous)}:prompt`;
+              const artifacts = makeSubagentConversationArtifacts({
+                senderThreadId: previous.task.threadId,
+                messageId: providerMessageId(promptNativeItemId),
+                turnItemId: providerTurnItemId(promptNativeItemId),
+                threadId: previous.childThreadId,
+                rootNodeId: previous.childRootNodeId,
+                providerThreadId: null,
+                providerTurnId: null,
+                nativeItemRef: { driver, nativeId: promptNativeItemId, strength: "weak" },
+                role: "user",
+                text: member.prompt,
+                ordinal: resolveSubagentChildOrdinal(previous, promptNativeItemId),
+                now: restartedAt,
+              });
+              yield* emitProviderEvent({
+                type: "message.updated",
+                driver,
+                message: artifacts.message,
+              });
+              yield* emitProviderEvent({
+                type: "turn_item.updated",
+                driver,
+                turnItem: artifacts.turnItem,
+              });
+            }
+            if (member.childSessionId !== null && update.verifiedRestart === true) {
+              retiredWorkflowSessions.delete(member.childSessionId);
+            }
+            yield* emitSubagent(entry.members, { ...member, nativeTaskId });
+            const projected = entry.members.subagents.get(nativeTaskId);
+            if (projected === undefined) continue;
+            entry.memberIds.set(member.index, nativeTaskId);
+            if (member.childSessionId !== null) {
+              const existing = workflowSessions.get(member.childSessionId);
+              if (existing !== undefined && existing.subagent !== projected) continue;
+              const requestOwner =
+                existing?.owner ??
+                workflowProjectionContext(entry.members, {
+                  itemOrdinals: projected.childItemOrdinals,
+                  tools: projected.toolState.tools,
+                  input: {
+                    ...entry.members.input,
+                    threadId: projected.childThreadId,
+                    rootNodeId: projected.childRootNodeId,
+                  },
+                });
+              workflowSessions.set(member.childSessionId, {
+                rootSessionId: update.sessionId,
+                owner: requestOwner,
+                subagent: projected,
+              });
+              const discovery = workflowSessionDiscoveries.get(member.childSessionId);
+              if (discovery !== undefined) {
+                workflowSessionDiscoveries.delete(member.childSessionId);
+                yield* Deferred.succeed(discovery, true);
+              }
+            }
+            if (acpSubagentStatusIsTerminal(projected.task.status)) {
+              yield* terminalizeSubagentTools(projected);
+              yield* cancelPendingRuntimeRequests({ threadId: projected.childThreadId });
+            }
+          }
+          if (acpSubagentStatusIsTerminal(update.status)) {
+            for (const [nativeTaskId, member] of entry.members.subagents) {
+              if (!isOrchestrationV2WorkActive(member.task.status)) continue;
+              yield* terminalizeSubagentTools(member);
+              yield* emitSubagent(entry.members, {
+                nativeTaskId,
+                childSessionId: member.childSessionId,
+                prompt: member.task.prompt,
+                title: member.task.title,
+                model: member.task.model,
+                result: member.task.result,
+                status: update.status,
+              });
+              yield* cancelPendingRuntimeRequests({ threadId: member.childThreadId });
+            }
+          }
+          if (!preannounceMembers) yield* emitSubagent(entry.owner, coordinatorUpdate);
+          return true;
+        });
+
+        terminalizeNativeWorkflows = Effect.fn("AcpAdapterV2.terminalizeNativeWorkflows")(
+          function* (status) {
+            for (const entry of workflows.values()) {
+              for (const [nativeTaskId, member] of entry.members.subagents) {
+                if (!isOrchestrationV2WorkActive(member.task.status)) continue;
+                yield* terminalizeSubagentTools(member);
+                yield* emitSubagent(entry.members, {
+                  nativeTaskId,
+                  childSessionId: member.childSessionId,
+                  prompt: member.task.prompt,
+                  title: member.task.title,
+                  model: member.task.model,
+                  result: member.task.result,
+                  status,
+                });
+              }
+              if (!isOrchestrationV2WorkActive(entry.coordinator.task.status)) continue;
+              yield* emitSubagent(entry.owner, {
+                nativeTaskId:
+                  entry.coordinator.task.nativeTaskRef?.nativeId ??
+                  String(entry.coordinator.task.id),
+                childSessionId: null,
+                prompt: entry.coordinator.task.prompt,
+                title: entry.coordinator.task.title,
+                model: entry.coordinator.task.model,
+                result: entry.coordinator.task.result,
+                status,
+                ...(entry.coordinator.task.workflow === undefined
+                  ? {}
+                  : {
+                      workflow: {
+                        ...entry.coordinator.task.workflow,
+                        agents: entry.coordinator.task.workflow.agents.map((agent) => ({
+                          ...agent,
+                          state:
+                            agent.state === "queued" ||
+                            agent.state === "running" ||
+                            agent.state === "waiting"
+                              ? status
+                              : agent.state,
+                        })),
+                      },
+                    }),
+              });
+            }
+            pendingWorkflowNotifications.clear();
+            for (const discovery of workflowSessionDiscoveries.values()) {
+              yield* Deferred.succeed(discovery, false);
+            }
+            workflowSessionDiscoveries.clear();
+            lastWorkflowAnchor = null;
+            if (workflowSessions.size > 0) yield* cancelPendingRuntimeRequests();
+          },
+        );
 
         const nativeChild = (sessionId: string) => {
           let child = nativeChildren.get(sessionId);
@@ -5093,6 +5592,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         ) {
           const context = yield* Ref.get(activeTurn);
           const update = notification.update;
+          if (retiredWorkflowSessions.has(notification.sessionId)) return;
           if (
             (context === null || context.finalized) &&
             notification.sessionId === (yield* Ref.get(activeSessionId)) &&
@@ -5218,6 +5718,32 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 driver,
                 providerThread,
               });
+            }
+            return;
+          }
+          const workflowMember = workflowSessions.get(notification.sessionId);
+          if (workflowMember !== undefined) {
+            if (workflowMember.rootSessionId !== (yield* Ref.get(activeSessionId))) return;
+            yield* projectRegisteredSubagentNotification(workflowMember.subagent, notification);
+            return;
+          }
+          if (
+            flavor.supportsNativeWorkflows === true &&
+            notification.sessionId !== (yield* Ref.get(activeSessionId)) &&
+            !context?.subagentsBySessionId.has(notification.sessionId)
+          ) {
+            const carryover = (yield* Ref.get(carryoverSubagents))?.subagents.find(
+              (subagent) => subagent.childSessionId === notification.sessionId,
+            );
+            if (carryover !== undefined) {
+              yield* projectRegisteredSubagentNotification(carryover, notification);
+              return;
+            }
+            const pending = pendingWorkflowNotifications.get(notification.sessionId);
+            if (pending !== undefined) {
+              if (pending.length < 64) pending.push(notification);
+            } else if (pendingWorkflowNotifications.size < 32) {
+              pendingWorkflowNotifications.set(notification.sessionId, [notification]);
             }
             return;
           }
@@ -5811,7 +6337,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const node: OrchestrationV2ExecutionNode = {
             id: nodeId,
             threadId: context.input.threadId,
-            runId: context.input.runId,
+            runId: context.projectionRunId === null ? null : context.input.runId,
             parentNodeId: context.input.rootNodeId,
             rootNodeId: context.input.rootNodeId,
             kind: "approval_request",
@@ -5828,7 +6354,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const turnItem: OrchestrationV2TurnItem = {
             id: idAllocator.derive.approvalTurnItem({ requestId }),
             threadId: context.input.threadId,
-            runId: context.input.runId,
+            runId: context.projectionRunId === null ? null : context.input.runId,
             nodeId,
             providerThreadId: context.input.providerThread.id,
             providerTurnId: context.providerTurnId,
@@ -5938,7 +6464,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const node: OrchestrationV2ExecutionNode = {
             id: nodeId,
             threadId: context.input.threadId,
-            runId: context.input.runId,
+            runId: context.projectionRunId === null ? null : context.input.runId,
             parentNodeId: context.input.rootNodeId,
             rootNodeId: context.input.rootNodeId,
             kind: "user_input_request",
@@ -5955,7 +6481,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const turnItem: OrchestrationV2TurnItem = {
             id: turnItemId,
             threadId: context.input.threadId,
-            runId: context.input.runId,
+            runId: context.projectionRunId === null ? null : context.input.runId,
             nodeId,
             providerThreadId: context.input.providerThread.id,
             providerTurnId: context.providerTurnId,
@@ -6072,14 +6598,32 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           ),
         );
 
-        const cancelPendingRuntimeRequests = Effect.fnUntraced(function* () {
-          const waiting = turnAttached;
-          turnAttached = yield* Deferred.make<boolean>();
-          yield* Deferred.succeed(waiting, false);
-          const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => [
-            [...current.values()],
-            new Map<string, PendingRuntimeRequest>(),
-          ]);
+        const cancelPendingRuntimeRequests = Effect.fnUntraced(function* (options?: {
+          readonly preserveWorkflowRequests?: boolean;
+          readonly threadId?: ThreadId;
+        }) {
+          if (options?.threadId === undefined) {
+            const waiting = turnAttached;
+            turnAttached = yield* Deferred.make<boolean>();
+            yield* Deferred.succeed(waiting, false);
+          }
+          const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => {
+            const retained = new Map<string, PendingRuntimeRequest>();
+            const cancelled: Array<PendingRuntimeRequest> = [];
+            const memberThreads = new Set(
+              [...workflowSessions.values()].map(({ owner }) => owner.input.threadId),
+            );
+            for (const [id, request] of current) {
+              if (
+                (options?.threadId !== undefined && options.threadId !== request.node.threadId) ||
+                (options?.preserveWorkflowRequests === true &&
+                  memberThreads.has(request.node.threadId))
+              ) {
+                retained.set(id, request);
+              } else cancelled.push(request);
+            }
+            return [cancelled, retained];
+          });
           if (requests.length === 0) return;
 
           const now = yield* DateTime.now;
@@ -6266,7 +6810,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* projectCarryoverSubagentStatus(match, status, result);
             return true;
           }
-          if (match.task.status !== "running" && match.task.status !== "pending") {
+          if (!isOrchestrationV2WorkActive(match.task.status)) {
             return false;
           }
           if (!shouldProject) {
@@ -6531,14 +7075,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 }),
             ),
           );
-        const projectAcpRuntimeSessionUpdate = (
+        // The consumer can call generation-guarded extension projection hooks.
+        const projectAcpRuntimeSessionUpdate = Effect.fnUntraced(function* (
           handlerGeneration: number,
           rawNotification: EffectAcpSchema.SessionNotification,
-        ) =>
-          runRuntimeCallbackAtGeneration(
+          targetRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+        ) {
+          if ((yield* Ref.get(runtimeCallbackGeneration)) !== handlerGeneration) return;
+          if (
+            yield* (
+              flavor.consumeSessionUpdate?.(targetRuntime, rawNotification) ?? Effect.succeed(false)
+            )
+          )
+            return;
+          yield* runRuntimeCallbackAtGeneration(
             handlerGeneration,
             projectAcpRuntimeSessionUpdateEffect(rawNotification),
-          ).pipe(Effect.asVoid);
+          );
+        });
 
         // Post-settle background work retains the latest turn policy.
         const clientPolicyContext = Effect.map(Ref.get(activeTurn), (context) => ({
@@ -6670,11 +7224,40 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
           if (handlerOptions.sessionUpdates !== false) {
             yield* targetRuntime.handleSessionUpdate((rawNotification) =>
-              projectAcpRuntimeSessionUpdate(handlerGeneration, rawNotification),
+              projectAcpRuntimeSessionUpdate(handlerGeneration, rawNotification, targetRuntime),
             );
           }
           yield* targetRuntime.handleRequestPermission((nativeParams, requestContext) =>
             Effect.gen(function* () {
+              if (flavor.supportsNativeWorkflows === true) {
+                const admission = yield* runRuntimeCallbackAtGeneration(
+                  handlerGeneration,
+                  Effect.sync(() => {
+                    if (
+                      nativeParams.sessionId === Ref.getUnsafe(activeSessionId) ||
+                      workflowSessions.has(nativeParams.sessionId) ||
+                      Ref.getUnsafe(activeTurn)?.subagentsBySessionId.has(nativeParams.sessionId)
+                    )
+                      return true;
+                    if (
+                      retiredWorkflowSessions.has(nativeParams.sessionId) ||
+                      Ref.getUnsafe(extensionBackgroundWork) === 0
+                    )
+                      return false;
+                    const existing = workflowSessionDiscoveries.get(nativeParams.sessionId);
+                    if (existing !== undefined) return existing;
+                    const discovery = Deferred.makeUnsafe<boolean>();
+                    workflowSessionDiscoveries.set(nativeParams.sessionId, discovery);
+                    return discovery;
+                  }),
+                );
+                if (Option.isNone(admission)) return yield* Effect.never;
+                const admitted =
+                  typeof admission.value === "boolean"
+                    ? admission.value
+                    : yield* Deferred.await(admission.value);
+                if (!admitted) return { outcome: { outcome: "cancelled" } } as const;
+              }
               const trackedTurn = yield* Ref.get(activeTurn);
               const params =
                 trackedTurn !== null && nativeParams.sessionId === (yield* Ref.get(activeSessionId))
@@ -6715,14 +7298,35 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const admitted = yield* runRuntimeCallbackAtGeneration(
                 handlerGeneration,
                 Effect.gen(function* () {
-                  const context = followsAgentWorkState
-                    ? yield* Ref.get(activeTurn)
-                    : yield* activeContext;
+                  const member = workflowSessions.get(params.sessionId);
+                  if (
+                    retiredWorkflowSessions.has(params.sessionId) ||
+                    (member !== undefined &&
+                      (member.rootSessionId !== (yield* Ref.get(activeSessionId)) ||
+                        acpSubagentStatusIsTerminal(member.subagent.task.status)))
+                  ) {
+                    return {
+                      _tag: "Immediate" as const,
+                      response: { outcome: { outcome: "cancelled" } } as const,
+                    };
+                  }
+                  const context =
+                    member?.owner ??
+                    (followsAgentWorkState ? yield* Ref.get(activeTurn) : yield* activeContext);
                   // Kiro sends the tool's kind on its `tool_call` and leaves it
                   // off the permission request for that call; take it from the
                   // tool already seen under the same id so policy can tell a
                   // read from a write.
-                  const knownKind = context?.tools.get(params.toolCall.toolCallId)?.kind;
+                  const memberTaskId =
+                    member === undefined
+                      ? undefined
+                      : acpSubagentExecutionNativeId(member.subagent);
+                  const knownKind =
+                    memberTaskId === undefined
+                      ? context?.tools.get(params.toolCall.toolCallId)?.kind
+                      : member?.subagent.toolState.tools.get(
+                          `${memberTaskId}:tool:${params.toolCall.toolCallId}`,
+                        )?.kind;
                   const disposition = dispositionFor(
                     context?.input.runtimePolicy ?? latestRuntimePolicy,
                     params.toolCall.kind == null && knownKind !== undefined
@@ -6752,8 +7356,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   return {
                     _tag: "Pending" as const,
                     pending: yield* beginApprovalRequest(
-                      yield* activeContext,
-                      params,
+                      context ?? (yield* activeContext),
+                      member === undefined
+                        ? params
+                        : {
+                            ...params,
+                            toolCall: {
+                              ...params.toolCall,
+                              toolCallId: `${params.sessionId}:${params.toolCall.toolCallId}`,
+                            },
+                          },
                       handlerGeneration,
                       transportRequestId,
                     ),
@@ -6972,8 +7584,49 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }).pipe(holdingAgentRequest(handlerGeneration)),
           );
           if (flavor.registerExtensions !== undefined) {
+            const extensionScope = handlerOptions.scope ?? runtimeScope ?? sessionScope;
+            // Native notifications must release the reader before awaiting an RPC reply.
+            const forkBackground = Effect.fn("AcpAdapterV2.forkBackground")(function* (
+              effect: Effect.Effect<void, EffectAcpErrors.AcpError>,
+            ) {
+              yield* Effect.acquireUseRelease(
+                Ref.update(extensionBackgroundWork, (count) => count + 1),
+                () =>
+                  Effect.gen(function* () {
+                    const admitted = yield* runRuntimeCallbackAtGeneration(
+                      handlerGeneration,
+                      Effect.void,
+                    );
+                    if (Option.isNone(admitted)) return;
+                    yield* effect;
+                  }),
+                () =>
+                  Ref.update(extensionBackgroundWork, (count) => count - 1).pipe(
+                    Effect.andThen(settleWorkflowSessionDiscoveries),
+                  ),
+              ).pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.void
+                    : Effect.logWarning("ACP extension background request failed", { driver }),
+                ),
+                Effect.forkIn(extensionScope),
+              );
+            });
             yield* flavor.registerExtensions({
               runtime: targetRuntime,
+              forkBackground,
+              currentSessionId: Ref.get(activeSessionId),
+              handleSessionStarted: (handler) =>
+                Effect.sync(() => {
+                  const handlers = sessionStartedHandlers.get(handlerGeneration) ?? [];
+                  handlers.push(handler);
+                  sessionStartedHandlers.set(handlerGeneration, handlers);
+                }),
+              upsertWorkflow: (update) =>
+                runRuntimeCallbackAtGeneration(handlerGeneration, upsertWorkflow(update)).pipe(
+                  Effect.map(Option.getOrElse(() => false)),
+                ),
               reportProviderRetry: (notice) =>
                 runRuntimeCallbackAtGeneration(handlerGeneration, reportProviderRetry(notice)).pipe(
                   Effect.asVoid,
@@ -7066,6 +7719,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           resumeSessionId?: string,
         ) {
           if (runtimeScope !== undefined) {
+            yield* terminalizeNativeWorkflows("interrupted");
             yield* Scope.close(runtimeScope, Exit.void);
           }
           runtimeScope = yield* Scope.make();
@@ -7212,6 +7866,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   if (lifecycle._tag === "Terminated") {
                     return yield* lifecycle.error;
                   }
+                  yield* terminalizeNativeWorkflows("interrupted");
                   yield* quarantineNativeTransportAtGeneration(previousGeneration);
                   runtime = replacementExit.value.replacementRuntime;
                   runtimeScope = replacementScope;
@@ -7228,7 +7883,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     const buffered = stagedSessionUpdates.splice(0, stagedSessionUpdates.length);
                     if (buffered.length === 0) {
                       handleCandidateSessionUpdate = (notification) =>
-                        projectAcpRuntimeSessionUpdate(replacementGeneration, notification);
+                        projectAcpRuntimeSessionUpdate(
+                          replacementGeneration,
+                          notification,
+                          replacementExit.value.replacementRuntime,
+                        );
                       break;
                     }
                     yield* Effect.forEach(
@@ -8072,6 +8731,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }
               context.inactivityWatchdog = undefined;
               openAgentRequests.clear();
+              yield* terminalizeNativeWorkflows("interrupted");
               yield* quarantineNativeTransportAtGeneration(generation);
               yield* advanceRuntimeCallbackGeneration;
               yield* Ref.set(runtimeRestartRequired, true);
@@ -8494,6 +9154,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     }
                   }
                   yield* Ref.set(activeTurn, context);
+                  lastWorkflowAnchor = context;
                   yield* Ref.set(stoppedRunQuarantine, false);
                   const runningTurn = providerTurnPayload(context, "running", null);
                   yield* Ref.update(providerTurns, (current) => {
@@ -8880,9 +9541,29 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     : flavor.getModelContextWindow?.(selection, session);
                 },
               }),
-          ...(postSettleContinuationEnabled || followsAgentWorkState
+          ...(postSettleContinuationEnabled ||
+          followsAgentWorkState ||
+          flavor.supportsNativeWorkflows === true
             ? {
                 hasPendingBackgroundWork: Effect.gen(function* () {
+                  if ((yield* Ref.get(extensionBackgroundWork)) > 0) return true;
+                  if (
+                    [...workflows.values()].some(({ coordinator }) =>
+                      isOrchestrationV2WorkActive(coordinator.task.status),
+                    )
+                  )
+                    return true;
+                  if (workflowSessions.size > 0) {
+                    const memberThreads = new Set(
+                      [...workflowSessions.values()].map(({ owner }) => owner.input.threadId),
+                    );
+                    if (
+                      [...(yield* Ref.get(pendingRuntimeRequests)).values()].some((request) =>
+                        memberThreads.has(request.node.threadId),
+                      )
+                    )
+                      return true;
+                  }
                   const rootSessionId = yield* Ref.get(activeSessionId);
                   if (
                     followsAgentWorkState &&
@@ -9086,6 +9767,39 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               ),
           ),
           startTurn,
+          ...(flavor.stopTask === undefined
+            ? {}
+            : {
+                stopTask: Effect.fn("AcpAdapterV2.stopTask")(function* ({
+                  providerThread,
+                  taskId,
+                }: Parameters<
+                  NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["stopTask"]>
+                >[0]) {
+                  const sessionId = yield* nativeThreadId(driver, providerThread);
+                  const workflow = workflows.get(taskId);
+                  if (
+                    sessionId !== (yield* Ref.get(activeSessionId)) ||
+                    workflow === undefined ||
+                    workflow.owner.input.providerThread.id !== providerThread.id ||
+                    !isOrchestrationV2WorkActive(workflow.coordinator.task.status)
+                  )
+                    return yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver,
+                      detail: "ACP workflow is not running on this provider thread",
+                    });
+                  yield* flavor.stopTask!(runtime, sessionId, taskId).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapter.ProviderAdapterProtocolError({
+                          driver,
+                          detail: "ACP workflow stop failed",
+                          cause,
+                        }),
+                    ),
+                  );
+                }),
+              }),
           ...(flavor.supportsCompaction === true || flavor.compactSession !== undefined
             ? {
                 compactThread: (turnInput: ProviderAdapter.ProviderAdapterV2TurnInput) =>
@@ -9391,7 +10105,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       if (hardRestart || turnInput.requestRuntimeRestart === true) {
                         yield* quarantineStoppedRun();
                       }
-                      yield* cancelPendingRuntimeRequests();
+                      yield* cancelPendingRuntimeRequests({
+                        preserveWorkflowRequests:
+                          !hardRestart && flavor.supportsNativeWorkflows === true,
+                      });
                       // Finalize before killing so projection catches up and concurrent interrupts see activeTurn cleared.
                       if (
                         (hardRestart || context.promptSettled || settledSoftInterrupt) &&
@@ -9400,6 +10117,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         yield* finalizeTurn(context, "interrupted");
                       }
                       if (hardRestart) {
+                        yield* terminalizeNativeWorkflows("interrupted");
                         if (runtime.terminateProcessGroup === undefined) {
                           return yield* poisonTeardown(
                             "ACP runtime does not expose its required process-group teardown; the session is poisoned",

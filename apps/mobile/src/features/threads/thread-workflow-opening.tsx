@@ -140,19 +140,22 @@ export function ThreadWorkflowOpening(props: {
             ))
           : null}
         {canListMembers ? unphased.map(renderMember) : null}
-        <WorkflowScript script={opening.script} />
+        <WorkflowScript script={opening.script} language={opening.scriptLanguage ?? "javascript"} />
       </View>
     </WorkLogBlock>
   );
 }
 
-function WorkflowScript(props: { readonly script: string }) {
+function WorkflowScript(props: {
+  readonly script: string;
+  readonly language: "javascript" | "json";
+}) {
   const [expanded, setExpanded] = useState(false);
   const { themeAppearance } = useAppearancePreferences();
   const script = props.script.trimEnd();
   const lines = useMarkdownCodeHighlight({
     code: script,
-    language: "javascript",
+    language: props.language,
     theme: themeAppearance,
     enabled: true,
   });
@@ -191,7 +194,11 @@ function WorkflowScript(props: { readonly script: string }) {
           className="self-start py-1 active:opacity-70"
         >
           <Text className="font-t3-medium text-xs text-foreground-muted">
-            {expanded ? "Show less" : "Show full script"}
+            {expanded
+              ? "Show less"
+              : props.language === "json"
+                ? "Show full plan"
+                : "Show full script"}
           </Text>
         </Pressable>
       ) : null}

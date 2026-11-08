@@ -338,7 +338,21 @@ describe("resolveSubagentStopTarget", () => {
       kind: "workflow",
       input: { threadId: native.threadId, subagentId: native.id },
     });
-    expect(resolveSubagentStopTarget({ ...native, workflow, status: "waiting" })).toBeNull();
+    expect(resolveSubagentStopTarget({ ...native, workflow, status: "waiting" })).toEqual({
+      kind: "workflow",
+      input: { threadId: native.threadId, subagentId: native.id },
+    });
+    expect(
+      resolveSubagentStopTarget({
+        ...native,
+        driver: ProviderDriverKind.make("kiro"),
+        workflow,
+        status: "waiting",
+      }),
+    ).toEqual({
+      kind: "workflow",
+      input: { threadId: native.threadId, subagentId: native.id },
+    });
     expect(resolveSubagentStopTarget({ ...stopAgent, workflow })).toBeNull();
     expect(resolveSubagentStopTarget({ ...native, workflow, nativeTaskRef: null })).toBeNull();
     expect(
