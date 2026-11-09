@@ -850,7 +850,7 @@ const makeInstructionCompactionHarness = Effect.fnUntraced(function* (
         : {}),
       registerExtensions: makeCopilotSubagentRouting().registerExtensions,
       // Routes updates tagged with a Devin subagent context to that child session.
-      normalizeSessionUpdate: normalizeDevinSessionUpdate,
+      normalizeSessionUpdate: (notification) => [normalizeDevinSessionUpdate(notification)],
 
       makeRuntime: makeMockRuntime({
         childProcessSpawner,
@@ -3266,7 +3266,7 @@ describe("AcpAdapterV2", () => {
         flavor: {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
-          normalizeSessionUpdate: normalizeDevinSessionUpdate,
+          normalizeSessionUpdate: (notification) => [normalizeDevinSessionUpdate(notification)],
           normalizeToolCall: normalizeDevinToolCall,
           extractSubagentUpdate: extractDevinSubagentUpdate,
           makeRuntime: makeMockRuntime({
@@ -3405,7 +3405,7 @@ describe("AcpAdapterV2", () => {
         flavor: {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
-          normalizeSessionUpdate: normalizeDevinSessionUpdate,
+          normalizeSessionUpdate: (notification) => [normalizeDevinSessionUpdate(notification)],
           normalizeToolCall: normalizeDevinToolCall,
           extractSubagentUpdate: extractDevinSubagentUpdate,
           makeRuntime: makeMockRuntime({
@@ -3732,7 +3732,7 @@ describe("AcpAdapterV2", () => {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
           registerExtensions: routing.registerExtensions,
-          normalizeSessionUpdate: routing.normalizeSessionUpdate,
+          normalizeSessionUpdate: (notification) => [routing.normalizeSessionUpdate(notification)],
           extractSubagentUpdate: extractCopilotSubagentUpdate,
           makeRuntime: makeMockRuntime({
             childProcessSpawner,

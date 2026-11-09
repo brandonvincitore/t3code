@@ -373,7 +373,7 @@ export interface AcpAdapterV2Flavor {
   ) => Effect.Effect<boolean>;
   readonly normalizeSessionUpdate?: (
     notification: EffectAcpSchema.SessionNotification,
-  ) => EffectAcpSchema.SessionNotification;
+  ) => ReadonlyArray<EffectAcpSchema.SessionNotification>;
   /**
    * Agent updates that belong to no turn (Kiro's own cloud-config fetch). They
    * are dropped before anything reads them, so they neither show in the turn
@@ -7096,15 +7096,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   ) ?? Effect.void
                 );
               }
-              const normalized = flavor.normalizeSessionUpdate?.(notification) ?? notification;
-              // Turn projection misses compactions that finish while idle or after settlement.
-              if (
-                normalized.update.sessionUpdate === "compaction_update" &&
-                normalized.update.status === "completed"
-              ) {
-                yield* markSessionCompacted(normalized.sessionId, normalized.update.compactionId);
+              for (const normalized of flavor.normalizeSessionUpdate?.(notification) ?? [
+                notification,
+              ]) {
+                // Turn projection misses compactions that finish while idle or after settlement.
+                if (
+                  normalized.update.sessionUpdate === "compaction_update" &&
+                  normalized.update.status === "completed"
+                ) {
+                  yield* markSessionCompacted(normalized.sessionId, normalized.update.compactionId);
+                }
+                yield* handleSessionUpdate(normalized);
               }
-              yield* handleSessionUpdate(normalized);
             },
             Effect.mapError(
               (cause) =>
