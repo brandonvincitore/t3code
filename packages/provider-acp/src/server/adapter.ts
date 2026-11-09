@@ -1960,6 +1960,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const clientPolicyGrants = makeAcpClientPolicyGrants();
         let latestRuntimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy =
           input.runtimePolicy;
+        let latestRuntimePolicySessionId: string | null = input.initialNativeThreadId ?? null;
         const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
         const activeTurn = yield* Ref.make<ActiveAcpTurn | null>(null);
         const extensionBackgroundWork = yield* Ref.make(0);
@@ -7367,12 +7368,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       : member?.subagent.toolState.tools.get(
                           `${memberTaskId}:tool:${params.toolCall.toolCallId}`,
                         )?.kind;
-                  const disposition = dispositionFor(
-                    context?.input.runtimePolicy ?? latestRuntimePolicy,
-                    params.toolCall.kind == null && knownKind !== undefined
-                      ? { ...params, toolCall: { ...params.toolCall, kind: knownKind } }
-                      : params,
-                  );
+                  const foreignIdleRequest =
+                    context === null &&
+                    !followsAgentWorkState &&
+                    params.sessionId !== latestRuntimePolicySessionId;
+                  const disposition = foreignIdleRequest
+                    ? "deny"
+                    : dispositionFor(
+                        context?.input.runtimePolicy ?? latestRuntimePolicy,
+                        params.toolCall.kind == null && knownKind !== undefined
+                          ? { ...params, toolCall: { ...params.toolCall, kind: knownKind } }
+                          : params,
+                      );
                   if (disposition === "allow") {
                     const optionId = selectAutoApprovedPermissionOption(params);
                     return {
@@ -7383,7 +7390,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                           : ({ outcome: { outcome: "selected", optionId } } as const),
                     };
                   }
-                  if (disposition === "deny") {
+                  // Idle v1 requests cannot attach an approval to a turn.
+                  if (disposition === "deny" || (context === null && !followsAgentWorkState)) {
                     const optionId = selectPermissionOptionId(params, "decline");
                     return {
                       _tag: "Immediate" as const,
@@ -7983,7 +7991,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           function* (
             threadId: ThreadId | null,
             candidate: AcpSessionRuntime.AcpSessionRuntimeStartResult,
+            runtimePolicy = latestRuntimePolicy,
           ) {
+            latestRuntimePolicy = runtimePolicy;
+            latestRuntimePolicySessionId = candidate.sessionId;
             rememberTerminalEnvironment(candidate.sessionId, yield* readMcpContext(threadId));
             yield* Ref.set(runtimeRestartRequired, false);
             yield* Ref.set(activeSessionId, candidate.sessionId);
@@ -8050,6 +8061,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               prepareClaimableTerminalEnvironment(yield* readMcpContext(input.threadId));
               return yield* startAcpRuntime(input.threadId);
             });
+        latestRuntimePolicySessionId = started.sessionId;
         if (started.sessionId === input.initialNativeThreadId) {
           yield* adoptLoadedSession(started);
         } else {
@@ -9030,15 +9042,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }
             useProviderThreadIdentity(turnInput.providerThread);
             // load/resume can invoke client methods; install the incoming policy before activation.
-            latestRuntimePolicy = turnInput.runtimePolicy;
             const requestedSessionId = yield* nativeThreadId(driver, turnInput.providerThread);
+            const previousRuntimePolicy = latestRuntimePolicy;
+            const previousRuntimePolicySessionId = latestRuntimePolicySessionId;
+            const restorePreviousRuntimePolicy = Effect.sync(() => {
+              latestRuntimePolicy = previousRuntimePolicy;
+              latestRuntimePolicySessionId = previousRuntimePolicySessionId;
+            });
+            latestRuntimePolicy = turnInput.runtimePolicy;
+            latestRuntimePolicySessionId = requestedSessionId;
             const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
               turnInput.threadId,
-            );
+            ).pipe(Effect.onError(() => restorePreviousRuntimePolicy));
             const needsSessionActivation =
               (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
             if (needsSessionActivation) {
-              const activated = yield* activateSession(requestedSessionId, turnInput.threadId);
+              const activated = yield* activateSession(requestedSessionId, turnInput.threadId).pipe(
+                Effect.onError(() => restorePreviousRuntimePolicy),
+              );
               yield* adoptLoadedSession(activated);
               yield* configureSession(activated, turnInput.modelSelection, turnInput.runtimePolicy);
               yield* Ref.set(activeSelection, turnInput.modelSelection);
@@ -9704,7 +9725,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     itemIdentityVersion = 2;
                     prepareTerminalEnvironment(yield* readMcpContext(threadInput.threadId));
                     yield* startReplacementAcpRuntime(threadInput.threadId, (candidate) =>
-                      commitReplacementSession(threadInput.threadId, candidate),
+                      commitReplacementSession(
+                        threadInput.threadId,
+                        candidate,
+                        threadInput.runtimePolicy,
+                      ),
                     ).pipe(
                       Effect.tapError(() =>
                         Effect.sync(() => {
@@ -9777,15 +9802,29 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     }),
                   );
                   const previousItemIdentityVersion = itemIdentityVersion;
+                  const previousRuntimePolicy = latestRuntimePolicy;
+                  const previousRuntimePolicySessionId = latestRuntimePolicySessionId;
                   useProviderThreadIdentity(threadInput.providerThread);
-                  const restorePreviousItemIdentity = Effect.sync(() => {
+                  const restorePreviousSessionState = Effect.sync(() => {
                     itemIdentityVersion = previousItemIdentityVersion;
+                    latestRuntimePolicy = previousRuntimePolicy;
+                    latestRuntimePolicySessionId = previousRuntimePolicySessionId;
                   });
                   const restartAfterInterrupt = yield* restartRuntimeAfterTeardownIfRequired(
                     threadInput.providerThread.appThreadId,
-                  ).pipe(Effect.tapError(() => restorePreviousItemIdentity));
+                  ).pipe(Effect.onError(() => restorePreviousSessionState));
                   const nextSelection = threadInput.modelSelection ?? input.modelSelection;
-                  if ((yield* Ref.get(activeSessionId)) !== sessionId || restartAfterInterrupt) {
+                  const needsSessionActivation =
+                    (yield* Ref.get(activeSessionId)) !== sessionId || restartAfterInterrupt;
+                  if (
+                    threadInput.runtimePolicy !== undefined ||
+                    needsSessionActivation ||
+                    latestRuntimePolicySessionId !== sessionId
+                  ) {
+                    latestRuntimePolicy = threadInput.runtimePolicy ?? input.runtimePolicy;
+                    latestRuntimePolicySessionId = sessionId;
+                  }
+                  if (needsSessionActivation) {
                     yield* Ref.set(snapshot, {
                       order: [],
                       messages: new Map(),
@@ -9796,7 +9835,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     const activated = yield* activateSession(
                       sessionId,
                       threadInput.providerThread.appThreadId,
-                    ).pipe(Effect.tapError(() => restorePreviousItemIdentity));
+                    ).pipe(Effect.onError(() => restorePreviousSessionState));
                     yield* adoptLoadedSession(activated);
                     const nextRuntimePolicy = threadInput.runtimePolicy ?? input.runtimePolicy;
                     yield* configureSession(activated, nextSelection, nextRuntimePolicy);
