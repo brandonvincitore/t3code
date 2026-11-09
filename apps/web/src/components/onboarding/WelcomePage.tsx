@@ -584,7 +584,7 @@ function AgentsSection({
         <ManagedControl
           reason={
             state === "install"
-              ? managedProviderInstallDenial(serverConfig.managedPolicy)
+              ? managedProviderInstallDenial(serverConfig?.managedPolicy)
               : undefined
           }
         >
