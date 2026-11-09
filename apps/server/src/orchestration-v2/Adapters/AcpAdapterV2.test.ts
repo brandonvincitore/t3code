@@ -5751,6 +5751,79 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.live.each([
+    { runtimeMode: "full-access", kind: "execute", optionId: "allow-once" },
+    { runtimeMode: "auto-accept-edits", kind: "edit", optionId: "allow-once" },
+    { runtimeMode: "approval-required", kind: "read", optionId: "allow-once" },
+  ] as const)(
+    "answers an idle $kind permission using the $runtimeMode session policy",
+    ({ runtimeMode, kind, optionId }) =>
+      Effect.gen(function* () {
+        type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+        let permission: Parameters<Runtime["handleRequestPermission"]>[0] | undefined;
+        let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
+        const makeRuntime = makeMockRuntime({
+          childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+          mockAgentPath: yield* (yield* Path.Path).fromFileUrl(
+            new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+          ),
+          wrapRuntime: (runtime) => ({
+            ...runtime,
+            handleRequestPermission: (handler) =>
+              Effect.sync(() => {
+                permission = handler;
+              }).pipe(Effect.andThen(runtime.handleRequestPermission(handler))),
+          }),
+        });
+        const instanceId = ProviderInstanceId.make("acp-idle-permission");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            makeRuntime: (input) =>
+              Effect.sync(() => {
+                runtimeInput = input;
+              }).pipe(Effect.andThen(makeRuntime(input))),
+          },
+        });
+        const threadId = ThreadId.make("thread-acp-idle-permission");
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode,
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const runtime = yield* adapter.openSession({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+          providerSessionId: ProviderSessionId.make("session-acp-idle-permission"),
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        if (permission === undefined) return yield* Effect.die("Missing permission handler");
+        const response = yield* permission(
+          {
+            sessionId: providerThread.nativeThreadRef!.nativeId,
+            toolCall: { toolCallId: "idle-config", kind, title: "Configure model" },
+            options: [
+              { optionId: "allow-once", kind: "allow_once", name: "Allow" },
+              { optionId: "reject-once", kind: "reject_once", name: "Reject" },
+            ],
+          },
+          { method: "session/request_permission", requestId: "idle-config-permission" },
+        );
+        assert.deepEqual(response, { outcome: { outcome: "selected", optionId } });
+        if (runtimeInput?.onOutgoingResponse !== undefined)
+          yield* runtimeInput.onOutgoingResponse("idle-config-permission");
+      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect("does not turn an unknown permission approval into an execute grant", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;

@@ -7352,9 +7352,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       response: { outcome: { outcome: "cancelled" } } as const,
                     };
                   }
-                  const context =
-                    member?.owner ??
-                    (followsAgentWorkState ? yield* Ref.get(activeTurn) : yield* activeContext);
+                  const context = member?.owner ?? (yield* Ref.get(activeTurn));
                   // Kiro sends the tool's kind on its `tool_call` and leaves it
                   // off the permission request for that call; take it from the
                   // tool already seen under the same id so policy can tell a
