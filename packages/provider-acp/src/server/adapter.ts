@@ -5582,6 +5582,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (work.stopReason === "cancelled" && pendingStopCloseTurn === context) {
             context.interrupted = true;
           }
+          if (work.stopReason === "refusal") context.instructionDelivery = undefined;
           const failure = work.stopReason === "error" ? idleErrorFailure(work.error) : undefined;
           yield* finalizeTurn(
             context,
@@ -9416,6 +9417,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     ) {
                       context.instructionDelivery = undefined;
                       yield* invalidateInstructions(context);
+                      yield* Ref.update(promptInstructionStates, (current) => {
+                        const updated = new Map(current);
+                        updated.delete(requestedSessionId);
+                        return updated;
+                      });
+                      yield* Ref.update(promptRuntimeInstructions, (current) => {
+                        const updated = new Map(current);
+                        updated.delete(requestedSessionId);
+                        return updated;
+                      });
                     }
                     if (compactSession !== undefined) {
                       yield* markSessionCompacted(requestedSessionId);
