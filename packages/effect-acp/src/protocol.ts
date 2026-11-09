@@ -278,6 +278,7 @@ function normalizeAcpJsonRpcError(
 export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(function* (
   options: AcpPatchedProtocolOptions,
 ): Effect.fn.Return<AcpPatchedProtocol, never, Scope.Scope> {
+  const protocolScope = yield* Effect.scope;
   const parser = makeStrictNdJsonRpcParser();
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
   const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
@@ -558,6 +559,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       .pipe(
         Effect.matchCauseEffect({
           onFailure: (cause) => {
+            if (Cause.hasInterruptsOnly(cause)) return Effect.interrupt;
             const failure = Cause.hasDies(cause) ? Option.none() : Cause.findErrorOption(cause);
             if (Option.isSome(failure)) {
               return respondWithError(
@@ -659,28 +661,35 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
       Effect.void;
 
     if (!options.serverRequestMethods.has(message.tag)) {
+      // Extension questions can wait for input while the peer keeps sending replies or closes.
       return observeIncoming.pipe(
-        Effect.andThen(handleExtRequest(message)),
-        Effect.catchTags({
-          AcpProtocolParseError: (error) =>
-            Effect.logWarning(error).pipe(
-              Effect.annotateLogs({
-                method: message.tag,
-                requestId: message.id,
-                operation: error.operation,
-              }),
-              Effect.andThen(
-                respondWithError(
-                  message.id,
-                  AcpError.AcpRequestError.fromExtensionResponseEncodingError(
-                    message.tag,
-                    message.id,
-                    error,
+        Effect.andThen(
+          handleExtRequest(message).pipe(
+            Effect.catchTags({
+              AcpProtocolParseError: (error) =>
+                Effect.logWarning(error).pipe(
+                  Effect.annotateLogs({
+                    method: message.tag,
+                    requestId: message.id,
+                    operation: error.operation,
+                  }),
+                  Effect.andThen(
+                    respondWithError(
+                      message.id,
+                      AcpError.AcpRequestError.fromExtensionResponseEncodingError(
+                        message.tag,
+                        message.id,
+                        error,
+                      ),
+                    ),
                   ),
                 ),
-              ),
-            ),
-        }),
+            }),
+            Effect.raceFirst(Deferred.await(terminationFailure)),
+            Effect.ignore,
+            Effect.forkIn(protocolScope),
+          ),
+        ),
         Effect.asVoid,
       );
     }

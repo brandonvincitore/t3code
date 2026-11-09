@@ -201,6 +201,8 @@ export type AcpAdapterV2NativeLogging = Pick<
 export interface AcpAdapterV2UserInputRequest {
   readonly nativeItemId: string;
   readonly nativeRequestId: string;
+  /** Session-bound callbacks require an admitted active turn, never an idle continuation. */
+  readonly activeSessionId?: string;
   readonly questions: ReadonlyArray<OrchestrationV2UserInputQuestion>;
 }
 
@@ -1716,6 +1718,7 @@ type PendingRuntimeRequest = {
     }
   | {
       readonly type: "user_input";
+      readonly activeTurnOnly: boolean;
       readonly answers: Deferred.Deferred<ProviderUserInputAnswers | null>;
     }
 );
@@ -6446,12 +6449,40 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           generation: number,
           transportRequestId: string,
         ) {
-          const context = yield* activeContext;
+          const member =
+            request.activeSessionId === undefined
+              ? undefined
+              : workflowSessions.get(request.activeSessionId);
+          const requestedContext = member?.owner ?? (yield* Ref.get(activeTurn));
+          if (request.activeSessionId !== undefined) {
+            if (
+              requestedContext === null ||
+              requestedContext.finalized ||
+              requestedContext.interrupted ||
+              retiredWorkflowSessions.has(request.activeSessionId) ||
+              (member === undefined
+                ? requestedContext.nativeThreadId !== request.activeSessionId ||
+                  (yield* Ref.get(activeSessionId)) !== request.activeSessionId
+                : member.rootSessionId !== (yield* Ref.get(activeSessionId)) ||
+                  acpSubagentStatusIsTerminal(member.subagent.task.status)) ||
+              !(yield* Deferred.isDone(requestedContext.promptDispatched))
+            )
+              return null;
+          }
+          const context = requestedContext ?? (yield* activeContext);
+          const nativeItemId =
+            request.activeSessionId === undefined
+              ? request.nativeItemId
+              : `${context.nativeTurnId}:${generation}:${request.nativeItemId}`;
+          const nativeRequestId =
+            request.activeSessionId === undefined
+              ? request.nativeRequestId
+              : `${generation}:${request.nativeRequestId}`;
           yield* closeTextStreams(context);
           const requestId = yield* idAllocator.allocate.runtimeRequest({
             driver,
             providerTurnId: context.providerTurnId,
-            nativeRequestId: request.nativeRequestId,
+            nativeRequestId,
           });
           const answers = yield* Deferred.make<ProviderUserInputAnswers | null>();
           const nativeResponseAcknowledgement = yield* Deferred.make<
@@ -6464,21 +6495,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             nativeResponseAcknowledgement,
           );
           const now = yield* DateTime.now;
-          const nodeId = providerNodeId(request.nativeItemId);
-          const turnItemId = providerTurnItemId(request.nativeItemId);
+          const nodeId = providerNodeId(nativeItemId);
+          const turnItemId = providerTurnItemId(nativeItemId);
           const nativeItemRef = {
             driver,
-            nativeId: request.nativeItemId,
+            nativeId: nativeItemId,
             strength: "weak" as const,
           };
-          const ordinal = yield* resolveItemOrdinal(context, request.nativeItemId);
+          const ordinal = yield* resolveItemOrdinal(context, nativeItemId);
           const runtimeRequest: OrchestrationV2RuntimeRequest = {
             id: requestId,
             nodeId,
             providerTurnId: context.providerTurnId,
             nativeRequestRef: {
               driver,
-              nativeId: request.nativeRequestId,
+              nativeId: nativeRequestId,
               strength: "weak",
             },
             kind: "user_input",
@@ -6530,6 +6561,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const updated = new Map(current);
             updated.set(String(requestId), {
               type: "user_input",
+              activeTurnOnly: request.activeSessionId !== undefined && member === undefined,
               generation,
               nativeResponseAcknowledgement,
               requestId,
@@ -6573,8 +6605,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             generation: number,
             request: Effect.Effect<AcpAdapterV2UserInputRequest>,
             transportRequestId: string,
+            requireActiveTurn = false,
           ) {
-            if (!(yield* awaitRequestTurn(generation))) {
+            if (!requireActiveTurn && !(yield* awaitRequestTurn(generation))) {
               return { answers: null, acknowledgeNativeResponse: Effect.void };
             }
             return yield* runRuntimeCallbackAtGeneration(
@@ -6587,6 +6620,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             ).pipe(
               Effect.flatMap((pending) => {
                 if (Option.isNone(pending)) return Effect.never;
+                if (pending.value === null)
+                  return Effect.succeed({ answers: null, acknowledgeNativeResponse: Effect.void });
                 const { answers, requestId, transportRequestId } = pending.value;
                 return Deferred.await(answers).pipe(
                   Effect.flatMap((result) =>
@@ -6603,6 +6638,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                           : Effect.never,
                       ),
                     ),
+                  ),
+                  Effect.onInterrupt(() =>
+                    requireActiveTurn
+                      ? runRuntimeCallbackAtGeneration(
+                          generation,
+                          cancelPendingRuntimeRequests({ requestId }),
+                        ).pipe(Effect.asVoid)
+                      : Effect.void,
                   ),
                   Effect.ensuring(
                     runRuntimeCallbackAtGeneration(
@@ -6630,8 +6673,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const cancelPendingRuntimeRequests = Effect.fnUntraced(function* (options?: {
           readonly preserveWorkflowRequests?: boolean;
           readonly threadId?: ThreadId;
+          readonly sessionBoundTurnId?: OrchestrationV2ProviderTurn["id"];
+          readonly requestId?: RuntimeRequestId;
         }) {
-          if (options?.threadId === undefined) {
+          if (
+            options?.threadId === undefined &&
+            options?.sessionBoundTurnId === undefined &&
+            options?.requestId === undefined
+          ) {
             const waiting = turnAttached;
             turnAttached = yield* Deferred.make<boolean>();
             yield* Deferred.succeed(waiting, false);
@@ -6644,6 +6693,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             for (const [id, request] of current) {
               if (
+                (options?.requestId !== undefined && request.requestId !== options.requestId) ||
+                (options?.sessionBoundTurnId !== undefined &&
+                  (request.type !== "user_input" ||
+                    !request.activeTurnOnly ||
+                    request.runtimeRequest.providerTurnId !== options.sessionBoundTurnId)) ||
                 (options?.threadId !== undefined && options.threadId !== request.node.threadId) ||
                 (options?.preserveWorkflowRequests === true &&
                   memberThreads.has(request.node.threadId))
@@ -7213,6 +7267,39 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           );
         });
 
+        const admitRequestSession = Effect.fn("AcpAdapterV2.admitRequestSession")(function* (
+          sessionId: string,
+          generation: number,
+        ) {
+          const admission = yield* runRuntimeCallbackAtGeneration(
+            generation,
+            Effect.sync(() => {
+              if (
+                sessionId === Ref.getUnsafe(activeSessionId) ||
+                workflowSessions.has(sessionId) ||
+                Ref.getUnsafe(activeTurn)?.subagentsBySessionId.has(sessionId)
+              )
+                return true;
+              if (
+                retiredWorkflowSessions.has(sessionId) ||
+                Ref.getUnsafe(extensionBackgroundWork) === 0
+              )
+                return false;
+              const existing = workflowSessionDiscoveries.get(sessionId);
+              if (existing !== undefined) return existing;
+              const discovery = Deferred.makeUnsafe<boolean>();
+              workflowSessionDiscoveries.set(sessionId, discovery);
+              return discovery;
+            }),
+          );
+          if (Option.isNone(admission)) return yield* Effect.never;
+          const admitted =
+            typeof admission.value === "boolean"
+              ? admission.value
+              : yield* Deferred.await(admission.value);
+          return admitted;
+        });
+
         const wireAcpRuntimeHandlers = Effect.fnUntraced(function* (
           targetRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"],
           handlerGeneration: number,
@@ -7235,15 +7322,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }),
             Effect.forkIn(handlerOptions.scope ?? runtimeScope ?? sessionScope),
           );
-          const requestUserInput = (
+          const requestUserInput = Effect.fn("AcpAdapterV2.requestUserInput")(function* (
             request: AcpAdapterV2UserInputRequest,
             requestContext: EffectAcpProtocol.AcpRequestContext,
-          ) =>
-            requestUserInputWithAdmission(
+          ) {
+            if (
+              request.activeSessionId !== undefined &&
+              flavor.supportsNativeWorkflows === true &&
+              !(yield* admitRequestSession(request.activeSessionId, handlerGeneration))
+            ) {
+              return { answers: null, acknowledgeNativeResponse: Effect.void };
+            }
+            return yield* requestUserInputWithAdmission(
               handlerGeneration,
               Effect.succeed(request),
               requestContext.requestId,
+              request.activeSessionId !== undefined,
             );
+          });
           const clientFileSystem = flavor.clientFileSystem;
           if (clientFileSystem !== undefined) {
             yield* targetRuntime.handleReadTextFile((request) =>
@@ -7273,34 +7369,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           }
           yield* targetRuntime.handleRequestPermission((nativeParams, requestContext) =>
             Effect.gen(function* () {
-              if (flavor.supportsNativeWorkflows === true) {
-                const admission = yield* runRuntimeCallbackAtGeneration(
-                  handlerGeneration,
-                  Effect.sync(() => {
-                    if (
-                      nativeParams.sessionId === Ref.getUnsafe(activeSessionId) ||
-                      workflowSessions.has(nativeParams.sessionId) ||
-                      Ref.getUnsafe(activeTurn)?.subagentsBySessionId.has(nativeParams.sessionId)
-                    )
-                      return true;
-                    if (
-                      retiredWorkflowSessions.has(nativeParams.sessionId) ||
-                      Ref.getUnsafe(extensionBackgroundWork) === 0
-                    )
-                      return false;
-                    const existing = workflowSessionDiscoveries.get(nativeParams.sessionId);
-                    if (existing !== undefined) return existing;
-                    const discovery = Deferred.makeUnsafe<boolean>();
-                    workflowSessionDiscoveries.set(nativeParams.sessionId, discovery);
-                    return discovery;
-                  }),
-                );
-                if (Option.isNone(admission)) return yield* Effect.never;
-                const admitted =
-                  typeof admission.value === "boolean"
-                    ? admission.value
-                    : yield* Deferred.await(admission.value);
-                if (!admitted) return { outcome: { outcome: "cancelled" } } as const;
+              if (
+                flavor.supportsNativeWorkflows === true &&
+                !(yield* admitRequestSession(nativeParams.sessionId, handlerGeneration))
+              ) {
+                return { outcome: { outcome: "cancelled" } } as const;
               }
               const trackedTurn = yield* Ref.get(activeTurn);
               const params =
@@ -8527,6 +8600,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const settledStatus = context.interrupted ? "interrupted" : status;
           context.finalizedStatus = settledStatus;
           context.finalized = true;
+          yield* cancelPendingRuntimeRequests({ sessionBoundTurnId: context.providerTurnId });
           const watchdog = context.inactivityWatchdog;
           context.inactivityWatchdog = undefined;
           if (watchdog !== undefined) {

@@ -67,6 +67,9 @@ steps. This branch does not add a separate organization account or administratio
 - Select the project in Settings → Providers → Kiro. Inspect its active agents, skills,
   model choices and reasoning options, then refresh after changing native Kiro configuration.
   Available choices come from the signed-in account and workspace.
+- Answer native Kiro questions in the question card, using a choice or your own text.
+  Dismissing a question skips it; Stop ends the turn. After a server restart, an open
+  question continues through a new message rather than the original live callback.
 - Import an existing native CLI session and continue it. Check history recovery after
   reopening a conversation or using Edit from here.
 - Open Specs to read and edit requirements, bugfix notes, designs, and tasks under `.kiro/specs`.

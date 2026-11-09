@@ -13,6 +13,7 @@ import * as Sink from "effect/Sink";
 import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as Ref from "effect/Ref";
+import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
@@ -52,6 +53,7 @@ const decodeSessionCancelNotification = Schema.decodeEffect(
   Schema.fromJsonString(SessionCancelNotification),
 );
 const decodeExtRequest = Schema.decodeEffect(Schema.fromJsonString(ExtRequest));
+const decodeExtResponse = Schema.decodeEffect(Schema.fromJsonString(ExtResponse));
 const decodeRequestPermissionResponse = Schema.decodeEffect(
   Schema.fromJsonString(RequestPermissionResponse),
 );
@@ -651,6 +653,60 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         operation: "receive-response",
       });
     }),
+  );
+
+  it.effect(
+    "keeps reading while an extension awaits user input and interrupts it on disconnect",
+    () =>
+      Effect.gen(function* () {
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const entered = yield* Queue.unbounded<string>();
+        const exited = yield* Queue.unbounded<string>();
+        const answer = yield* Deferred.make<{ readonly ok: boolean }>();
+        const termination = yield* Deferred.make<void>();
+        const acknowledged = yield* Queue.unbounded<string>();
+        const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio,
+          serverRequestMethods: new Set(),
+          onTermination: () => Deferred.succeed(termination, undefined).pipe(Effect.asVoid),
+          onOutgoingResponse: (id) => Queue.offer(acknowledged, id).pipe(Effect.asVoid),
+          onExtRequest: (_method, _params, context) =>
+            Queue.offer(entered, context.requestId).pipe(
+              Effect.andThen(
+                context.requestId === AcpProtocol.acpRequestIdentity(9)
+                  ? Deferred.await(answer)
+                  : Effect.never,
+              ),
+              Effect.ensuring(Queue.offer(exited, context.requestId)),
+            ),
+        });
+        const request = (id: number) =>
+          encodeJsonl(ExtRequest, {
+            jsonrpc: "2.0",
+            id,
+            method: "x/test",
+            params: { hello: "question" },
+            headers: [],
+          });
+        yield* Queue.offer(input, yield* request(9));
+        assert.equal(yield* Queue.take(entered), AcpProtocol.acpRequestIdentity(9));
+        yield* Queue.offer(
+          input,
+          encoder.encode('{"jsonrpc":"2.0","method":"x/progress","params":{}}\n'),
+        );
+        const notification = Option.getOrThrow(yield* transport.incoming.pipe(Stream.runHead));
+        assert.equal(notification._tag, "ExtNotification");
+        yield* Deferred.succeed(answer, { ok: true });
+        const response = yield* decodeExtResponse(yield* Queue.take(output));
+        assert.deepEqual(response, { jsonrpc: "2.0", id: 9, result: { ok: true } });
+        assert.equal(yield* Queue.take(acknowledged), AcpProtocol.acpRequestIdentity(9));
+        yield* Queue.take(exited);
+        yield* Queue.offer(input, yield* request(10));
+        yield* Queue.take(entered);
+        yield* Queue.end(input);
+        yield* Deferred.await(termination);
+        assert.equal(yield* Queue.take(exited), AcpProtocol.acpRequestIdentity(10));
+      }),
   );
 
   it.effect("answers an extension request whose handler also dies as an internal error", () =>

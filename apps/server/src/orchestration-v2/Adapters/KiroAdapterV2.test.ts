@@ -8,6 +8,7 @@ import {
   type OrchestrationV2ProviderTurn,
   NodeId,
   type ProviderApprovalDecision,
+  type ProviderUserInputAnswers,
   ProjectId,
   ProviderInstanceId,
   ProviderSessionId,
@@ -479,7 +480,12 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       requestId: RuntimeRequestId,
       decision: ProviderApprovalDecision,
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly answerQuestion: (
+      requestId: RuntimeRequestId,
+      answers?: ProviderUserInputAnswers,
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly rollbackToStart: Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly disconnect: Effect.Effect<void>;
 
     readonly hasPendingBackgroundWork: Effect.Effect<boolean>;
     readonly stopWorkflow: (taskId: string) => Effect.Effect<void, ProviderAdapterV2Error>;
@@ -511,6 +517,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       ),
   );
   let runtimesMade = 0;
+  let disconnect: Effect.Effect<void> = Effect.die("No replay runtime started");
   const instanceId = ProviderInstanceId.make(`kiro-${input.scenario}`);
   const scriptPath = yield* path.fromFileUrl(
     new URL("../../../scripts/acp-replay-agent.ts", import.meta.url),
@@ -534,7 +541,17 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       return makeAcpReplayRuntime({
         ...script,
         scriptPath,
-        childProcessSpawner,
+        childProcessSpawner: {
+          ...childProcessSpawner,
+          spawn: (command) =>
+            childProcessSpawner.spawn(command).pipe(
+              Effect.tap((handle) =>
+                Effect.sync(() => {
+                  disconnect = handle.kill().pipe(Effect.orDie);
+                }),
+              ),
+            ),
+        },
         fileSystem,
         ...(input.replayGate === undefined ? {} : { replayGate: input.replayGate }),
       })(runtimeInput).pipe(
@@ -568,7 +585,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       modelSelection,
       runtimePolicy,
     });
-    const providerThread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
+    let providerThread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
     const now = yield* DateTime.now;
     const startTurnOn = (ordinal: number, model: string, options?: ModelSelection["options"]) => {
       const suffix = `${threadId}:${ordinal}`;
@@ -621,6 +638,12 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       startTurnOn,
       interrupt: (providerTurnId) => session.interruptTurn({ providerThread, providerTurnId }),
       respond: (requestId, decision) => session.respondToRuntimeRequest({ requestId, decision }),
+      answerQuestion: (requestId, answers) =>
+        session.respondToRuntimeRequest({
+          requestId,
+          ...(answers === undefined ? {} : { answers }),
+        }),
+      disconnect: Effect.suspend(() => disconnect),
       rollbackToStart: session
         .rollbackThread({
           providerThread,
@@ -631,7 +654,14 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
             appRunOrdinal: 0,
           },
         })
-        .pipe(Effect.asVoid),
+        .pipe(
+          Effect.tap((snapshot) =>
+            Effect.sync(() => {
+              providerThread = snapshot.providerThread;
+            }),
+          ),
+          Effect.asVoid,
+        ),
 
       hasPendingBackgroundWork: session.hasPendingBackgroundWork ?? Effect.succeed(false),
       stopWorkflow: (taskId) =>
@@ -660,6 +690,526 @@ const terminalStatus = (events: ReadonlyArray<ProviderAdapterV2Event>) => {
   const terminal = events.find((event) => event.type === "turn.terminal");
   return terminal?.type === "turn.terminal" ? terminal.status : undefined;
 };
+
+describe("Kiro native question callbacks", () => {
+  const native = "_kiro/userInput";
+  const mcp = "_kiro/mcp/elicitation";
+  const cases = [
+    {
+      name: "free text",
+      method: native,
+      payload: { question: "Which workspace?" },
+      answers: { answer: "the sample workspace" },
+      result: { action: "answered", answer: "the sample workspace" },
+      choices: [],
+    },
+    {
+      name: "option text",
+      method: native,
+      payload: {
+        question: "Which approach?",
+        options: [
+          { title: "Small change", description: "Keep the existing flow", recommended: true },
+          { title: "Rewrite" },
+        ],
+      },
+      answers: { answer: "Small change" },
+      result: { action: "answered", answer: "Small change" },
+      choices: ["Small change", "Rewrite"],
+    },
+    {
+      name: "suboption text",
+      method: native,
+      payload: {
+        question: "Where should it run?",
+        options: [
+          {
+            title: "Local",
+            subOptionsLabel: "Choose a host",
+            subOptions: [{ title: "pop-os", description: "Development host" }, { title: "VPS" }],
+          },
+        ],
+      },
+      answers: { answer: "Local: pop-os" },
+      result: { action: "answered", answer: "Local: pop-os" },
+      choices: ["Local", "Local: pop-os", "Local: VPS"],
+    },
+    {
+      name: "dismissal",
+      method: native,
+      payload: { question: "Continue?" },
+      answers: undefined,
+      result: { action: "dismissed" },
+      choices: [],
+    },
+    {
+      name: "empty answer",
+      method: native,
+      payload: { question: "Which workspace?" },
+      answers: { answer: "  " },
+      result: { action: "dismissed" },
+      choices: [],
+    },
+    {
+      name: "unsupported native multiselect",
+      method: native,
+      payload: { question: "Which workspace?" },
+      answers: { answer: ["one", "two"] },
+      result: { action: "dismissed" },
+      choices: [],
+    },
+    {
+      name: "typed MCP form",
+      method: mcp,
+      payload: {
+        elicitation: {
+          mode: "form",
+          message: "Configure the sample",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: { type: "string" },
+              format: { type: "string", enum: ["json", "text"] },
+              areas: { type: "array", items: { type: "string", enum: ["api", "ui"] }, minItems: 1 },
+              count: { type: "integer" },
+              enabled: { type: "boolean" },
+            },
+            required: ["name", "format", "areas", "count", "enabled"],
+          },
+        },
+      },
+      answers: {
+        name: "Sample",
+        format: "json",
+        areas: ["ui", "api"],
+        count: "2",
+        enabled: "false",
+      },
+      result: {
+        action: "accept",
+        content: { name: "Sample", format: "json", areas: ["ui", "api"], count: 2, enabled: false },
+      },
+    },
+    {
+      name: "invalid MCP form answer",
+      method: mcp,
+      payload: {
+        elicitation: {
+          mode: "form",
+          message: "Choose",
+          requestedSchema: {
+            type: "object",
+            properties: { format: { type: "string", enum: ["json"] } },
+            required: ["format"],
+          },
+        },
+      },
+      answers: { format: "unsupported" },
+      result: { action: "cancel" },
+    },
+  ];
+
+  it.live.each(["approval-required", "full-access"] as const)(
+    "round-trips native questions and typed forms on the original ACP request in %s",
+    (runtimeMode) =>
+      runKiroScript({
+        scenario: `native-questions-${runtimeMode}`,
+        runtimeMode,
+        frames: [
+          ...openSessionFrames({
+            initialize: KIRO_V3_INITIALIZE,
+            configOptions: [modeOption, autopilotOption("on")],
+          })
+            .map((entry) => {
+              const frame = entry.frame as Frame;
+              return runtimeMode === "full-access" && frame.method === "session/set_config_option"
+                ? undefined
+                : entry;
+            })
+            .filter((entry): entry is Frame => entry !== undefined),
+          turnPrompt,
+          ...cases.flatMap(({ method, payload, result }) => [
+            kiroSecretRequest(method, {
+              sessionId: SESSION_ID,
+              toolCallId: "same-native-tool",
+              ...payload,
+            }),
+            kiroSecretResponse(method, result),
+          ]),
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...closeSession,
+        ],
+        drive: ({ events, startTurn, answerQuestion }) =>
+          Effect.gen(function* () {
+            yield* startTurn;
+            const ids = new Set<string>();
+            let index = 0;
+            const turn = yield* collectTurn(
+              events.pipe(
+                Stream.tap((event) => {
+                  if (
+                    event.type !== "turn_item.updated" ||
+                    event.turnItem.type !== "user_input_request"
+                  )
+                    return Effect.void;
+                  const item = event.turnItem;
+                  const expected = cases[index++];
+                  assert.ok(expected);
+                  assert.isFalse(
+                    ids.has(item.id),
+                    "repeated tool calls need distinct question identities",
+                  );
+                  ids.add(item.id);
+                  assert.include(item.nativeItemRef?.nativeId, "same-native-tool");
+                  assert.equal(item.status, "waiting");
+                  if (expected.choices !== undefined) {
+                    assert.deepEqual(
+                      item.questions[0]?.options.map((choice) => choice.value ?? choice.label),
+                      expected.choices,
+                    );
+                    assert.isUndefined(item.questions[0]?.multiSelect);
+                  } else if (expected.name === "typed MCP form") {
+                    assert.equal(
+                      item.questions.find((question) => question.id === "areas")?.multiSelect,
+                      true,
+                    );
+                  }
+                  return answerQuestion(item.requestId, expected.answers);
+                }),
+              ),
+            );
+            assert.equal(terminalStatus(turn), "completed");
+            assert.equal(index, cases.length);
+            assert.isFalse(
+              turn.some(
+                (event) =>
+                  event.type === "turn_item.updated" && event.turnItem.type === "approval_request",
+              ),
+            );
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live(
+    "dismisses unknown sessions, idle questions and URL elicitations without opening a card",
+    () => {
+      const replayGate = makeProviderReplayGate(["idle-handled"]);
+      return runKiroScript({
+        replayGate,
+        scenario: "native-question-admission",
+        frames: [
+          ...openSessionFrames({
+            initialize: KIRO_V3_INITIALIZE,
+            configOptions: [modeOption, autopilotOption("on")],
+          }),
+          kiroSecretRequest(native, {
+            sessionId: SESSION_ID,
+            toolCallId: "idle",
+            question: "Idle?",
+          }),
+          kiroSecretResponse(native, { action: "dismissed" }),
+          { ...update({ sessionUpdate: "session_info_update" }), label: "idle-handled" },
+          turnPrompt,
+          kiroSecretRequest(native, {
+            sessionId: "foreign",
+            toolCallId: "foreign",
+            question: "Foreign?",
+          }),
+          kiroSecretResponse(native, { action: "dismissed" }),
+          kiroSecretRequest(mcp, {
+            sessionId: SESSION_ID,
+            toolCallId: "url",
+            elicitation: {
+              mode: "url",
+              message: "Unsupported URL mode",
+              url: "https://example.invalid/",
+              elicitationId: "url",
+            },
+          }),
+          kiroSecretResponse(mcp, { action: "cancel" }),
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...closeSession,
+        ],
+        drive: ({ events, startTurn }) =>
+          Effect.gen(function* () {
+            yield* Effect.promise(() => replayGate.waitForReached("idle-handled"));
+            replayGate.release("idle-handled");
+            yield* startTurn;
+            const turn = yield* collectTurn(events);
+            assert.equal(terminalStatus(turn), "completed");
+            assert.isFalse(
+              turn.some(
+                (event) =>
+                  event.type === "turn_item.updated" &&
+                  event.turnItem.type === "user_input_request",
+              ),
+            );
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped);
+    },
+  );
+  it.live.each(["completion", "disconnect", "replacement"] as const)(
+    "retires unanswered native questions on %s and rejects late answers",
+    (ending) =>
+      Effect.gen(function* () {
+        const replacementId = `${SESSION_ID}-replacement`;
+        const replacementFrame = (frame: Frame): Frame =>
+          JSON.parse(JSON.stringify(frame).replaceAll(SESSION_ID, replacementId));
+        const questionSeen = yield* Deferred.make<void>();
+        const responseWritten = yield* Deferred.make<void>();
+        yield* runKiroScript({
+          scenario: `native-question-${ending}`,
+          testHooks: {
+            afterPromptWireSettled: () => Deferred.await(questionSeen),
+            onNativeResponseLifecycle: (event) =>
+              event.type === "removed"
+                ? Deferred.succeed(responseWritten, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+          },
+          frames: [
+            ...openSessionFrames({
+              initialize: KIRO_V3_INITIALIZE,
+              configOptions: [modeOption, autopilotOption("on")],
+            }),
+            turnPrompt,
+            kiroSecretRequest(native, {
+              sessionId: SESSION_ID,
+              toolCallId: "pending",
+              question: "Still waiting?",
+            }),
+            ...(ending !== "disconnect"
+              ? [
+                  answer("session/prompt", { stopReason: "end_turn" }, "question-seen"),
+                  kiroSecretResponse(native, { action: "dismissed" }),
+                  ...(ending === "completion" ? closeSession : []),
+                ]
+              : []),
+          ],
+          ...(ending !== "replacement"
+            ? {}
+            : {
+                replacementFrames: [
+                  ...openSessionFrames({
+                    initialize: KIRO_V3_INITIALIZE,
+                    configOptions: [modeOption, autopilotOption("on")],
+                  }).map(replacementFrame),
+                  replacementFrame(turnPrompt),
+                  kiroSecretRequest(native, {
+                    sessionId: SESSION_ID,
+                    toolCallId: "pending",
+                    question: "Stale session?",
+                  }),
+                  kiroSecretResponse(native, { action: "dismissed" }),
+                  kiroSecretRequest(native, {
+                    sessionId: replacementId,
+                    toolCallId: "pending",
+                    question: "Replacement question?",
+                  }),
+                  kiroSecretResponse(native, { action: "answered", answer: "replacement answer" }),
+                  replacementFrame(answer("session/prompt", { stopReason: "end_turn" })),
+                  ...closeSession.map(replacementFrame),
+                ],
+              }),
+          drive: ({
+            events,
+            startTurn,
+            disconnect,
+            answerQuestion,
+            rollbackToStart,
+            startTurnOn,
+          }) =>
+            Effect.gen(function* () {
+              yield* startTurn;
+              let requestId: RuntimeRequestId | undefined;
+              const turn = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) => {
+                    if (
+                      event.type !== "turn_item.updated" ||
+                      event.turnItem.type !== "user_input_request" ||
+                      event.turnItem.status !== "waiting"
+                    )
+                      return Effect.void;
+                    requestId = event.turnItem.requestId;
+                    return Deferred.succeed(questionSeen, undefined).pipe(
+                      Effect.andThen(ending === "disconnect" ? disconnect : Effect.void),
+                    );
+                  }),
+                ),
+              );
+              assert.equal(terminalStatus(turn), ending === "disconnect" ? "failed" : "completed");
+              if (ending !== "disconnect") yield* Deferred.await(responseWritten);
+              assert.ok(requestId);
+              assert.isTrue(
+                turn.some(
+                  (event) =>
+                    event.type === "runtime_request.updated" &&
+                    event.runtimeRequest.id === requestId &&
+                    event.runtimeRequest.status === "cancelled",
+                ),
+              );
+              assert.isTrue(
+                Exit.isFailure(
+                  yield* answerQuestion(requestId, { answer: "late" }).pipe(Effect.exit),
+                ),
+              );
+              if (ending !== "replacement") return;
+              yield* rollbackToStart;
+              yield* startTurnOn(2, "default");
+              let answered = 0;
+              const replacement = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) =>
+                    Effect.gen(function* () {
+                      if (
+                        event.type !== "turn_item.updated" ||
+                        event.turnItem.type !== "user_input_request" ||
+                        event.turnItem.status !== "waiting"
+                      )
+                        return;
+                      assert.equal(event.turnItem.questions[0]?.question, "Replacement question?");
+                      assert.notEqual(event.turnItem.requestId, requestId);
+                      assert.isTrue(
+                        Exit.isFailure(
+                          yield* answerQuestion(requestId!, { answer: "late old answer" }).pipe(
+                            Effect.exit,
+                          ),
+                        ),
+                      );
+                      yield* answerQuestion(event.turnItem.requestId, {
+                        answer: "replacement answer",
+                      });
+                      answered++;
+                    }),
+                  ),
+                ),
+              );
+              assert.equal(answered, 1);
+              assert.equal(terminalStatus(replacement), "completed");
+            }),
+        });
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live.each([native, mcp])(
+    "Stop dismisses %s and leaves a later question answerable",
+    (method) =>
+      Effect.gen(function* () {
+        const payload = (question: string) =>
+          method === native
+            ? { question }
+            : {
+                elicitation: {
+                  mode: "form",
+                  message: question,
+                  requestedSchema: {
+                    type: "object",
+                    properties: { answer: { type: "string" } },
+                    required: ["answer"],
+                  },
+                },
+              };
+        const nativeResponseWritten = yield* Deferred.make<void>();
+        yield* runKiroScript({
+          scenario: `native-question-stop-${method === native ? "native" : "mcp"}`,
+          testHooks: {
+            onNativeResponseLifecycle: (event) =>
+              event.type === "removed"
+                ? Deferred.succeed(nativeResponseWritten, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+          },
+          wrapCancel: (send) => Deferred.await(nativeResponseWritten).pipe(Effect.andThen(send)),
+          frames: [
+            ...openSessionFrames({
+              initialize: KIRO_V3_INITIALIZE,
+              configOptions: [modeOption, autopilotOption("on")],
+            }),
+            turnPrompt,
+            update({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "Question follows." },
+            }),
+            kiroSecretRequest(method, {
+              sessionId: SESSION_ID,
+              toolCallId: "reused",
+              ...payload("First question?"),
+            }),
+            kiroSecretResponse(method, { action: method === native ? "dismissed" : "cancel" }),
+            {
+              type: "expect_outbound",
+              label: "cancel",
+              frame: {
+                kind: "notification",
+                method: "session/cancel",
+                params: { sessionId: SESSION_ID },
+              },
+            },
+            answer("session/prompt", { stopReason: "cancelled" }),
+            turnPrompt,
+            kiroSecretRequest(method, {
+              sessionId: SESSION_ID,
+              toolCallId: "reused",
+              ...payload("Second question?"),
+            }),
+            kiroSecretResponse(
+              method,
+              method === native
+                ? { action: "answered", answer: "second answer" }
+                : { action: "accept", content: { answer: "second answer" } },
+            ),
+            answer("session/prompt", { stopReason: "end_turn" }),
+            ...closeSession,
+          ],
+          drive: ({ events, startTurn, startTurnOn, interrupt, answerQuestion }) =>
+            Effect.gen(function* () {
+              yield* startTurn;
+              let oldRequestId: RuntimeRequestId | undefined;
+              const first = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) => {
+                    if (
+                      event.type !== "turn_item.updated" ||
+                      event.turnItem.type !== "user_input_request" ||
+                      event.turnItem.status !== "waiting"
+                    )
+                      return Effect.void;
+                    oldRequestId = event.turnItem.requestId;
+                    return interrupt(event.turnItem.providerTurnId!);
+                  }),
+                ),
+              );
+              assert.equal(terminalStatus(first), "interrupted");
+              assert.ok(oldRequestId);
+              yield* startTurnOn(2, "default");
+              const second = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) =>
+                    Effect.gen(function* () {
+                      if (
+                        event.type !== "turn_item.updated" ||
+                        event.turnItem.type !== "user_input_request" ||
+                        event.turnItem.status !== "waiting"
+                      )
+                        return;
+                      assert.notEqual(event.turnItem.requestId, oldRequestId);
+                      assert.isTrue(
+                        Exit.isFailure(
+                          yield* answerQuestion(oldRequestId!, { answer: "late" }).pipe(
+                            Effect.exit,
+                          ),
+                        ),
+                      );
+                      yield* answerQuestion(event.turnItem.requestId, { answer: "second answer" });
+                    }),
+                  ),
+                ),
+              );
+              assert.equal(terminalStatus(second), "completed");
+            }),
+        });
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+});
 
 describe("KiroAdapterV2", () => {
   it.effect.each([true, false])(
@@ -877,6 +1427,15 @@ describe("KiroAdapterV2", () => {
               result: { outcome: { outcome: "selected", optionId: "allow" } },
             },
           },
+          kiroSecretRequest("_kiro/userInput", {
+            sessionId: childSessionId,
+            toolCallId: "wf-question",
+            question: "Which inspection?",
+          }),
+          kiroSecretResponse("_kiro/userInput", {
+            action: "answered",
+            answer: "the focused inspection",
+          }),
           turnPrompt,
           ...childToolOutput(childSessionId, "Inspection stdout\n"),
           childSessionUpdate(childSessionId, {
@@ -973,6 +1532,12 @@ describe("KiroAdapterV2", () => {
               result: { outcome: { outcome: "cancelled" } },
             },
           },
+          kiroSecretRequest("_kiro/userInput", {
+            sessionId: secondSessionId,
+            toolCallId: "wf-late-question",
+            question: "Retired step?",
+          }),
+          kiroSecretResponse("_kiro/userInput", { action: "dismissed" }),
           {
             ...workflowEvent("paused", { pauseReason: "Late duplicate pause" }),
             label: "terminal-permission-drained",
@@ -1047,6 +1612,7 @@ describe("KiroAdapterV2", () => {
           startTurn,
           startTurnOn,
           respond,
+          answerQuestion,
           hasPendingBackgroundWork,
           stopWorkflow,
         }) =>
@@ -1055,6 +1621,7 @@ describe("KiroAdapterV2", () => {
             const secondDone = yield* Deferred.make<void>();
             const paused = yield* Deferred.make<void>();
             const cancelled = yield* Deferred.make<void>();
+            const workflowQuestion = yield* Deferred.make<RuntimeRequestId>();
             const approval = yield* Deferred.make<{ id: RuntimeRequestId; threadId: ThreadId }>();
             const reviewApproval = yield* Deferred.make<RuntimeRequestId>();
             const retryApproval = yield* Deferred.make<RuntimeRequestId>();
@@ -1082,6 +1649,8 @@ describe("KiroAdapterV2", () => {
                   if (event.threadId !== undefined)
                     requestOwners.set(event.runtimeRequest.id, event.threadId);
                   if (event.runtimeRequest.status !== "pending") return Effect.void;
+                  if (event.runtimeRequest.kind === "user_input")
+                    return Deferred.succeed(workflowQuestion, event.runtimeRequest.id);
                   if (event.runtimeRequest.nativeRequestRef?.nativeId === "parent-write") {
                     return Deferred.succeed(parentApproval, event.runtimeRequest.id);
                   }
@@ -1134,6 +1703,9 @@ describe("KiroAdapterV2", () => {
             assert.isDefined(request.threadId);
             assert.notEqual(String(request.threadId), "thread-kiro-native-workflow-background");
             yield* respond(request.id, "accept");
+            const questionId = yield* Deferred.await(workflowQuestion);
+            assert.equal(requestOwners.get(questionId), request.threadId);
+            yield* answerQuestion(questionId, { answer: "the focused inspection" });
             yield* startTurnOn(2, "default");
             yield* Deferred.await(paused);
             const reviewRequestId = yield* Deferred.await(reviewApproval);
@@ -1647,6 +2219,7 @@ describe("KiroAdapterV2", () => {
                   hooks: { enabled: true, v2: true },
                   secretStorage: true,
                   openExternalUrl: true,
+                  userInput: true,
                 },
               },
             },

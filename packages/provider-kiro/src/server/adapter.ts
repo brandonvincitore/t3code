@@ -63,6 +63,7 @@ import {
 } from "./skills.ts";
 
 import { makeKiroWorkflowSupport } from "./workflows.ts";
+import { registerKiroQuestionExtensions } from "./questions.ts";
 
 export const KIRO_PROVIDER = ProviderDriverKind.make("kiro");
 /** T3's slug for "Kiro default", and Kiro's documented default model id. */
@@ -706,7 +707,10 @@ function makeKiroAcpAdapterFlavor(
     registerExtensions: (context) =>
       workflows
         .registerExtensions(context)
-        .pipe(Effect.andThen(options.mcp?.registerExtensions(context) ?? Effect.void)),
+        .pipe(
+          Effect.andThen(options.mcp?.registerExtensions(context) ?? Effect.void),
+          Effect.andThen(registerKiroQuestionExtensions(context)),
+        ),
     consumeSessionUpdate: workflows.consumeSessionUpdate,
     stopTask: workflows.stopTask,
     // Kiro V3 loads the user's hooks only when the client opts in. `v2` makes
@@ -714,7 +718,12 @@ function makeKiroAcpAdapterFlavor(
     // `_kiro/hooks/*` requests, which T3 does not answer. Kiro keeps MCP OAuth
     // credentials only through `secretStorage` (see makeKiroSecretStorage).
     clientCapabilitiesMeta: {
-      kiro: { hooks: { enabled: true, v2: true }, secretStorage: true, openExternalUrl: true },
+      kiro: {
+        hooks: { enabled: true, v2: true },
+        secretStorage: true,
+        openExternalUrl: true,
+        userInput: true,
+      },
     },
     makeRuntime,
     promptFailure: kiroPromptFailure,
