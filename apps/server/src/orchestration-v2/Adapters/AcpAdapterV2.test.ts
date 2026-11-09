@@ -1049,7 +1049,7 @@ const makeInstructionCompactionHarness = Effect.fnUntraced(function* (
     }
   });
   const sessionId = "mock-session-1";
-  return Object.assign(runTurn, {
+  return {
     runTurn,
     idleSessionUpdate: Effect.fnUntraced(function* (update: EffectAcpSchema.SessionUpdate) {
       assert.isDefined(sessionUpdate);
@@ -1074,7 +1074,7 @@ const makeInstructionCompactionHarness = Effect.fnUntraced(function* (
       assert.isDefined(copilotSessionEvent);
       yield* copilotSessionEvent({ sessionId, ...event });
     }),
-  });
+  };
 });
 
 function assertReinjectedInstructions(
@@ -1186,7 +1186,7 @@ const optionValues = (question: OrchestrationV2UserInputQuestion | undefined) =>
 describe("AcpAdapterV2", () => {
   it.live("retains delivered instructions across a resumed session info update", () =>
     Effect.gen(function* () {
-      const runTurn = yield* makeInstructionCompactionHarness({});
+      const { runTurn } = yield* makeInstructionCompactionHarness({});
       yield* runTurn("Start work.");
       assert.equal(
         (yield* runTurn("Continue work.", "completed", "resume-info-reopen"))[0]?.text,
@@ -1198,7 +1198,7 @@ describe("AcpAdapterV2", () => {
     "reinjects instructions after idle %s with no continuation consumer",
     (transition) =>
       Effect.gen(function* () {
-        const runTurn = yield* makeInstructionCompactionHarness(
+        const { runTurn } = yield* makeInstructionCompactionHarness(
           {},
           false,
           transition !== "rollback",
@@ -2653,7 +2653,7 @@ describe("AcpAdapterV2", () => {
     "invalidates old instructions after a failed mode change (reopen: %s)",
     (reopen) =>
       Effect.gen(function* () {
-        const runTurn = yield* makeInstructionCompactionHarness({
+        const { runTurn } = yield* makeInstructionCompactionHarness({
           T3_ACP_FAIL_PROMPT_ORDINAL: "2",
         });
         assert.include(
@@ -2668,32 +2668,27 @@ describe("AcpAdapterV2", () => {
       }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
-  it.live(
-    "acknowledges reinjected instructions on a cancelled prompt without a durable receipt",
-    () =>
-      Effect.gen(function* () {
-        const runTurn = yield* makeInstructionCompactionHarness({
-          T3_ACP_VIBE_RETRY_OUTCOME: "cancelled",
-        });
-        yield* runTurn("Start work.", "cancelled");
-        assertReinjectedInstructions(
-          yield* runTurn("Continue after compact.", "cancelled", "compact"),
-          "Continue after compact.",
-        );
-        assertReinjectedInstructions(
-          yield* runTurn("Continue work.", "cancelled"),
-          "Continue work.",
-        );
-        assertReinjectedInstructions(
-          yield* runTurn("Continue after reopen.", "cancelled", true),
-          "Continue after reopen.",
-        );
-      }).pipe(Effect.provide(layerTest), Effect.scoped),
+  it.live("resends instructions after cancelled prompts without publishing a durable receipt", () =>
+    Effect.gen(function* () {
+      const { runTurn } = yield* makeInstructionCompactionHarness({
+        T3_ACP_VIBE_RETRY_OUTCOME: "cancelled",
+      });
+      yield* runTurn("Start work.", "cancelled");
+      assertReinjectedInstructions(
+        yield* runTurn("Continue after compact.", "cancelled", "compact"),
+        "Continue after compact.",
+      );
+      assertReinjectedInstructions(yield* runTurn("Continue work.", "cancelled"), "Continue work.");
+      assertReinjectedInstructions(
+        yield* runTurn("Continue after reopen.", "cancelled", true),
+        "Continue after reopen.",
+      );
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
   it.live("records instructions before ACP work-state completion ends the run", () =>
     Effect.gen(function* () {
-      const runTurn = yield* makeInstructionCompactionHarness(
+      const { runTurn } = yield* makeInstructionCompactionHarness(
         { T3_ACP_ECHO_ACCEPTED_PROMPT: "1" },
         true,
       );
@@ -2709,7 +2704,7 @@ describe("AcpAdapterV2", () => {
     "persists idle compaction after resume before another turn (%s)",
     (transition) =>
       Effect.gen(function* () {
-        const runTurn = yield* makeInstructionCompactionHarness({});
+        const { runTurn } = yield* makeInstructionCompactionHarness({});
         yield* runTurn("Start work.");
         assertReinjectedInstructions(
           yield* runTurn("Continue after idle compaction.", "completed", transition),
@@ -2722,7 +2717,7 @@ describe("AcpAdapterV2", () => {
     "retains ACP instructions across reopen but reinjects after %s compaction",
     (compaction) =>
       Effect.gen(function* () {
-        const runTurn = yield* makeInstructionCompactionHarness(
+        const { runTurn } = yield* makeInstructionCompactionHarness(
           compaction === "protocol"
             ? {
                 T3_ACP_COMPACTION_PROMPT_ORDINALS: "2",
@@ -5807,9 +5802,11 @@ describe("AcpAdapterV2", () => {
           runtimePolicy,
         });
         if (permission === undefined) return yield* Effect.die("Missing permission handler");
+        const nativeId = providerThread.nativeThreadRef?.nativeId;
+        if (nativeId == null) return yield* Effect.die("Missing native session");
         const response = yield* permission(
           {
-            sessionId: providerThread.nativeThreadRef!.nativeId,
+            sessionId: nativeId,
             toolCall: { toolCallId: "idle-config", kind, title: "Configure model" },
             options: [
               { optionId: "allow-once", kind: "allow_once", name: "Allow" },
