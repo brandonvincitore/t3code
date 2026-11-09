@@ -43,6 +43,9 @@ function runRemoteUpdatesTest(
     readonly requests: Queue.Queue<DesktopTelemetryRequestDesktopUpdate>;
     readonly commits: Queue.Queue<DesktopTelemetryCommitDesktopUpdate>;
     readonly cancellations: Queue.Queue<DesktopTelemetryCancelDesktopUpdate>;
+    readonly nextTerminal: Effect.Effect<DesktopUpdateStatusReport>;
+    readonly completedCancellations: Queue.Queue<string>;
+    readonly completedCommits: Queue.Queue<string>;
   }) => Effect.Effect<void, never, DesktopUpdates.DesktopUpdates | DesktopState.DesktopState>,
 ) {
   return Effect.scoped(
@@ -51,6 +54,22 @@ function runRemoteUpdatesTest(
       const commits = yield* Queue.unbounded<DesktopTelemetryCommitDesktopUpdate>();
       const cancellations = yield* Queue.unbounded<DesktopTelemetryCancelDesktopUpdate>();
       const reports: DesktopUpdateStatusReport[] = [];
+      const terminalQueue = yield* Queue.unbounded<DesktopUpdateStatusReport>();
+      const completedCancellations = yield* Queue.unbounded<string>();
+      const completedCommits = yield* Queue.unbounded<string>();
+      // The next pull acknowledges that the listener finished handling the previous control.
+      const acknowledged = <T extends { readonly requestId: string }>(
+        controls: Queue.Queue<T>,
+        completed: Queue.Queue<string>,
+      ) =>
+        Stream.fromQueue(controls).pipe(
+          Stream.flatMap((control) =>
+            Stream.concat(
+              Stream.succeed(control),
+              Stream.fromEffect(Queue.offer(completed, control.requestId)).pipe(Stream.drain),
+            ),
+          ),
+        );
       const publisher = DesktopTelemetryPublisher.DesktopTelemetryPublisher.of({
         latest: Effect.succeedNone,
         changes: Stream.empty,
@@ -60,10 +79,15 @@ function runRemoteUpdatesTest(
         publishUpdateReport: (report) =>
           Effect.sync(() => {
             reports.push(report);
-          }),
+          }).pipe(
+            Effect.andThen(
+              report.outcome === undefined ? Effect.void : Queue.offer(terminalQueue, report),
+            ),
+            Effect.asVoid,
+          ),
         updateRequests: Stream.fromQueue(requests),
-        updateCommits: Stream.fromQueue(commits),
-        updateCancellations: Stream.fromQueue(cancellations),
+        updateCommits: acknowledged(commits, completedCommits),
+        updateCancellations: acknowledged(cancellations, completedCancellations),
       });
 
       const updates = yield* DesktopUpdates.DesktopUpdates;
@@ -72,7 +96,16 @@ function runRemoteUpdatesTest(
         Effect.provideService(DesktopTelemetryPublisher.DesktopTelemetryPublisher, publisher),
       );
       yield* settle;
-      yield* body({ reports, requests, commits, cancellations });
+      const nextTerminal = Queue.take(terminalQueue);
+      yield* body({
+        reports,
+        requests,
+        commits,
+        cancellations,
+        nextTerminal,
+        completedCancellations,
+        completedCommits,
+      });
     }),
   ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
 }
@@ -81,20 +114,44 @@ function terminalReports(reports: DesktopUpdateStatusReport[]): DesktopUpdateSta
   return reports.filter((report) => report.outcome !== undefined);
 }
 
+const emitDownloaded = Effect.fn("test.emitDownloaded")(function* (
+  harness: ReturnType<typeof makeHarness>,
+  version: string,
+) {
+  const updates = yield* DesktopUpdates.DesktopUpdates;
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      const { changes } = yield* updates.subscribe;
+      harness.emit("update-downloaded", { version });
+      yield* changes.pipe(
+        Stream.filter((state) => state.downloadedVersion === version),
+        Stream.runHead,
+      );
+    }),
+  );
+});
+
 describe("DesktopRemoteUpdates", () => {
   it.effect("drives check, download, and install with no local confirmation", () => {
-    const harness = makeHarness();
+    const checkStarted = Deferred.makeUnsafe<void>();
+    const downloadStarted = Deferred.makeUnsafe<void>();
+    const installStarted = Deferred.makeUnsafe<void>();
+    const harness = makeHarness({
+      checkForUpdates: Deferred.succeed(checkStarted, undefined).pipe(Effect.asVoid),
+      downloadUpdate: Deferred.succeed(downloadStarted, undefined).pipe(Effect.asVoid),
+      quitAndInstall: Deferred.succeed(installStarted, undefined).pipe(Effect.asVoid),
+    });
 
-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits }) =>
+    return runRemoteUpdatesTest(harness, ({ reports, requests, commits, nextTerminal }) =>
       Effect.gen(function* () {
         yield* Queue.offer(requests, request("req-1"));
-        yield* settle;
+        yield* Deferred.await(checkStarted);
         assert.equal(harness.checkCount(), 1);
 
         harness.emit("update-available", { version: "1.2.4" });
-        yield* settle;
+        yield* Deferred.await(downloadStarted);
         harness.emit("update-downloaded", { version: "1.2.4" });
-        yield* settle;
+        assert.equal((yield* nextTerminal).requestId, "req-1");
 
         const terminals = terminalReports(reports);
         assert.equal(terminals.length, 1);
@@ -102,12 +159,32 @@ describe("DesktopRemoteUpdates", () => {
         assert.equal(terminals[0]?.requestId, "req-1");
         assert.equal(harness.quitAndInstalls(), 0);
 
+        yield* Queue.offer(requests, request("req-retry"));
+        const recovered = yield* nextTerminal;
+        assert.equal(recovered.outcome, "ready-to-install");
+        assert.equal(recovered.requestId, "req-retry");
+        assert.propertyVal(recovered, "preparedRequestId", "req-1");
+        assert.equal(harness.quitAndInstalls(), 0);
+        assert.equal(harness.downloadCount(), 1);
+
+        yield* Effect.all(
+          ["req-concurrent-a", "req-concurrent-b"].map((id) => Queue.offer(requests, request(id))),
+          { concurrency: "unbounded" },
+        );
+        for (const id of ["req-concurrent-a", "req-concurrent-b"]) {
+          const concurrent = yield* nextTerminal;
+          assert.equal(concurrent.requestId, id);
+          assert.equal(concurrent.outcome, "ready-to-install");
+          assert.propertyVal(concurrent, "preparedRequestId", "req-1");
+        }
+        assert.equal(harness.downloadCount(), 1);
+
         yield* Queue.offer(commits, {
           version: 1,
           type: "commitDesktopUpdate",
           requestId: "req-1",
         });
-        yield* settle;
+        yield* Deferred.await(installStarted);
         assert.equal(harness.quitAndInstalls(), 1);
 
         const statuses = reports
@@ -119,11 +196,171 @@ describe("DesktopRemoteUpdates", () => {
     );
   });
 
+  it.effect("does not renew the preparation lease when a retry recovers its token", () => {
+    const harness = makeHarness();
+
+    return runRemoteUpdatesTest(harness, ({ requests, commits, nextTerminal, completedCommits }) =>
+      Effect.gen(function* () {
+        yield* emitDownloaded(harness, "1.2.4");
+        yield* Queue.offer(requests, request("req-original"));
+        assert.equal((yield* nextTerminal).outcome, "ready-to-install");
+
+        yield* TestClock.adjust(Duration.minutes(4));
+        yield* emitDownloaded(harness, "1.2.4");
+        yield* Queue.offer(requests, request("req-retry"));
+        assert.propertyVal(yield* nextTerminal, "preparedRequestId", "req-original");
+
+        yield* TestClock.adjust(Duration.minutes(1));
+        yield* Queue.offer(commits, {
+          version: 1,
+          type: "commitDesktopUpdate",
+          requestId: "req-original",
+        });
+        const expired = yield* nextTerminal;
+        assert.equal(expired.requestId, "req-original");
+        assert.equal(expired.reason, "This desktop update is no longer prepared.");
+        assert.equal(yield* Queue.take(completedCommits), "req-original");
+        assert.equal(harness.quitAndInstalls(), 0);
+
+        yield* Queue.offer(requests, request("req-new"));
+        const fresh = yield* nextTerminal;
+        assert.equal(fresh.outcome, "ready-to-install");
+        assert.equal(fresh.requestId, "req-new");
+        assert.notProperty(fresh, "preparedRequestId");
+        yield* Queue.offer(commits, {
+          version: 1,
+          type: "commitDesktopUpdate",
+          requestId: "req-original",
+        });
+        assert.equal((yield* nextTerminal).outcome, "failed");
+        assert.equal(yield* Queue.take(completedCommits), "req-original");
+        yield* Queue.offer(commits, {
+          version: 1,
+          type: "commitDesktopUpdate",
+          requestId: "req-new",
+        });
+        assert.equal(yield* Queue.take(completedCommits), "req-new");
+        assert.equal(harness.quitAndInstalls(), 1);
+      }),
+    );
+  });
+
+  it.effect.each([
+    { name: "added channel", original: {}, retry: { channel: "latest" as const } },
+    { name: "removed channel", original: { channel: "latest" as const }, retry: {} },
+    {
+      name: "changed channel",
+      original: { channel: "latest" as const },
+      retry: { channel: "nightly" as const },
+    },
+    { name: "added target", original: {}, retry: { targetVersion: "1.2.4" } },
+    { name: "removed target", original: { targetVersion: "1.2.4" }, retry: {} },
+    {
+      name: "changed target",
+      original: { targetVersion: "1.2.4" },
+      retry: { targetVersion: "1.2.5" },
+    },
+  ])("refuses a retained preparation retry with $name", ({ original, retry }) => {
+    const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
+
+    return runRemoteUpdatesTest(harness, ({ requests, commits, nextTerminal, completedCommits }) =>
+      Effect.gen(function* () {
+        yield* emitDownloaded(harness, "1.2.4");
+        yield* Queue.offer(requests, { ...request("req-intent-original"), ...original });
+        assert.equal((yield* nextTerminal).outcome, "ready-to-install");
+        yield* Queue.offer(requests, { ...request("req-intent-other"), ...retry });
+        const refused = yield* nextTerminal;
+        assert.equal(refused.requestId, "req-intent-other");
+        assert.equal(refused.outcome, "failed");
+        assert.notProperty(refused, "preparedRequestId");
+        assert.equal(refused.reason, "A prepared desktop update is already in progress.");
+        assert.equal(harness.downloadCount(), 0);
+        yield* Queue.offer(commits, {
+          version: 1,
+          type: "commitDesktopUpdate",
+          requestId: "req-intent-original",
+        });
+        assert.equal(yield* Queue.take(completedCommits), "req-intent-original");
+        assert.equal(harness.quitAndInstalls(), 1);
+      }),
+    );
+  });
+
+  it.effect("refuses recovery after the downloaded artifact changes", () => {
+    const harness = makeHarness();
+
+    return runRemoteUpdatesTest(harness, ({ requests, commits, nextTerminal }) =>
+      Effect.gen(function* () {
+        yield* emitDownloaded(harness, "1.2.4");
+        yield* Queue.offer(requests, request("req-artifact-original"));
+        assert.equal((yield* nextTerminal).outcome, "ready-to-install");
+        yield* emitDownloaded(harness, "1.2.5");
+        yield* Queue.offer(requests, request("req-artifact-retry"));
+        const refused = yield* nextTerminal;
+        assert.equal(refused.requestId, "req-artifact-retry");
+        assert.equal(refused.outcome, "failed");
+        assert.notProperty(refused, "preparedRequestId");
+        yield* Queue.offer(commits, {
+          version: 1,
+          type: "commitDesktopUpdate",
+          requestId: "req-artifact-original",
+        });
+        assert.equal((yield* nextTerminal).reason, "This desktop update is no longer prepared.");
+        assert.equal(harness.quitAndInstalls(), 0);
+      }),
+    );
+  });
+
+  it.effect("cancels only the original reservation, not its retry correlation", () => {
+    const harness = makeHarness();
+
+    return runRemoteUpdatesTest(
+      harness,
+      ({
+        requests,
+        commits,
+        cancellations,
+        nextTerminal,
+        completedCancellations,
+        completedCommits,
+      }) =>
+        Effect.gen(function* () {
+          yield* emitDownloaded(harness, "1.2.4");
+          yield* Queue.offer(requests, request("req-owner"));
+          assert.equal((yield* nextTerminal).outcome, "ready-to-install");
+          yield* Queue.offer(requests, request("req-alias"));
+          assert.propertyVal(yield* nextTerminal, "preparedRequestId", "req-owner");
+          yield* Queue.offer(cancellations, {
+            version: 1,
+            type: "cancelDesktopUpdate",
+            requestId: "req-alias",
+          });
+          assert.equal(yield* Queue.take(completedCancellations), "req-alias");
+          yield* Queue.offer(commits, {
+            version: 1,
+            type: "commitDesktopUpdate",
+            requestId: "req-alias",
+          });
+          assert.equal((yield* nextTerminal).reason, "This desktop update is no longer prepared.");
+          yield* Queue.offer(requests, request("req-after-alias-cancel"));
+          assert.propertyVal(yield* nextTerminal, "preparedRequestId", "req-owner");
+          yield* Queue.offer(commits, {
+            version: 1,
+            type: "commitDesktopUpdate",
+            requestId: "req-owner",
+          });
+          yield* Queue.take(completedCommits);
+          assert.equal(yield* Queue.take(completedCommits), "req-owner");
+          assert.equal(harness.quitAndInstalls(), 1);
+        }),
+    );
+  });
+
   it.effect("switches to the requested track before preparing its release", () => {
     // In-memory settings keep the channel write off real disk I/O.
     const harness = makeHarness({ beforeSetUpdateChannel: Effect.void });
 
-    return runRemoteUpdatesTest(harness, ({ reports, requests }) =>
+    return runRemoteUpdatesTest(harness, ({ reports, requests, nextTerminal }) =>
       Effect.gen(function* () {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* Queue.offer(requests, {
@@ -145,6 +382,15 @@ describe("DesktopRemoteUpdates", () => {
           [["req-switch", "ready-to-install"]],
         );
         assert.equal(terminals[0]?.state.downloadedVersion, "1.2.4-nightly.20261027.1");
+        yield* nextTerminal;
+        yield* Queue.offer(requests, {
+          ...request("req-switch-retry"),
+          channel: "nightly",
+          targetVersion: "1.2.4-nightly.20261027.1",
+        });
+        const retry = yield* nextTerminal;
+        assert.equal(retry.outcome, "ready-to-install");
+        assert.propertyVal(retry, "preparedRequestId", "req-switch");
       }),
     );
   });
@@ -842,36 +1088,41 @@ describe("DesktopRemoteUpdates", () => {
   it.effect("does not install after cancellation wins the commit claim", () => {
     const harness = makeHarness();
 
-    return runRemoteUpdatesTest(harness, ({ reports, requests, commits, cancellations }) =>
-      Effect.gen(function* () {
-        yield* Queue.offer(requests, request("req-cancel-before-commit"));
-        yield* settle;
-        harness.emit("update-available", { version: "1.2.4" });
-        yield* settle;
-        harness.emit("update-downloaded", { version: "1.2.4" });
-        yield* settle;
+    return runRemoteUpdatesTest(
+      harness,
+      ({ reports, requests, commits, cancellations, nextTerminal }) =>
+        Effect.gen(function* () {
+          yield* Queue.offer(requests, request("req-cancel-before-commit"));
+          yield* settle;
+          harness.emit("update-available", { version: "1.2.4" });
+          yield* settle;
+          harness.emit("update-downloaded", { version: "1.2.4" });
+          yield* settle;
+          yield* nextTerminal;
+          yield* Queue.offer(requests, request("req-cancel-retry"));
+          assert.propertyVal(yield* nextTerminal, "preparedRequestId", "req-cancel-before-commit");
 
-        yield* Queue.offer(cancellations, {
-          version: 1,
-          type: "cancelDesktopUpdate",
-          requestId: "req-cancel-before-commit",
-        });
-        yield* settle;
-        yield* Queue.offer(commits, {
-          version: 1,
-          type: "commitDesktopUpdate",
-          requestId: "req-cancel-before-commit",
-        });
-        yield* settle;
+          yield* Queue.offer(cancellations, {
+            version: 1,
+            type: "cancelDesktopUpdate",
+            requestId: "req-cancel-before-commit",
+          });
+          yield* settle;
+          yield* Queue.offer(commits, {
+            version: 1,
+            type: "commitDesktopUpdate",
+            requestId: "req-cancel-before-commit",
+          });
+          yield* settle;
 
-        assert.equal(harness.quitAndInstalls(), 0);
-        assert.deepEqual(
-          terminalReports(reports)
-            .filter((report) => report.requestId === "req-cancel-before-commit")
-            .map((report) => report.outcome),
-          ["ready-to-install", "failed"],
-        );
-      }),
+          assert.equal(harness.quitAndInstalls(), 0);
+          assert.deepEqual(
+            terminalReports(reports)
+              .filter((report) => report.requestId === "req-cancel-before-commit")
+              .map((report) => report.outcome),
+            ["ready-to-install", "failed"],
+          );
+        }),
     );
   });
 

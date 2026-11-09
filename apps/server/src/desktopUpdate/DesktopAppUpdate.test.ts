@@ -1,13 +1,14 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import type { DesktopUpdateState, DesktopUpdateStatusReport } from "@t3tools/contracts";
+import { DesktopUpdateStatusReport, type DesktopUpdateState } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
@@ -42,16 +43,20 @@ function report(
   terminal?: {
     readonly outcome: DesktopUpdateStatusReport["outcome"];
     readonly reason?: string;
+    readonly preparedRequestId?: string;
   },
 ): DesktopUpdateStatusReport {
-  return {
+  return Schema.decodeUnknownSync(DesktopUpdateStatusReport)({
     version: 1,
     type: "desktopUpdateStatus",
     requestId,
     ...(terminal?.outcome === undefined ? {} : { outcome: terminal.outcome }),
     ...(terminal?.reason === undefined ? {} : { reason: terminal.reason }),
+    ...(terminal?.preparedRequestId === undefined
+      ? {}
+      : { preparedRequestId: terminal.preparedRequestId }),
     state,
-  };
+  });
 }
 
 interface HarnessOptions {
@@ -67,6 +72,7 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function* 
   const fs = yield* FileSystem.FileSystem;
   const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-desktop-app-update-test-" });
   const requestIdDeferred = yield* Deferred.make<string>();
+  const commits: string[] = [];
   const baseConfig = yield* ServerConfig.ServerConfig.pipe(
     Effect.provide(ServerConfig.layerTest(process.cwd(), baseDir)),
   );
@@ -91,6 +97,7 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function* 
     Effect.provide(
       Layer.mergeAll(
         DesktopTelemetryReceiver.layerTest({
+          commitDesktopUpdate: (requestId) => Effect.sync(() => void commits.push(requestId)),
           requestDesktopUpdate: (requestId) =>
             Deferred.succeed(requestIdDeferred, requestId).pipe(Effect.asVoid),
           desktopUpdates: Effect.succeed({
@@ -102,13 +109,13 @@ const makeHarness = Effect.fn("test.make_desktop_app_update_harness")(function* 
       ),
     ),
   );
-  return { service };
+  return { service, commits, requestId: Deferred.await(requestIdDeferred) };
 });
 
 it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("desktop app update", (it) => {
   it.effect("collapses state reports into progress stages and succeeds on installing", () =>
     Effect.gen(function* () {
-      const { service } = yield* makeHarness({
+      const { service, requestId } = yield* makeHarness({
         reports: (requestId) => [
           report(requestId, makeState({ status: "checking" })),
           report(requestId, makeState({ status: "available", availableVersion: "1.2.4" })),
@@ -127,6 +134,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("desktop app upda
         desktopUpdateToken: expect.any(String),
       });
       expect(stages).toEqual(["downloading", "installing"]);
+      expect(result.desktopUpdateToken).toBe(yield* requestId);
 
       const retry = yield* service.run(() => Effect.void).pipe(Effect.flip);
       expect(retry.reason).not.toBe("A desktop app update is already in progress.");
@@ -148,6 +156,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("desktop app upda
         targetVersion: "1.2.3",
         method: "desktop-app",
       });
+    }),
+  );
+
+  it.effect("commits the original preparation when a retry joins its downloaded update", () =>
+    Effect.gen(function* () {
+      const { service, commits } = yield* makeHarness({
+        reports: (requestId) => [
+          report("unrelated-correlation", makeState({ status: "downloaded" }), {
+            outcome: "ready-to-install",
+            preparedRequestId: "unrelated-preparation",
+          }),
+          report(requestId, makeState({ status: "downloaded", downloadedVersion: "1.2.4" }), {
+            outcome: "ready-to-install",
+            preparedRequestId: "original-preparation",
+          }),
+          report(requestId, makeState({ status: "downloaded" }), {
+            outcome: "failed",
+            reason: "unrelated retry outcome",
+          }),
+          report("original-preparation", makeState({ status: "downloaded" }), {
+            outcome: "failed",
+            reason: "installer refused",
+          }),
+        ],
+      });
+      const prepared = yield* service.run(() => Effect.void);
+      expect(prepared.desktopUpdateToken).toBe("original-preparation");
+      expect(
+        (yield* service.commit(prepared.desktopUpdateToken ?? "missing").pipe(Effect.flip)).reason,
+      ).toBe("installer refused");
+      expect(commits).toEqual(["original-preparation"]);
     }),
   );
 
