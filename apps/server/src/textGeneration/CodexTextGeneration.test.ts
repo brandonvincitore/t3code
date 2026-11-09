@@ -544,11 +544,17 @@ const PREFLIGHT_PRIMARY_STATES = [
   "not installed",
   "signed out",
   "signed out, fallback failed",
+  "kiro ready",
+  "kiro signed out",
+  "kiro exhausted",
+  "kiro disabled",
 ] as const;
 
 it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (primaryState) =>
   Effect.gen(function* () {
-    const primary = ProviderInstanceId.make("codex");
+    const kiro = primaryState.startsWith("kiro ");
+    const state = primaryState.replace(/^kiro /, "");
+    const primary = ProviderInstanceId.make(kiro ? "kiro_account" : "codex");
     const fallback = ProviderInstanceId.make("claude_work");
     const selection = {
       instanceId: primary,
@@ -557,7 +563,9 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
     };
     const calls: ModelSelection[] = [];
     const instances: ProviderInstance[] = [primary, fallback].map((instanceId) => {
-      const driver = ProviderDriverKind.make(instanceId === primary ? "codex" : "claudeAgent");
+      const driver = ProviderDriverKind.make(
+        instanceId === primary ? (kiro ? "kiro" : "codex") : "claudeAgent",
+      );
       const snapshot: ServerProvider = {
         instanceId,
         driver,
@@ -570,19 +578,21 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
         models: [],
         slashCommands: [],
         skills: [],
-        ...(primaryState === "pending" && instanceId === primary
+        ...(kiro && instanceId === primary ? { supportsThreadTitleGeneration: true } : {}),
+        ...(state === "disabled" && instanceId === primary ? { enabled: false } : {}),
+        ...(state === "pending" && instanceId === primary
           ? { installed: false, status: "warning", auth: { status: "unknown" } }
           : {}),
-        ...(primaryState === "not installed" && instanceId === primary
+        ...(state === "not installed" && instanceId === primary
           ? { installed: false, status: "error", auth: { status: "unknown" } }
           : {}),
-        ...(primaryState.startsWith("signed out") && instanceId === primary
+        ...(state.startsWith("signed out") && instanceId === primary
           ? { status: "error", auth: { status: "unauthenticated" } }
           : {}),
-        ...(primaryState === "signed out, fallback failed" && instanceId === fallback
+        ...(state === "signed out, fallback failed" && instanceId === fallback
           ? { status: "error", auth: { status: "unknown" } }
           : {}),
-        ...(primaryState === "exhausted" && instanceId === primary
+        ...(state === "exhausted" && instanceId === primary
           ? {
               usageLimits: {
                 checkedAt: "1970-01-01T00:00:00Z",
@@ -642,9 +652,7 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
       }),
     ).toEqual({ title: "Generated title" });
     expect(calls).toEqual([
-      primaryState === "ready" ||
-      primaryState === "pending" ||
-      primaryState === "signed out, fallback failed"
+      kiro || state === "ready" || state === "pending" || state === "signed out, fallback failed"
         ? selection
         : {
             instanceId: fallback,
