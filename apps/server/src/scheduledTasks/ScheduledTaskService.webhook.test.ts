@@ -531,6 +531,11 @@ it.effect("a policy without scheduled tasks keeps them but runs none", () => {
 
               const result = yield* service.triggerWebhook(requestFor(hook));
               assert.equal(result._tag, "blocked_by_policy");
+              yield* service.delete({ id: timer.id });
+              assert.deepEqual(
+                (yield* service.list()).tasks.map((task) => task.id),
+                [hook.id],
+              );
             }),
           {
             sql,

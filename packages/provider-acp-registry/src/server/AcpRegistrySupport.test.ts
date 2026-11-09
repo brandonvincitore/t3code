@@ -583,6 +583,7 @@ describe("AcpRegistrySupport", () => {
           toolsDir: `${cacheDir}/tools`,
           registryUrl,
           ...(denial === undefined ? {} : { installDenial: denial }),
+          agentDenial: (agentId) => (agentId === agent.id ? undefined : "Agent refused"),
         }).pipe(Effect.provideService(HostProcess.Environment, toolchain.environment));
 
       const denied = yield* makeResolver(installDenial);

@@ -24,7 +24,6 @@ import type * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
@@ -602,28 +601,21 @@ describe("KiroProvider", () => {
       type: "select",
       currentValue: "vibe",
       options: [
-        { id: "vibe", label: "Default", description: "General coding assistance", isDefault: true },
+        { id: "vibe", label: "Default", description: "General coding assistance" },
         { id: "spec", label: "Spec", description: "Structured feature development" },
         { id: "plan", label: "Plan", description: "Plan-only mode" },
         { id: "global-probe", label: "global-probe", description: "Global probe agent" },
         { id: "planner", label: "planner" },
       ],
     });
-    // The default follows the agent Kiro starts sessions on.
     const onSpec = kiroAgentDescriptor({
       configOptions: [{ ...template.configOptions[0], currentValue: "spec" }],
     });
     assert.equal(onSpec?.type === "select" ? onSpec.currentValue : undefined, "spec");
+    const onVibe = kiroAgentDescriptor(template);
     assert.deepEqual(
-      onSpec?.type === "select" ? onSpec.options.filter((choice) => choice.isDefault) : [],
-      [
-        {
-          id: "spec",
-          label: "Spec",
-          description: "Structured feature development",
-          isDefault: true,
-        },
-      ],
+      onSpec?.type === "select" ? onSpec.options : [],
+      onVibe?.type === "select" ? onVibe.options : [],
     );
     // A template without agents to choose between gives no picker.
     assert.isUndefined(kiroAgentDescriptor({ configOptions: [] }));
@@ -685,14 +677,6 @@ describe("KiroProvider", () => {
           environment: [],
           config: settings,
         });
-        // Subscribed before the session opens, so the publish cannot slip past it.
-        const advertised = yield* instance.snapshot.streamChanges.pipe(
-          Stream.takeUntil((snapshot) =>
-            snapshot.skills.some(({ name }) => name === "probe-skill"),
-          ),
-          Stream.runLast,
-          Effect.forkChild({ startImmediately: true }),
-        );
         const threadId = ThreadId.make("thread-kiro-skills");
         const modelSelection = { instanceId, model: "default" };
         const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
@@ -757,13 +741,12 @@ describe("KiroProvider", () => {
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runDrain,
         );
-        const snapshot = yield* Fiber.join(advertised);
+        const snapshot = yield* instance.snapshotForCwd!("/workspace");
         assert.deepEqual(
-          Option.map(snapshot, ({ skills }) =>
-            skills.map((skill) => ({ name: skill.name, enabled: skill.enabled })),
-          ),
-          Option.some([{ name: "probe-skill", enabled: true }]),
+          snapshot.skills.map(({ name, enabled }) => ({ name, enabled })),
+          [{ name: "probe-skill", enabled: true }],
         );
+        assert.deepEqual((yield* instance.snapshot.getSnapshot).skills, []);
       }).pipe(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
         Effect.scoped,

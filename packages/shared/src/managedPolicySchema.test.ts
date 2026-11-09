@@ -17,6 +17,11 @@ it("describes the policy file as strictly as T3 Code reads it", () => {
     properties: {
       limits: {
         properties: {
+          scheduledTasks: { type: "boolean" },
+          snapShot: { type: "boolean" },
+          providers: {
+            properties: { installs: { type: "boolean" }, allowedAcpAgents: { type: "array" } },
+          },
           updates: {
             additionalProperties: false,
             properties: { feedUrl: { pattern: "^\\s*[Hh][Tt][Tt][Pp][Ss]://[^\\s/]+" } },

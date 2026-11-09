@@ -73,6 +73,7 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
     assert.notInclude(paths, "backgroundActivity.overrides");
     assert.notInclude(paths, "projectSettingsOverrides");
     assert.notInclude(paths, "compactIdleThreads");
+    assert.isFalse(paths.some((path) => path.startsWith("observability.")));
     for (const [path, value] of listed) {
       if (value === undefined) continue;
       const managed = ManagedSettings.makeManagedSettings({ [path]: { value, locked: false } });
@@ -97,10 +98,36 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
         JSON.stringify({
           schemaVersion: 1,
           organization: "Example Corp",
-          limits: { scheduledTasks: false },
+          limits: {
+            scheduledTasks: false,
+            snapShot: false,
+            providers: { installs: false, allowedAcpAgents: ["devin"] },
+          },
         }),
       );
-      assert.deepEqual(noTasks.summary?.limits, { scheduledTasks: false, webhookTasks: false });
+      assert.deepEqual<unknown>(noTasks.summary?.limits, {
+        scheduledTasks: false,
+        webhookTasks: false,
+        providers: {
+          installs: false,
+          allowedAcpAgents: ["devin"],
+          lockedInstanceFields: { acpRegistry: ["config.commandPath", "config.commandArgs"] },
+        },
+      });
+      assert.isFalse(noTasks.document?.limits?.snapShot);
+      for (const providers of [
+        { installs: "false", allowedAcpAgents: ["devin"] },
+        { installs: false, allowedAcpAgent: ["devin"] },
+      ]) {
+        const invalid = yield* loadFrom(
+          JSON.stringify({
+            schemaVersion: 1,
+            organization: "Example Corp",
+            limits: { scheduledTasks: false, snapShot: false, providers },
+          }),
+        ).pipe(Effect.flip);
+        assert.isNotEmpty(invalid.reason);
+      }
     }),
   );
 
