@@ -1227,6 +1227,11 @@ export function createServerEnvironmentAtoms<R, E>(
     }),
     databaseStorage,
     databaseCompactionRecommendations,
+    reclaimDatabaseSpace: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:reclaim-database-space",
+      tag: WS_METHODS.serverReclaimDatabaseSpace,
+      concurrency: { mode: "singleFlight", key: ({ environmentId }) => environmentId },
+    }),
     storageCleanupReport: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:storage-cleanup-report",
       tag: WS_METHODS.serverGetStorageCleanupReport,
@@ -1740,6 +1745,10 @@ export function createServerEnvironmentAtoms<R, E>(
     checkOtlpEndpoint: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:check-otlp-endpoint",
       tag: WS_METHODS.serverCheckOtlpEndpoint,
+    }),
+    listTextGeneratorModels: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:list-text-generator-models",
+      tag: WS_METHODS.serverListTextGeneratorModels,
     }),
     retryResourceTelemetry: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:retry-resource-telemetry",

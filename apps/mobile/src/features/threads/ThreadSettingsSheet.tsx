@@ -1,4 +1,3 @@
-import { resolveProvidersForCwd } from "@t3tools/client-runtime/providerSkills";
 import {
   getPromptControlledTraits,
   getTraitSelectChange,
@@ -89,7 +88,7 @@ import {
 } from "../../state/use-composer-drafts";
 import { useQuietThreadStructure } from "../../state/use-thread-detail";
 import { activeComposerDraftKey, useQueuedRunEdit } from "../../state/queued-run-edit";
-import { updateThreadDraftModelSelection } from "../../state/use-thread-composer-state";
+import { selectThreadModel } from "../../state/thread-model-selection";
 import { useThreadSelection } from "../../state/use-thread-selection";
 import { threadAllowsProviderSwitch } from "../../state/thread-provider-switching";
 import { environmentServerConfigsAtom, serverEnvironment } from "../../state/server";
@@ -1347,14 +1346,7 @@ export function ExistingThreadSettingsRouteScreen({
         option.selection.model === modelSelection.model,
     ) ?? null;
   const updateModelSelection = (selection: ModelSelection) =>
-    updateThreadDraftModelSelection(
-      threadKey,
-      selection,
-      resolveProvidersForCwd(
-        serverConfig?.providers ?? [],
-        selectedThread.worktreePath ?? selectedThreadProject?.workspaceRoot,
-      ),
-    );
+    selectThreadModel(route.params, selection);
 
   return (
     <ThreadSettingsPickerScreen
