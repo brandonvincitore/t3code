@@ -190,6 +190,10 @@ export interface AcpRegistryIndex {
 
 const decodeRegistryIndexEnvelope = Schema.decodeUnknownEffect(AcpRegistryIndexEnvelope);
 const decodeRegistryAgent = Schema.decodeUnknownOption(AcpRegistryAgent);
+const decodeSavedRegistryAgent = Schema.decodeUnknownOption(
+  Schema.fromJsonString(AcpRegistryAgent),
+);
+const encodeSavedRegistryAgent = Schema.encodeEffect(Schema.fromJsonString(AcpRegistryAgent));
 const decodeJson = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeNpmPackageManifest = Schema.decodeUnknownEffect(
   Schema.fromJsonString(NpmPackageManifest),
@@ -671,6 +675,8 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
   const { agentDenial, localCommandDenial } = input;
   const registryDirectory = path.join(input.cacheDir, "acp-registry");
   const registryCachePath = path.join(registryDirectory, "registry.json");
+  const installedAgentPath = (agentId: string) =>
+    path.join(registryDirectory, `installed-${encodeURIComponent(agentId)}.json`);
   const installsDirectory = input.toolsDir;
   const agentInstallRoot = (agent: AcpRegistryAgent) =>
     path.join(installsDirectory, agent.id, encodeURIComponent(agent.version));
@@ -793,20 +799,55 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     .readFileString(registryCachePath)
     .pipe(Effect.flatMap(decodeRegistryText), Effect.option);
 
-  const writeRegistryCache = (text: string) =>
-    random.uuidV4().pipe(
-      Effect.flatMap((id) => {
-        const temporaryPath = `${registryCachePath}.${process.pid}-${id}.tmp`;
-        return fileSystem
-          .makeDirectory(registryDirectory, { recursive: true })
-          .pipe(
-            Effect.andThen(fileSystem.writeFileString(temporaryPath, text)),
-            Effect.andThen(fileSystem.rename(temporaryPath, registryCachePath)),
-            Effect.ensuring(fileSystem.remove(temporaryPath, { force: true }).pipe(Effect.ignore)),
-          );
-      }),
-      Effect.ignore,
+  const writeCatalogCache = Effect.fn("AcpRegistryCatalog.writeCatalogCache")(
+    (cachePath: string, text: string) =>
+      random.uuidV4().pipe(
+        Effect.flatMap((id) => {
+          const temporaryPath = `${cachePath}.${process.pid}-${id}.tmp`;
+          return fileSystem
+            .makeDirectory(registryDirectory, { recursive: true })
+            .pipe(
+              Effect.andThen(fileSystem.writeFileString(temporaryPath, text)),
+              Effect.andThen(fileSystem.rename(temporaryPath, cachePath)),
+              Effect.ensuring(
+                fileSystem.remove(temporaryPath, { force: true }).pipe(Effect.ignore),
+              ),
+            );
+        }),
+        Effect.ignore,
+      ),
+  );
+
+  const readInstalledAgent = Effect.fn("AcpRegistryCatalog.readInstalledAgent")(function* (
+    agentId: string,
+  ) {
+    if (input.installDenial === undefined) return Option.none<AcpRegistryAgent>();
+    const cachePath = installedAgentPath(agentId);
+    const info = yield* fileSystem.stat(cachePath).pipe(Effect.option);
+    if (Option.isNone(info) || info.value.size > MAX_REGISTRY_BYTES)
+      return Option.none<AcpRegistryAgent>();
+    return yield* fileSystem.readFileString(cachePath).pipe(
+      Effect.map(decodeSavedRegistryAgent),
+      Effect.map(Option.filter((agent) => agent.id === agentId)),
+      Effect.orElseSucceed(() => Option.none<AcpRegistryAgent>()),
     );
+  });
+
+  const rememberInstalledAgent = Effect.fn("AcpRegistryCatalog.rememberInstalledAgent")(function* (
+    agent: AcpRegistryAgent,
+  ) {
+    const text = yield* encodeSavedRegistryAgent(agent).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AcpRegistryError({
+            reason: "install_failed",
+            detail: "Could not record the installed ACP Registry agent.",
+            cause,
+          }),
+      ),
+    );
+    yield* writeCatalogCache(installedAgentPath(agent.id), text);
+  });
 
   const fetchRegistry = Effect.fn("AcpRegistryCatalog.fetchRegistry")(function* () {
     yield* assertHttpsUrl(registryUrl, "ACP Registry index URL must use HTTPS.");
@@ -867,7 +908,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
       });
     }
     const registry = yield* decodeRegistryText(collected.text);
-    yield* writeRegistryCache(collected.text);
+    yield* writeCatalogCache(registryCachePath, collected.text);
     return registry;
   });
 
@@ -1639,7 +1680,10 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     registry: AcpRegistryIndex,
     agentId: string,
   ) {
-    const agent = registry.agents.find((candidate) => candidate.id === agentId.trim());
+    const installed = yield* readInstalledAgent(agentId.trim());
+    const agent =
+      Option.getOrUndefined(installed) ??
+      registry.agents.find((candidate) => candidate.id === agentId.trim());
     if (agent === undefined) {
       return yield* new AcpRegistryError({
         reason: "agent_not_found",
@@ -1735,6 +1779,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
           ensureGlobalPackage(agent, distribution.kind, distribution.packageName!, hostEnvironment),
         );
       }
+      yield* rememberInstalledAgent(agent);
       return {
         agentId: agent.id,
         version: agent.version,
@@ -1777,7 +1822,10 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
       const denial = agentDenial?.(agentId);
       if (denial !== undefined) return { status: "denied", message: denial } as const;
       const registry = yield* loadCachedRegistry();
-      const agent = registry.agents.find((candidate) => candidate.id === agentId);
+      const installed = yield* readInstalledAgent(agentId);
+      const agent =
+        Option.getOrUndefined(installed) ??
+        registry.agents.find((candidate) => candidate.id === agentId);
       if (agent === undefined) return { status: "not_found", agentId } as const;
       const documentationUrl = agent.website ?? agent.repository;
       const distribution = resolveAcpRegistryDistribution({
@@ -1950,6 +1998,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
         args = distribution.args;
       }
 
+      if (commandOverride.length === 0) yield* rememberInstalledAgent(agent);
       const baseSpawnEnvironment = {
         ...effectiveEnvironment,
         ...distribution.env,

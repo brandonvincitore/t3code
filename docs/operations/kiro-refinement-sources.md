@@ -38,6 +38,10 @@ The following seven PRs are integrated by cherry-picking their original feature 
 
 `allowedAcpAgents` governs the ACP Registry, not Kiro’s native custom-agent picker. `providers.installs` governs T3-managed provider software operations, not arbitrary commands run outside T3.
 
+The fork additionally retains installed ACP launch metadata so advancing the shared catalog
+before enabling `providers.installs: false` does not strand a previously prepared agent.
+The regression covers the old executable, arguments, version, inspection, and preparation.
+
 ## Workflow source and related discussions
 
 | Reference                                                                            | Role                                                                           | Pinned source / integration                                                                                                                                                                                         |

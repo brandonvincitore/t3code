@@ -600,13 +600,26 @@ describe("AcpRegistrySupport", () => {
       yield* allowed.resolve(settings(), "/workspace", toolchain.environment);
       // A newer release must not strand what is installed, since it could never be installed.
       published = {
-        ...makeAgent({ npx: { package: "@example/acp@V2.0.0", args: ["--stdio"] } }),
+        ...makeAgent({ npx: { package: "@example/acp@V2.0.0", args: ["--new-protocol"] } }),
         version: "2.0.0",
       };
+      const refreshed = yield* makeResolver();
+      const listed = yield* refreshed.search({ query: "example" });
+      expect(listed.agents[0]?.version).toBe("2.0.0");
       const frozen = yield* makeResolver(installDenial);
       yield* frozen.search({ query: "example" });
       const cached = yield* frozen.resolve(settings(), "/workspace", toolchain.environment);
       expect(cached.spawn.command).toBe(toolchain.executablePath);
+      expect(cached.spawn.args).toEqual(["--stdio"]);
+      expect(cached.agent?.version).toBe(agent.version);
+      expect(yield* frozen.prepare({ agentId: agent.id })).toMatchObject({
+        version: agent.version,
+        prepared: true,
+      });
+      expect(yield* frozen.inspect(settings(), toolchain.environment)).toMatchObject({
+        status: "ready",
+        version: agent.version,
+      });
     }).pipe(
       Effect.scoped,
       Effect.provide(
