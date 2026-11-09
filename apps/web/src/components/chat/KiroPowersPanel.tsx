@@ -32,9 +32,8 @@ export function KiroPowersPanel({
       }
     } catch {
       setError("Could not complete the Powers operation. Refresh and try again.");
-    } finally {
-      setPending(null);
     }
+    setPending(null);
   }
   return (
     <section aria-label="Kiro Powers" className="flex flex-col gap-3 text-sm">

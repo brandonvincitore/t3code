@@ -1,3 +1,4 @@
+import * as ProjectionStore from "./orchestration-v2/ProjectionStore.ts";
 import * as KiroPowersService from "./provider/KiroPowersService.ts";
 import * as KiroMemoryService from "./provider/KiroMemoryService.ts";
 import * as KiroMcpService from "./provider/KiroMcpService.ts";
@@ -3391,7 +3392,7 @@ export const layer = Layer.unwrap(
               Layer.provide(AcpRegistrySessions.layer),
               Layer.provide(KiroMemoryService.layer),
               Layer.provide(KiroPowersService.layer),
-              Layer.provide(KiroMcpService.layer),
+              Layer.provide(KiroMcpService.layer.pipe(Layer.provide(ProjectionStore.layer))),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(NpmRelease.NpmRelease, npmRelease)),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),

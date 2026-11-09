@@ -1,3 +1,6 @@
+import * as KiroMcpService from "./provider/KiroMcpService.ts";
+import * as KiroMemoryService from "./provider/KiroMemoryService.ts";
+import * as KiroPowersService from "./provider/KiroPowersService.ts";
 import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -776,6 +779,9 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
 
 // Build the production RPC layer; unrelated capabilities fail if this test calls them.
 const layerUnusedConfigRpcServices = Layer.mergeAll(
+  Layer.mock(KiroMcpService.KiroMcpService)({}),
+  Layer.mock(KiroMemoryService.KiroMemoryService)({}),
+  Layer.mock(KiroPowersService.KiroPowersService)({}),
   Layer.mock(DocumentText.DocumentText)({}),
   Layer.mock(ServerSecretStore.ServerSecretStore)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),
@@ -1716,6 +1722,29 @@ const seedAcpThread = Effect.fn(function* (
     });
   }
   yield* sink.write({ events });
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`
+    INSERT INTO orchestration_v2_projection_provider_threads
+      (provider_thread_id, thread_id, owner_node_id, provider, driver, provider_instance_id, provider_session_id, status, updated_at, payload_json)
+    VALUES (${`provider:${threadId}`}, ${threadId}, NULL, ${acpInstanceId}, ${acpDriver}, ${acpInstanceId}, NULL, 'idle', '2026-10-23T00:00:00.000Z',
+      ${JSON.stringify({
+        id: `provider:${threadId}`,
+        driver: acpDriver,
+        providerInstanceId: acpInstanceId,
+        providerSessionId: null,
+        appThreadId: threadId,
+        ownerNodeId: null,
+        nativeThreadRef: { driver: acpDriver, nativeId: sessionId, strength: "strong" },
+        nativeConversationHeadRef: null,
+        status: "idle",
+        firstRunOrdinal: null,
+        lastRunOrdinal: null,
+        handoffIds: [],
+        forkedFrom: null,
+        createdAt: "2026-10-23T00:00:00.000Z",
+        updatedAt: "2026-10-23T00:00:00.000Z",
+      })})
+  `;
   return threadId;
 });
 
@@ -1802,7 +1831,10 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
               : Effect.sync(() => repaired.push(threadId)).pipe(Effect.as(1)),
       }),
     );
-    const services = AcpRegistrySessions.layer.pipe(Layer.provideMerge(dependencies));
+    const services = AcpRegistrySessions.layer.pipe(
+      Layer.provide(Layer.succeed(SqlClient.SqlClient, yield* SqlClient.SqlClient)),
+      Layer.provideMerge(dependencies),
+    );
     const client = yield* RpcTest.makeClient(acpSessionRpcs).pipe(
       Effect.provide(
         layerWsRpc(

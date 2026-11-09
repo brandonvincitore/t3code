@@ -1642,7 +1642,13 @@ describe("KiroAdapterV2", () => {
               terminal: "<any>",
               session: "<any>",
               elicitation: "<any>",
-              _meta: { kiro: { hooks: { enabled: true, v2: true }, secretStorage: true } },
+              _meta: {
+                kiro: {
+                  hooks: { enabled: true, v2: true },
+                  secretStorage: true,
+                  openExternalUrl: true,
+                },
+              },
             },
             clientInfo: "<any>",
           }),
@@ -1798,7 +1804,9 @@ describe("KiroAdapterV2 skills", () => {
   // The store holds the session's updates in order, so seeing `name` means every earlier one landed.
   const awaitSkill = (skills: KiroSkills, name: string) =>
     SubscriptionRef.changes(skills).pipe(
-      Stream.takeUntil((current) => current.some((skill) => skill.name === name)),
+      Stream.takeUntil((current) =>
+        [...current.values()].some((entries) => entries.some((skill) => skill.name === name)),
+      ),
       Stream.runDrain,
     );
 
@@ -1861,7 +1869,7 @@ describe("KiroAdapterV2 skills", () => {
           // Changes the store after the agents-only update, so the test can see it was handled.
           update({
             sessionUpdate: "available_commands_update",
-            availableCommands: [userSkill("later-skill")],
+            availableCommands: [userSkill("probe-skill"), userSkill("later-skill")],
           }),
           turnPrompt,
           answer("session/prompt", { stopReason: "end_turn" }),
@@ -2390,7 +2398,8 @@ describe("KiroAdapterV2 unknown model", () => {
       );
       const frames = recorded.entries.slice(0, firstPromptAnswer + 1).map((entry) => {
         const frame = entry.type === "runtime_exit" ? undefined : (entry.frame as Frame);
-        return frame?.method === "session/prompt" && frame.kind === "request"
+        return (frame?.method === "session/prompt" || frame?.method === "initialize") &&
+          frame.kind === "request"
           ? { ...entry, frame: { ...frame, params: "<any>" } }
           : entry;
       });

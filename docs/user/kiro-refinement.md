@@ -81,15 +81,15 @@ steps. This branch does not add a separate organization account or administratio
 
 ## Current verification limits
 
-This branch is still being integrated and independently reviewed. New refinement features are
-not release-validated yet. Use test projects until the branch's checks and pilot verification
-are complete. No paid Kiro turns are required for the automated fixture tests.
+Automated fixture checks and a production build have passed. Release validation and an
+organization-account pilot are still pending. Use test projects until the interactive web,
+desktop, mobile, and remote/relay/tunnel pilot is complete. No paid Kiro turns are required for
+the automated fixture tests.
 
 A server restart ends its running provider process. Saved T3 conversation history remains in
 its data directory, but automatic reattachment to workflows surviving outside that process is
 not provided. Browser OAuth depends on the installed CLI's advertised methods; the tested CLI
-3.1.0 does not advertise the reconnect method. Native desktop/mobile and remote/relay flows
-still require an interactive pilot pass.
+3.1.0 does not advertise the reconnect method, so use the server-local CLI sign-in fallback.
 
 Share refinement problems with the person coordinating your pilot, including the commit, operating
 system, Kiro CLI version, connection mode, and minimal steps.

@@ -15,7 +15,6 @@ import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -74,55 +73,53 @@ const setup = Effect.fn("test.AcpRegistrySessions.setup")(function* () {
           calls.deletions += 1;
         }),
     },
-  } as ProviderInstance;
+  } as unknown as ProviderInstance;
   const context = yield* Layer.build(
-    AcpRegistrySessions.layer
-      .pipe(
-        Layer.provide(
-          Layer.mergeAll(
-            Layer.mock(ProjectService.ProjectService, {
-              getById: () =>
-                Effect.succeed(Option.some({ id: projectId, workspaceRoot: cwd } as Project)),
-            }),
-            Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry, {
-              getInstance: () => Effect.succeed(instance),
-            }),
-            Layer.mock(ProviderRegistry.ProviderRegistry, { getProviders: Effect.succeed([]) }),
-            AcpRegistryRuntimeCoordinator.layer,
-            Layer.mock(ThreadManagementService.ThreadManagementService, {
-              getThreadShell: (id) => Effect.succeed(shells.get(id) ?? null),
-            }),
-            Layer.mock(ThreadLaunchService.ThreadLaunchService, {
-              launch: (input) =>
-                Effect.gen(function* () {
-                  calls.launches += 1;
-                  return yield* new ThreadLaunchService.ThreadLaunchError({
-                    operation: "create-thread",
-                    commandId: input.commandId,
-                    projectId,
-                    cause: new Error("Unexpected thread launch"),
-                  });
-                }),
-            }),
-            Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup, {
-              enqueueCommand: (effect) => effect,
-            }),
-            Layer.mock(AgentSessionImporter.AgentSessionImporter, {
-              importNativeHistory: () =>
-                Effect.sync(() => {
-                  calls.imports += 1;
-                  return 0;
-                }),
-            }),
-            Layer.succeed(SqlClient.SqlClient, sql),
-            Layer.succeed(
-              SecureRandom.SecureRandom,
-              SecureRandom.make((size) => new Uint8Array(size)),
-            ),
+    AcpRegistrySessions.layer.pipe(
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectService.ProjectService, {
+            getById: () => Effect.succeedSome({ id: projectId, workspaceRoot: cwd } as Project),
+          }),
+          Layer.mock(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+            getInstance: () => Effect.succeed(instance),
+          }),
+          Layer.mock(ProviderRegistry.ProviderRegistry, { getProviders: Effect.succeed([]) }),
+          AcpRegistryRuntimeCoordinator.layer,
+          Layer.mock(ThreadManagementService.ThreadManagementService, {
+            getThreadShell: (id) => Effect.succeed(shells.get(id) ?? null),
+          }),
+          Layer.mock(ThreadLaunchService.ThreadLaunchService, {
+            launch: (input) =>
+              Effect.gen(function* () {
+                calls.launches += 1;
+                return yield* new ThreadLaunchService.ThreadLaunchError({
+                  operation: "create-thread",
+                  commandId: input.commandId,
+                  projectId,
+                  cause: new Error("Unexpected thread launch"),
+                });
+              }),
+          }),
+          Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup, {
+            enqueueCommand: (effect) => effect,
+          }),
+          Layer.mock(AgentSessionImporter.AgentSessionImporter, {
+            importNativeHistory: () =>
+              Effect.sync(() => {
+                calls.imports += 1;
+                return 0;
+              }),
+          }),
+          Layer.succeed(SqlClient.SqlClient, sql),
+          Layer.succeed(
+            SecureRandom.SecureRandom,
+            SecureRandom.make((size) => new Uint8Array(size)),
           ),
         ),
-      )
-      .pipe(Layer.provide(NodeServices.layer)),
+      ),
+      Layer.provide(NodeServices.layer),
+    ),
   );
   const service = yield* Effect.service(AcpRegistrySessions.AcpRegistrySessions).pipe(
     Effect.provide(context),
@@ -188,7 +185,7 @@ describe("ACP native session ownership", () => {
       h.shells.set(imported, {
         id: imported,
         projectId,
-        historyOrigin: "v1_import",
+        historyOrigin: "native",
         latestRunId: null,
         deletedAt: null,
       } as OrchestrationV2ThreadShell);

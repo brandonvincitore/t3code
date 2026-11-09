@@ -34,9 +34,8 @@ export function KiroPowersPanel({
       }
     } catch {
       setError("Could not complete the Powers operation. Refresh and try again.");
-    } finally {
-      setPending(null);
     }
+    setPending(null);
   }
   return (
     <View className="gap-3">

@@ -766,7 +766,7 @@ it.layer(
         workspaceRevision: 1,
       });
       assert.deepStrictEqual(retired.workspaceSnapshots, []);
-      assert.strictEqual(retired.models, provider.models);
+      assert.deepStrictEqual(retired.models, provider.models);
     });
 
     it("preserves previously discovered provider models when a refresh returns none", () => {

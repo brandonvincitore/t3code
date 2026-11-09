@@ -60,9 +60,8 @@ export function KiroMcpPanel({
     } catch {
       if (generation.current === current)
         setError("Could not start MCP sign-in. Refresh the status and try again.");
-    } finally {
-      if (generation.current === current) setPending(false);
     }
+    if (generation.current === current) setPending(false);
   }
 
   async function dismiss() {

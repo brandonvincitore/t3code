@@ -13,12 +13,7 @@ import "~/components/ChatView";
 import { DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { __setClientSettingsForTests } from "~/hooks/useSettings";
 import { getRouter } from "~/router";
-import {
-  ENVIRONMENT_ID,
-  PROJECT_ID,
-  installFakeEnvironment,
-  type FakeDriver,
-} from "../../test/fakeEnvironment";
+import { ENVIRONMENT_ID, PROJECT_ID, type FakeDriver } from "../../test/fakeEnvironment";
 import { render } from "../../test/render";
 
 // The socket is the only fake layer; see test/appScenarios.renders.tsx.
@@ -36,8 +31,14 @@ vi.mock(import("~/rpc/requestLatencyState"), async (original) => ({
   trackRpcRequestSent: () => {},
 }));
 
+// Theme startup reads connection atoms during import, before a test-body fetch stub exists.
+const fixture = await vi.hoisted(async () => {
+  const { installFakeEnvironment } = await import("../../test/fakeEnvironment");
+  return installFakeEnvironment([]);
+});
+
 it("a new draft does not load its reserved thread before the server lists it", async () => {
-  using _environment = installFakeEnvironment([]);
+  using _environment = fixture;
   using fetchSpy = vi.spyOn(globalThis, "fetch");
   __setClientSettingsForTests({
     ...DEFAULT_CLIENT_SETTINGS,

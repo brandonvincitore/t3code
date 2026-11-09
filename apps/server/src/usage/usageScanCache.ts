@@ -118,9 +118,7 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     record.rateModel === undefined
       ? null
       : intern(tables.models, tables.modelIndex, record.rateModel),
-    ...(record.unresolvedServiceTierTurnId === undefined && record.credits === undefined
-      ? ([] as const)
-      : ([record.unresolvedServiceTierTurnId ?? null] as const)),
+    record.unresolvedServiceTierTurnId ?? null,
     ...(record.credits === undefined ? ([] as const) : ([record.credits] as const)),
   ];
   return {

@@ -42,7 +42,7 @@ const make = Effect.gen(function* () {
 
   const resolve = Effect.fn("KiroMcpService.resolve")(function* (input: KiroMcpStatusInput) {
     const projection = yield* projections
-      .getThreadRecords(input.threadId, ["thread", "providerThreads", "providerSessions"])
+      .getThreadRecords(input.threadId, ["providerThreads", "providerSessions"])
       .pipe(Effect.mapError(() => new KiroMcpError({ code: "session_unavailable" })));
     const thread = projection.providerThreads.find(
       (entry) => entry.id === projection.thread?.activeProviderThreadId,
