@@ -59,7 +59,7 @@ createInterface({input:process.stdin}).on('line', line => {
  record({method,params,cwd:process.cwd(),home:process.env.KIRO_HOME});
  if (id === undefined) return;
  let result = {};
- if (method === 'initialize') result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{delete:{}}}};
+ if (method === 'initialize') result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{delete:{}},_meta:{kiro:{extensionMethods:['_kiro/memory/list']}}}};
  if (method === 'session/new') { record({agent:JSON.parse(readFileSync(process.env.KIRO_HOME+'/agents/t3-title.json','utf8')), env:{title:process.env.KIRO_DISABLE_SESSION_TITLE_LLM,fallback:process.env.KIRO_FEATURE_MODEL_FALLBACK_AVAILABILITY_ENABLED}}); result = {sessionId:'title-session',configOptions}; }
  if (method === 'session/set_config_option') { configOptions = configOptions.map(o=>o.id===params.configId?{...o,currentValue:params.value}:o); result={configOptions}; }
  if (method === 'session/prompt') {
@@ -89,6 +89,23 @@ createInterface({input:process.stdin}).on('line', line => {
               title: "Fix login",
               needsRefinement: true,
             });
+        }
+        for (const key of ["ASBX_KIRO_MANDATORY_MCPS", "KIRO_MANDATORY_MCPS"]) {
+          const mandatory = yield* makeKiroTextGeneration(settings, {
+            ...process.env,
+            [key]: "required",
+          });
+          const rejected = yield* mandatory
+            .generateThreadTitle({
+              cwd: root,
+              message: "Fix login",
+              modelSelection: { instanceId: ProviderInstanceId.make("kiro"), model: "expensive" },
+            })
+            .pipe(Effect.flip);
+          assert.equal(
+            rejected.detail,
+            "Kiro requires tools in this environment. Automatic titles are unavailable.",
+          );
         }
         const rows = (yield* fs.readFileString(log))
           .trim()

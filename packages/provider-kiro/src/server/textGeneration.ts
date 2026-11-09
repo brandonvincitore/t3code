@@ -18,6 +18,7 @@ import type { KiroSettings } from "../settings.ts";
 
 const isTextGenerationError = Schema.is(TextGenerationError);
 
+const encodeTitleAgent = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 const decodeModels = Schema.decodeUnknownOption(
   Schema.fromJsonString(
     Schema.Struct({
@@ -69,6 +70,10 @@ export const makeKiroTextGeneration = Effect.fn("KiroTextGeneration.make")(funct
         new TextGenerationError({ operation: input.operation, detail });
       if (!settings.enabled || input.operation !== "generateThreadTitle")
         return yield* fail("Kiro application text generation supports thread titles only.");
+      if (environment.ASBX_KIRO_MANDATORY_MCPS?.trim() || environment.KIRO_MANDATORY_MCPS?.trim())
+        return yield* fail(
+          "Kiro requires tools in this environment. Automatic titles are unavailable.",
+        );
       if (input.prompt.length > 32_000)
         return yield* fail("Kiro title input exceeds the size limit.");
       const command = settings.binaryPath || "kiro-cli";
@@ -94,7 +99,7 @@ export const makeKiroTextGeneration = Effect.fn("KiroTextGeneration.make")(funct
       yield* fs.makeDirectory(cwd);
       yield* fs.writeFileString(
         path.join(config, "agents", "t3-title.json"),
-        JSON.stringify({
+        yield* encodeTitleAgent({
           name: "t3-title",
           tools: [],
           resources: [],
@@ -119,7 +124,6 @@ export const makeKiroTextGeneration = Effect.fn("KiroTextGeneration.make")(funct
           KIRO_FEATURE_MODEL_FALLBACK_REFUSAL_ENABLED: "false",
           KIRO_FEATURE_MODEL_FALLBACK_AVAILABILITY_ENABLED: "false",
           KIRO_FEATURE_MODEL_FALLBACK_AUTO_REFUSAL_ENABLED: "false",
-          KIRO_MANDATORY_MCPS: "",
         },
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
         clientInfo: { name: "t3-code-title", version: "0.0.0" },

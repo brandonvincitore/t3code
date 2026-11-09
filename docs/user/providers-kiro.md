@@ -32,25 +32,53 @@ models without effort control run at Kiro's own setting.
 
 The **Agent** setting next to the model picks the
 [Kiro agent](https://kiro.dev/docs/custom-agents/) a thread runs as: Kiro's built-in agents such as
-Spec and Plan, and your own agents in `~/.kiro/agents`. Agents in a project's `.kiro/agents` are
-not listed yet. Refresh the Kiro provider after adding or removing an agent.
+Spec and Plan, and active agents in `~/.kiro/agents` and the project's `.kiro/agents`. Kiro's
+workspace policy decides which agents are available. Refresh after changing configuration;
+live session advertisements update that workspace's choices without affecting other projects.
 
 The thread's model still applies when an agent sets its own `model`. An agent that was removed
 leaves the thread on Kiro's current agent.
 
 ## MCP Servers
 
-Kiro threads load the MCP servers in your Kiro configuration. To use one that signs in with OAuth,
-sign in to it once with `kiro-cli` on the machine running the T3 Code server (`/mcp`, then
-re-authenticate). Kiro threads in T3 Code reuse that sign-in.
+Kiro threads load the MCP servers in your Kiro configuration. Open **MCP servers** in a
+conversation's Servers panel to refresh connection and authentication status. When the installed
+CLI supports reconnect and a local browser can receive its callback, use **Sign in** there.
+For remote connections or CLIs without that capability, sign in through `kiro-cli` on the
+server (`/mcp`, then re-authenticate) and reconnect the conversation. Existing sign-ins are reused.
 
 ## Skills
 
-Your Kiro skills in `~/.kiro/skills` appear in the `/` and `$` menus once a Kiro session has started
-on this server, for example after the first message in a Kiro thread. Skills in a project's
-`.kiro/skills` are not listed in the menus. Kiro runs a skill only when it starts the message, so
-put the skill first. A skill you add later appears after a Kiro session reports it, and one you
-remove stays listed until the server restarts.
+Active skills from `~/.kiro/skills` and the project's `.kiro/skills` appear in the `/` and `$`
+menus. Choices are scoped to that workspace and follow Kiro's policy. Kiro runs a skill only
+when it starts the message, so put the skill first. Refresh workspace configuration after adding
+or removing a skill; a live session also replaces its advertised skill list.
+
+## Specs, Powers, and Memory
+
+Choose a project under **Settings → Providers → Kiro → Kiro workspace**. Specs reads and edits
+native artifacts in `.kiro/specs`, including task checkboxes. Powers lists active native powers
+and installs a catalog name or an absolute directory on the server. Kiro controls managed powers;
+user-local powers can be removed when permitted.
+
+Memory searches and edits Kiro's native account memories and supports explicit sync. Its scopes
+are Kiro account scopes, even when opened from a project. The provider's **Memory mode** setting
+chooses Kiro default, off, recall only, or learn and recall for conversations.
+
+## Native sessions and saved history
+
+Select a project in the provider's Sessions section to import and continue a native CLI session.
+Sessions already owned by T3 open their existing conversation. See the
+[refinement guide](kiro-refinement.md#keep-conversations-across-updates) for a stable data directory
+and access from multiple clients.
+
+## Automatic titles
+
+Kiro can generate thread titles when selected for titles or when no other configured title
+provider is available. Each request chooses the lowest advertised credit multiplier among the
+signed-in account's explicit models. It skips generation when prices are unavailable or the
+environment requires mandatory tools. The title request has no tools, skills, hooks, or memory.
+Generated titles consume Kiro credits; fixture tests do not.
 
 ## Workflows
 
