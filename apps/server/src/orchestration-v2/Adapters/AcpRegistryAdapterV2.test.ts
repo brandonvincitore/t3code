@@ -1347,7 +1347,7 @@ describe("AcpRegistryAdapterV2", () => {
                   })
                 : "test prompt",
           },
-          runtimeInstructions,
+          ...(ordinal === 1 ? [runtimeInstructions] : []),
         ];
         const echo = (messageId: string, content: ReadonlyArray<unknown>) =>
           claudeFrames.update(CLAUDE_ROOT_SESSION, {
@@ -1368,6 +1368,7 @@ describe("AcpRegistryAdapterV2", () => {
               {
                 type: "text",
                 text: promptText(ordinal),
+                annotations: { audience: ["user"] },
               },
             ]),
             ...(ordering === "before" ? [matching, acknowledgment] : [acknowledgment, matching]),
