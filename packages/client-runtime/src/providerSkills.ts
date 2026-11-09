@@ -118,6 +118,27 @@ function hasCurrentProviderWorkspaceSnapshot(
   );
 }
 
+export function resolveProviderModelsForCwd(
+  provider: ServerProvider,
+  cwd: string | null | undefined,
+): ServerProvider["models"] {
+  return resolveProviderWorkspaceSnapshot(provider, cwd)?.models ?? provider.models;
+}
+
+export function resolveProvidersForCwd(
+  providers: ReadonlyArray<ServerProvider>,
+  cwd: string | null | undefined,
+): ReadonlyArray<ServerProvider> {
+  let changed = false;
+  const scoped = providers.map((provider) => {
+    const models = resolveProviderModelsForCwd(provider, cwd);
+    if (models === provider.models) return provider;
+    changed = true;
+    return { ...provider, models };
+  });
+  return changed ? scoped : providers;
+}
+
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,

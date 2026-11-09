@@ -131,28 +131,51 @@ describe("command permissions", () => {
     ),
   );
 
-  it.effect("requires the destination provider grant to remove an incomplete connection", () =>
+  it.effect("requires destination provider grants for account and Kiro resource operations", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const registry = yield* setup;
-        const remove = createCommandPermissions(runtime, WS_METHODS.providerAuthRemoveMethod);
-        registry.set(sessions(env), AsyncResult.success(grant(true)));
-        expect(registry.get(remove.permissionAtom(env))).toBe(false);
-        expect((yield* remove.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
-          "EnvironmentAuthorizationError",
-        );
-        registry.set(
-          sessions(env),
-          AsyncResult.success({
-            ...grant(false),
-            scopes: [AuthProvidersManageScope],
-            permissions: [AuthProvidersManageScope],
-          }),
-        );
-        expect(registry.get(remove.permissionAtom(env))).toBe(true);
-        yield* remove.authorize(registry, env);
-        registry.set(sessions(other), AsyncResult.success(grant(false)));
-        expect(registry.get(remove.permissionAtom(other))).toBe(false);
+        const methods = [
+          WS_METHODS.providerAuthRemoveMethod,
+          WS_METHODS.kiroMcpStatus,
+          WS_METHODS.kiroMcpBeginSignIn,
+          WS_METHODS.kiroMcpTakeAuthorizationUrl,
+          WS_METHODS.kiroMcpCancelSignIn,
+          WS_METHODS.kiroMemoryList,
+          WS_METHODS.kiroMemoryGet,
+          WS_METHODS.kiroMemoryCreate,
+          WS_METHODS.kiroMemoryUpdate,
+          WS_METHODS.kiroMemoryDelete,
+          WS_METHODS.kiroMemoryGetSyncStatus,
+          WS_METHODS.kiroMemorySync,
+          WS_METHODS.kiroPowersList,
+          WS_METHODS.kiroPowersInstall,
+          WS_METHODS.kiroPowersRemove,
+        ];
+        for (const method of methods) {
+          const remove = createCommandPermissions(runtime, method);
+          registry.set(sessions(env), AsyncResult.success(grant(true)));
+          expect(registry.get(remove.permissionAtom(env))).toBe(false);
+          expect((yield* remove.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+          registry.set(
+            sessions(env),
+            AsyncResult.success({
+              ...grant(false),
+              scopes: [AuthProvidersManageScope],
+              permissions: [AuthProvidersManageScope],
+            }),
+          );
+          expect(registry.get(remove.permissionAtom(env))).toBe(true);
+          yield* remove.authorize(registry, env);
+          registry.set(sessions(other), AsyncResult.success(grant(false)));
+          expect(registry.get(remove.permissionAtom(other))).toBe(false);
+          registry.set(sessions(env), AsyncResult.success(grant(false)));
+          expect((yield* remove.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
+            "EnvironmentAuthorizationError",
+          );
+        }
       }),
     ),
   );

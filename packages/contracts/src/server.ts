@@ -129,6 +129,7 @@ export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   slashCommandsPending: Schema.optional(Schema.Boolean),
   skills: Schema.Array(ServerProviderSkill),
   optionDescriptors: Schema.optional(Schema.Array(ProviderOptionDescriptor)),
+  models: Schema.optional(Schema.Array(ServerProviderModel).check(Schema.isMaxLength(256))),
 });
 export type ServerProviderWorkspaceSnapshot = typeof ServerProviderWorkspaceSnapshot.Type;
 
@@ -205,6 +206,7 @@ export const ServerProviderUpdateState = Schema.Struct({
 export type ServerProviderUpdateState = typeof ServerProviderUpdateState.Type;
 
 export const ServerProvider = Schema.Struct({
+  workspaceRevision: Schema.optional(NonNegativeInt),
   // Only instanceId is stable enough for provider routing.
   instanceId: ProviderInstanceId,
   driver: ProviderDriverKind,
@@ -219,6 +221,7 @@ export const ServerProvider = Schema.Struct({
   supportedRuntimeModes: Schema.optional(ForwardCompatibleArray(RuntimeMode)),
   supportsConversationRollback: Schema.optional(Schema.Boolean),
   supportsTextGeneration: Schema.optional(Schema.Boolean),
+  supportsThreadTitleGeneration: Schema.optional(Schema.Boolean),
   setup: Schema.optional(
     Schema.Struct({
       canAuthenticate: Schema.Boolean,
@@ -277,6 +280,9 @@ export const isProviderAvailable = (snapshot: ServerProvider): boolean =>
 /** Legacy producers omit this field and support text generation. */
 export const isProviderTextGenerationCapable = (snapshot: ServerProvider): boolean =>
   snapshot.supportsTextGeneration !== false;
+
+export const isProviderThreadTitleGenerationCapable = (snapshot: ServerProvider): boolean =>
+  snapshot.supportsThreadTitleGeneration ?? isProviderTextGenerationCapable(snapshot);
 
 export const OtlpEndpointSource = Schema.Literals(["environment", "bootstrap", "settings"]);
 export type OtlpEndpointSource = typeof OtlpEndpointSource.Type;

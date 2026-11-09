@@ -72,16 +72,18 @@ export function fallbackTextGenerationModelSelection(
   isEnabled: (instanceId: ProviderInstanceId, driver: ProviderDriverKind) => boolean,
   options?: {
     readonly includeConfiguredInstances?: boolean;
+    readonly includeThreadTitleProviders?: boolean;
     readonly defaultModelSelection?: ModelSelection | null;
   },
 ): ModelSelection | null {
+  const drivers = options?.includeThreadTitleProviders
+    ? [...TEXT_GENERATION_FALLBACK_DRIVERS, ProviderDriverKind.make("kiro")]
+    : TEXT_GENERATION_FALLBACK_DRIVERS;
   const candidates = [
-    ...TEXT_GENERATION_FALLBACK_DRIVERS.map(
-      (driver) => [defaultInstanceIdForDriver(driver), driver] as const,
-    ),
+    ...drivers.map((driver) => [defaultInstanceIdForDriver(driver), driver] as const),
     ...(options?.includeConfiguredInstances === true
       ? Object.entries(providerInstances).flatMap(([instanceId, instance]) =>
-          TEXT_GENERATION_FALLBACK_DRIVERS.includes(instance.driver)
+          drivers.includes(instance.driver)
             ? [[ProviderInstanceId.make(instanceId), instance.driver] as const]
             : [],
         )

@@ -142,6 +142,49 @@ describe("mobile model options", () => {
       null,
     );
     expect(explicitOption?.selection.options).toEqual([{ id: "serviceTier", value: "priority" }]);
+    const scopedModel = {
+      ...config.providers[0]!.models[0]!,
+      slug: "workspace-only",
+      capabilities: {
+        optionDescriptors: [
+          {
+            id: "reasoningEffort",
+            label: "Reasoning",
+            type: "select" as const,
+            currentValue: "extreme",
+            options: [{ id: "extreme", label: "Extreme" }],
+          },
+        ],
+      },
+    };
+    const scopedConfig = {
+      ...config,
+      providers: [
+        {
+          ...config.providers[0]!,
+          workspaceSnapshots: [
+            {
+              cwd: "/work/a",
+              checkedAt: "2026-11-08T00:00:00.000Z",
+              skills: [],
+              slashCommands: [],
+              models: [scopedModel],
+            },
+          ],
+        },
+      ],
+    };
+    const scoped = buildModelOptions(scopedConfig, null, undefined, null, false, "/work/a");
+    expect(scoped.map((entry) => entry.selection.model)).toEqual(["workspace-only"]);
+    expect(scoped[0]?.capabilities?.optionDescriptors).toEqual(
+      scopedModel.capabilities.optionDescriptors,
+    );
+    expect(scoped[0]?.selection.options).toBeUndefined();
+    expect(
+      buildModelOptions(scopedConfig, null, undefined, null, false, "/work/b").map(
+        (entry) => entry.selection.model,
+      ),
+    ).toEqual(["gpt-test"]);
   });
 
   it("limits existing threads to their provider while new tasks keep every provider", () => {

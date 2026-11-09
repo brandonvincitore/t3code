@@ -78,6 +78,20 @@ function environment(id: string, usageSummary: UsageSummary): EnvironmentUsage {
 }
 
 describe("mergeUsage", () => {
+  it("accepts only nonnegative finite Kiro credits in usage buckets", () => {
+    const kiro = { provider: "kiro" as const, hostId: "linux", homePath: "/home/user/.kiro" };
+    const valid = summary([bucket({ provider: "kiro", credits: 2.5 })], [kiro]);
+    expect(decodeSummary(valid).buckets[0]).toMatchObject({ credits: 2.5, provider: "kiro" });
+    expect(
+      decodeSummary(summary([bucket({ provider: "kiro", credits: -1 })], [kiro])).buckets,
+    ).toEqual([]);
+    expect(
+      decodeSummary(
+        summary([bucket({ provider: "kiro", credits: Number.POSITIVE_INFINITY })], [kiro]),
+      ).buckets,
+    ).toEqual([]);
+  });
+
   it("counts a Cursor account once across servers while retaining each server's other providers", () => {
     const account = {
       provider: "cursor" as const,
@@ -128,6 +142,53 @@ describe("mergeUsage", () => {
     expect(merged.sessions).toBe(1);
     expect(merged.duplicateSources).toHaveLength(1);
     expect(merged.contributingEnvironments).toEqual(["env-a"]);
+  });
+
+  it("keeps provider credits separate from dollar and token totals", () => {
+    const kiro = { provider: "kiro" as const, hostId: "linux", homePath: "/home/user/.kiro" };
+    const merged = mergeUsage(
+      [
+        environment(
+          "linux",
+          summary(
+            [
+              bucket({
+                provider: "kiro",
+                model: "claude-sonnet-4.5",
+                sourcePath: kiro.homePath,
+                totals: {
+                  uncachedInputTokens: 0,
+                  cachedInputTokens: 0,
+                  cacheCreationTokens: 0,
+                  outputTokens: 0,
+                  reasoningTokens: 0,
+                },
+                credits: 2.5,
+                costUsd: 0,
+                costSource: "unpriced",
+                records: 1,
+                unpricedRecords: 1,
+              }),
+            ],
+            [kiro],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.providers[0]).toMatchObject({
+      provider: "kiro",
+      credits: 2.5,
+      costUsd: 0,
+      totalTokens: 0,
+    });
+    expect(merged.models[0]).toMatchObject({
+      model: "claude-sonnet-4.5",
+      credits: 2.5,
+      costUsd: 0,
+      totalTokens: 0,
+    });
   });
 
   it("drops only the duplicated provider, keeping the environment's other one", () => {

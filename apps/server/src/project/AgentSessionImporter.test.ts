@@ -3,6 +3,7 @@ import {
   type AgentSessionSource,
   type ServerSettingsError,
   EventId,
+  CommandId,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -395,6 +396,48 @@ it.effect("rechecks ownership after the import reaches the commit transaction", 
     expect(yield* events.read({ threadId: importId(source) }).pipe(Stream.runCollect)).toEqual([]);
     expect(yield* runtimes.list()).toEqual([]);
     expect(importer.published).toEqual([]);
+    expect(
+      (yield* projections.getThreadRecords(ownerId, ["providerThreads"])).providerThreads[0]
+        ?.appThreadId,
+    ).toBe(ownerId);
+    const sink = yield* EventSink.EventSinkV2;
+    const providerThread = (yield* projections.getThreadRecords(ownerId, ["providerThreads"]))
+      .providerThreads[0]!;
+    const ownerThread = yield* projections.getThread(ownerId);
+    const importedId = importId(source);
+    const importedProviderThread = { ...providerThread, appThreadId: importedId };
+    const claim = {
+      commandId: CommandId.make("import-ownership-claim"),
+      threadId: importedId,
+      commandType: "thread.create",
+      acceptedAt: now,
+      unlessNativeThreadOwned: importedProviderThread,
+      events: [
+        {
+          id: EventId.make("import-ownership-claim:thread"),
+          type: "thread.created" as const,
+          threadId: importedId,
+          occurredAt: now,
+          payload: {
+            ...ownerThread,
+            id: importedId,
+            lineage: { ...ownerThread.lineage, rootThreadId: importedId },
+          },
+        },
+        {
+          id: EventId.make("import-ownership-claim:provider"),
+          type: "provider-thread.updated" as const,
+          threadId: importedId,
+          occurredAt: now,
+          payload: importedProviderThread,
+        },
+      ],
+      effects: [],
+    };
+    const rejected = yield* sink.commitCommand(claim);
+    expect(rejected.receipt.status).toBe("rejected");
+    expect(rejected.storedEvents).toEqual([]);
+    expect(yield* Effect.option(projections.getThread(importedId))).toEqual(Option.none());
     expect(
       (yield* projections.getThreadRecords(ownerId, ["providerThreads"])).providerThreads[0]
         ?.appThreadId,

@@ -23,6 +23,7 @@ import {
   makeKiroAcpRuntime,
   kiroWorkflowSessionMeta,
 } from "./acpSupport.ts";
+import { kiroSessionCapabilities } from "./nativeSessions.ts";
 import { kiroWorkflowPreferenceDescriptor } from "./workflowPreferences.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
@@ -87,8 +88,8 @@ const snapshot = (
   probe: ProviderProbeResult,
   listed?: ReadonlyArray<ServerProviderModel>,
   options: ReadonlyArray<ProviderOptionDescriptor> = [],
-) =>
-  buildServerProvider({
+) => ({
+  ...buildServerProvider({
     // Gives the snapshot its version advisory; Kiro runs no enrichment pass.
     driver: KIRO_DRIVER_KIND,
     presentation: KIRO_PRESENTATION,
@@ -96,9 +97,12 @@ const snapshot = (
     checkedAt,
     models: kiroModels(settings, listed, options),
     // `/compact` runs `_kiro/session/compact`; see compactKiroSession.
-    slashCommands: [COMPACT_SLASH_COMMAND],
+    slashCommands: [],
     probe,
-  });
+  }),
+  supportsTextGeneration: false,
+  supportsThreadTitleGeneration: true,
+});
 
 export const buildInitialKiroProviderSnapshot = Effect.fn(
   "KiroProvider.buildInitialKiroProviderSnapshot",
@@ -329,7 +333,6 @@ export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor
             id,
             label,
             ...(description ? { description } : {}),
-            ...(id === defaultAgent ? { isDefault: true } : {}),
           },
         ];
   });
@@ -340,7 +343,7 @@ export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor
     label: "Agent",
     type: "select",
     options: choices,
-    ...(defaultAgent !== undefined && choices.some((choice) => choice.isDefault)
+    ...(defaultAgent !== undefined && choices.some((choice) => choice.id === defaultAgent)
       ? { currentValue: defaultAgent }
       : {}),
   };
@@ -364,15 +367,24 @@ const probeKiroOptions = Effect.fn("KiroProvider.probeKiroOptions")(function* (
   const methods = Option.getOrUndefined(
     decodeKiroExtensionMethods(initialized.agentCapabilities?._meta),
   )?.kiro.extensionMethods;
-  if (!methods?.includes("_kiro/config/template")) return [];
+  if (!methods?.includes("_kiro/config/template"))
+    return {
+      options: [],
+      nativeSessions: kiroSessionCapabilities(initialized),
+      canCompact: methods?.includes("_kiro/session/compact") === true,
+    };
   const workflowMeta = kiroWorkflowSessionMeta(initialized.agentCapabilities?._meta);
-  const template = yield* runtime.request(
-    "_kiro/config/template",
-    workflowMeta === undefined ? {} : { _meta: workflowMeta },
-  );
-  return [kiroAgentDescriptor(template), kiroWorkflowPreferenceDescriptor(template)].filter(
-    (descriptor): descriptor is ProviderOptionDescriptor => descriptor !== undefined,
-  );
+  const template = yield* runtime
+    .request("_kiro/config/template", workflowMeta === undefined ? {} : { _meta: workflowMeta })
+    .pipe(Effect.option);
+  return {
+    options: [
+      kiroAgentDescriptor(Option.getOrUndefined(template)),
+      kiroWorkflowPreferenceDescriptor(Option.getOrUndefined(template)),
+    ].filter((descriptor): descriptor is ProviderOptionDescriptor => descriptor !== undefined),
+    nativeSessions: kiroSessionCapabilities(initialized),
+    canCompact: methods?.includes("_kiro/session/compact") === true,
+  };
 }, Effect.scoped);
 
 export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(function* (
@@ -461,7 +473,7 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
           { concurrency: "unbounded" },
         )
       : [undefined, undefined];
-  return snapshot(
+  const checked = snapshot(
     settings,
     checkedAt,
     {
@@ -474,6 +486,11 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
         : { message: "Could not confirm the Kiro sign-in. Run `kiro-cli whoami` to check." }),
     },
     listed,
-    options,
+    options?.options,
   );
+  return {
+    ...checked,
+    ...(options === undefined ? {} : { nativeSessions: options.nativeSessions }),
+    slashCommands: options?.canCompact === true ? [COMPACT_SLASH_COMMAND] : [],
+  };
 });

@@ -44,6 +44,7 @@ import {
   enumerateDays,
   enumerateHourStarts,
   formatCount,
+  formatCredits,
   formatDateTimeShort,
   formatDayShort,
   formatHourShort,
@@ -51,6 +52,7 @@ import {
   formatTokens,
   formatUsageContractMismatch,
   formatUsd,
+  isCreditsOnly,
   makeWindow,
   usageSourceMessages,
 } from "@t3tools/shared/usageFormat";
@@ -740,9 +742,11 @@ function UsageOverview({
                   >
                     {awaitingData
                       ? "-"
-                      : metric === "cost"
-                        ? formatUsd(totals?.costUsd ?? 0)
-                        : formatTokens(totals?.totalTokens ?? 0)}
+                      : totals !== undefined && isCreditsOnly(totals)
+                        ? formatCredits(totals.credits)
+                        : metric === "cost"
+                          ? formatUsd(totals?.costUsd ?? 0)
+                          : formatTokens(totals?.totalTokens ?? 0)}
                   </span>
                 </div>
                 <span
@@ -752,9 +756,11 @@ function UsageOverview({
                     awaitingData && "invisible",
                   )}
                 >
-                  {metric === "cost"
-                    ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
-                    : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
+                  {totals !== undefined && isCreditsOnly(totals)
+                    ? "Billed in credits · no token data"
+                    : metric === "cost"
+                      ? `${formatPercent(share)} of cost · ${formatTokens(totals?.totalTokens ?? 0)} tokens`
+                      : `${formatPercent(share)} of tokens · ${formatUsd(totals?.costUsd ?? 0)}`}
                 </span>
               </div>
             );
@@ -873,7 +879,7 @@ function UsageOverview({
               <tr className="border-b border-border text-right text-xs text-muted-foreground">
                 <th className="py-2 pr-3 pl-2 text-left font-normal">#</th>
                 <th className="w-full py-2 text-left font-normal">Model</th>
-                <th className="py-2 pl-6 font-normal">Cost</th>
+                <th className="py-2 pl-6 font-normal">Cost / credits</th>
                 <th className="hidden py-2 pl-6 font-normal sm:table-cell">Share</th>
                 <th className="py-2 pr-2 pl-6 font-normal">Tokens</th>
               </tr>
@@ -923,7 +929,9 @@ function UsageOverview({
                         ) : null}
                       </td>
                       <td className={cn("py-2.5 pl-6 text-foreground", rowFigures)}>
-                        {isModelCostUnknown(model) ? (
+                        {isCreditsOnly(model) ? (
+                          formatCredits(model.credits)
+                        ) : isModelCostUnknown(model) ? (
                           <span className="text-muted-foreground">Unpriced</span>
                         ) : (
                           formatUsd(model.costUsd)
@@ -993,7 +1001,9 @@ function UsageOverview({
                             figureClass(loadingProviders.has(provider)),
                           )}
                         >
-                          {formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
+                          {provider === "kiro"
+                            ? "N/A"
+                            : formatUsd(period.byProvider.get(provider)?.costUsd ?? 0)}
                         </td>
                       ))}
                       <td

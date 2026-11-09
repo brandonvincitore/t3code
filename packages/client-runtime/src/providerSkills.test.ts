@@ -13,6 +13,8 @@ import {
   getProviderSkillsForSlashMenu,
   hasCompleteProviderWorkspaceSnapshot,
   isProviderWorkspaceSnapshotScanning,
+  resolveProvidersForCwd,
+  resolveProviderModelsForCwd,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
 } from "./providerSkills.ts";
@@ -103,6 +105,19 @@ describe("workspace provider snapshots", () => {
     expect(resolveProviderSlashCommandsForCwd(provider, "/workspace/project-a")).toEqual([
       { name: "project" },
     ]);
+    const models = [
+      { slug: "live-model", name: "Live model", isCustom: false, capabilities: null },
+    ];
+    const scoped = {
+      ...provider,
+      workspaceSnapshots: provider.workspaceSnapshots.map((snapshot) => ({ ...snapshot, models })),
+    };
+    const mapped = resolveProvidersForCwd([scoped], "/workspace/project-a");
+    expect(mapped[0]?.models).toBe(models);
+    expect(mapped[0]?.models).toBe(resolveProviderModelsForCwd(scoped, "/workspace/project-a"));
+    const providers = [scoped];
+    expect(resolveProvidersForCwd(providers, "/workspace/project-b")).toBe(providers);
+    expect(resolveProvidersForCwd([provider], "/workspace/project-a")[0]).toBe(provider);
   });
 
   it("keeps the machine snapshot before this cwd has a provider snapshot", () => {

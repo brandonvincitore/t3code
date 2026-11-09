@@ -633,6 +633,24 @@ it.layer(
         checkedAt: "2026-03-25T00:01:00.000Z",
         slashCommands: [{ name: "project" }],
         skills: [{ name: "project", path: "/project/SKILL.md", enabled: true }],
+        workspaceModels: [
+          {
+            slug: "workspace-only",
+            name: "Workspace model",
+            isCustom: false,
+            capabilities: {
+              optionDescriptors: [
+                {
+                  id: "reasoningEffort",
+                  label: "Reasoning",
+                  type: "select",
+                  currentValue: "extreme",
+                  options: [{ id: "extreme", label: "Extreme" }],
+                },
+              ],
+            },
+          },
+        ],
         optionDescriptors: [
           {
             id: "agent",
@@ -660,6 +678,7 @@ it.layer(
           slashCommands: scopedSnapshot.slashCommands,
           skills: scopedSnapshot.skills,
           optionDescriptors: scopedSnapshot.optionDescriptors,
+          models: scopedSnapshot.workspaceModels,
         },
       ]);
 
@@ -693,7 +712,7 @@ it.layer(
       ]);
       assert.strictEqual(recovered.workspaceSnapshots?.[0]?.slashCommandsPending, undefined);
 
-      const { optionDescriptors, ...failedSnapshot } = scopedSnapshot;
+      const { optionDescriptors, workspaceModels, ...failedSnapshot } = scopedSnapshot;
       const firstFailure = ProviderRegistry.upsertProviderWorkspaceSnapshot(
         provider,
         "/project",
@@ -724,6 +743,14 @@ it.layer(
         );
       }
 
+      assert.deepStrictEqual(recovered.workspaceSnapshots?.[0]?.models, workspaceModels);
+      const clearedModels = ProviderRegistry.upsertProviderWorkspaceSnapshot(
+        recovered,
+        "/project",
+        { ...scopedSnapshot, workspaceModels: [] },
+      );
+      assert.deepStrictEqual(clearedModels.workspaceSnapshots?.[0]?.models, []);
+
       const failedRefresh = ProviderRegistry.upsertProviderWorkspaceSnapshot(
         failedOtherProject,
         "/project",
@@ -733,6 +760,13 @@ it.layer(
         failedRefresh.workspaceSnapshots?.[1]?.optionDescriptors,
         optionDescriptors,
       );
+      assert.deepStrictEqual(failedRefresh.workspaceSnapshots?.[1]?.models, workspaceModels);
+      const retired = ProviderRegistry.mergeProviderSnapshot(result, {
+        ...provider,
+        workspaceRevision: 1,
+      });
+      assert.deepStrictEqual(retired.workspaceSnapshots, []);
+      assert.strictEqual(retired.models, provider.models);
     });
 
     it("preserves previously discovered provider models when a refresh returns none", () => {

@@ -67,6 +67,7 @@ import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
+import { KiroRefinementSection } from "./KiroRefinementSection";
 import { AcpSessionManagementSection } from "./AcpSessionManagementSection";
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { readCodexSetupMode } from "./CodexSetupSection.logic";
@@ -1362,11 +1363,21 @@ export function ProviderInstanceCard({
           />
         </div>
       </SettingsSection>
-      {environmentId !== undefined && liveProvider?.driver === "acpRegistry" ? (
+      {environmentId !== undefined && liveProvider?.nativeSessions !== undefined ? (
         <AcpSessionManagementSection
           environmentId={environmentId}
           instanceId={instanceId}
           provider={liveProvider}
+          projects={acpProjects}
+          readOnly={readOnly}
+        />
+      ) : null}
+
+      {environmentId !== undefined && liveProvider?.driver === "kiro" ? (
+        <KiroRefinementSection
+          key={`${environmentId}:${instanceId}`}
+          environmentId={environmentId}
+          instanceId={instanceId}
           projects={acpProjects}
           readOnly={readOnly}
         />

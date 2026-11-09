@@ -164,6 +164,10 @@ export interface EventSinkV2Shape {
     EventSinkV2Error
   >;
   readonly commitCommand: (input: {
+    readonly unlessNativeThreadOwned?: Pick<
+      OrchestrationV2ProviderThread,
+      "driver" | "providerInstanceId" | "appThreadId" | "nativeThreadRef"
+    >;
     readonly commandId: CommandId;
     readonly threadId: ThreadId;
     readonly commandType: string;
@@ -435,6 +439,22 @@ const layerBase: Layer.Layer<
       );
     });
 
+    const nativeThreadOwned = Effect.fn("orchestrationV2.EventSink.nativeThreadOwned")(function* (
+      imported: NonNullable<Parameters<EventSinkV2Shape["write"]>[0]["unlessNativeThreadOwned"]>,
+    ) {
+      if (imported.nativeThreadRef == null) return false;
+      const owners = yield* sql`
+        SELECT provider_thread_id
+        FROM orchestration_v2_projection_provider_threads
+        WHERE driver = ${imported.driver}
+          AND provider_instance_id = ${imported.providerInstanceId}
+          AND thread_id IS NOT ${imported.appThreadId}
+          AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
+        LIMIT 1
+      `;
+      return owners.length > 0;
+    });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -450,18 +470,8 @@ const layerBase: Layer.Layer<
         Effect.gen(function* () {
           // Check ownership in the same transaction that claims the native session.
           const imported = input.unlessNativeThreadOwned;
-          if (imported?.nativeThreadRef != null) {
-            const owners = yield* sql`
-              SELECT provider_thread_id
-              FROM orchestration_v2_projection_provider_threads
-              WHERE driver = ${imported.driver}
-                AND provider_instance_id = ${imported.providerInstanceId}
-                AND thread_id IS NOT ${imported.appThreadId}
-                AND json_extract(payload_json, '$.nativeThreadRef.nativeId') = ${imported.nativeThreadRef.nativeId}
-              LIMIT 1
-            `;
-            if (owners.length > 0) return { committed: [], outcomes: [] };
-          }
+          if (imported !== undefined && (yield* nativeThreadOwned(imported)))
+            return { committed: [], outcomes: [] };
           // Checkpoint capture can finish after a cohort writer reads its parent run.
           // Merge in this transaction so the event log and projection keep that completion.
           const events = input.updateDelegatedCompletionOnly
@@ -679,6 +689,23 @@ const layerBase: Layer.Layer<
           if (!reserved) {
             const existing = yield* existingCommandResult(input.commandId);
             return { ...existing, committed: false as const, cancelledEffectIds: [] };
+          }
+
+          if (
+            input.unlessNativeThreadOwned !== undefined &&
+            (yield* nativeThreadOwned(input.unlessNativeThreadOwned))
+          ) {
+            const receipt: CommandReceiptStore.CommandReceiptV2 = {
+              commandId: input.commandId,
+              threadId: input.threadId,
+              commandType: input.commandType,
+              acceptedAt: input.acceptedAt,
+              resultSequence: yield* eventStore.latestSequence({ threadId: input.threadId }),
+              status: "rejected",
+              error: "The native provider session already belongs to another T3 thread.",
+            };
+            yield* commandReceipts.upsert(receipt);
+            return { receipt, storedEvents: [], committed: false as const, cancelledEffectIds: [] };
           }
 
           const runId = input.updateDelegatedCompletionOnlyRunId;

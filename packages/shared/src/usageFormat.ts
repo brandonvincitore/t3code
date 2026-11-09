@@ -16,6 +16,7 @@ const CURRENCY = new Intl.NumberFormat("en-US", {
 });
 
 const INTEGER = new Intl.NumberFormat("en-US");
+const CREDITS = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
 
 export function formatMalformedUsageWarning(count: number): string {
   return `${count} malformed or inconsistent usage record(s) were skipped; usage may be incomplete.`;
@@ -57,6 +58,19 @@ export function usageSourceMessages(sources: readonly UsageSource[]): readonly s
 
 export function formatUsd(value: number): string {
   return CURRENCY.format(value);
+}
+
+export function formatCredits(value: number): string {
+  return `${CREDITS.format(value)} ${value === 1 ? "credit" : "credits"}`;
+}
+
+/** Credit-metered usage has no token count or dollar cost to show. */
+export function isCreditsOnly(totals: {
+  readonly credits: number;
+  readonly totalTokens: number;
+  readonly costUsd: number;
+}): boolean {
+  return totals.credits > 0 && totals.totalTokens === 0 && totals.costUsd === 0;
 }
 
 export function formatCount(value: number): string {

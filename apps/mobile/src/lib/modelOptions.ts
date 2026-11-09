@@ -1,3 +1,4 @@
+import { resolveProvidersForCwd } from "@t3tools/client-runtime/providerSkills";
 import {
   normalizeProviderAccentColor,
   resolveProviderInstanceDisplayName,
@@ -282,11 +283,11 @@ export function buildModelOptions(
   providerInstanceId: ModelSelection["instanceId"] | undefined,
   projectId: ProjectId | null,
   includeHidden = false,
+  cwd?: string | null,
 ): ReadonlyArray<ModelOption> {
+  const providers = resolveProvidersForCwd(config?.providers ?? [], cwd);
   const options = new Map<string, ModelOption>();
-  const lockedProvider = config?.providers.find(
-    (provider) => provider.instanceId === providerInstanceId,
-  );
+  const lockedProvider = providers.find((provider) => provider.instanceId === providerInstanceId);
   const matchesLockedProvider = (provider: T3ServerConfig["providers"][number]) => {
     if (providerInstanceId === undefined || provider.instanceId === providerInstanceId) return true;
     if (!lockedProvider || provider.driver !== lockedProvider.driver) return false;
@@ -304,13 +305,13 @@ export function buildModelOptions(
         ? agentId.trim() || undefined
         : undefined;
   };
-  const badgeEntries = (config?.providers ?? []).map((provider) => ({
+  const badgeEntries = providers.map((provider) => ({
     driverKind: provider.driver,
     enabled: provider.enabled,
     acpRegistryAgentId: registryAgentId(provider.instanceId),
   }));
   const providerBadgeFor = (instanceId: ModelSelection["instanceId"]) => {
-    const snapshot = config?.providers.find((provider) => provider.instanceId === instanceId);
+    const snapshot = providers.find((provider) => provider.instanceId === instanceId);
     const instance = config?.settings?.providerInstances[instanceId];
     const driver = snapshot?.driver ?? instance?.driver;
     if (!driver) return undefined;
@@ -336,7 +337,7 @@ export function buildModelOptions(
     };
   };
 
-  for (const provider of config?.providers ?? []) {
+  for (const provider of providers) {
     if (
       !matchesLockedProvider(provider) ||
       isDriverDisallowed(config, provider.driver) ||
@@ -416,7 +417,7 @@ export function buildModelOptions(
             : normalizeSelectionOptions(fallbackModelSelection, existing.capabilities),
       });
     } else {
-      const provider = config?.providers.find(
+      const provider = providers.find(
         (candidate) => candidate.instanceId === fallbackModelSelection.instanceId,
       );
       const instanceConfig = config?.settings?.providerInstances[fallbackModelSelection.instanceId];

@@ -1,3 +1,6 @@
+import * as KiroPowersService from "./provider/KiroPowersService.ts";
+import * as KiroMemoryService from "./provider/KiroMemoryService.ts";
+import * as KiroMcpService from "./provider/KiroMcpService.ts";
 import { OrchestrationDispatchCommandError } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -42,10 +45,8 @@ import {
   type GitActionProgressEvent,
   type GitManagerServiceError,
   type MessageId,
-  type AcpRegistryDeleteSessionInput,
   type AcpRegistryDisableProviderInput,
   type AcpRegistryListProvidersInput,
-  type AcpRegistryListSessionsInput,
   type AcpRegistrySetProviderInput,
   OrchestrationGetFullThreadDiffError,
   OrchestrationSearchThreadsError,
@@ -1490,6 +1491,9 @@ export const layerWsRpc = (
       const acpRegistryRuntimeCoordinator =
         yield* AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator;
       const acpRegistrySessions = yield* AcpRegistrySessions.AcpRegistrySessions;
+      const kiroMemory = yield* KiroMemoryService.KiroMemoryService;
+      const kiroPowers = yield* KiroPowersService.KiroPowersService;
+      const kiroMcp = yield* KiroMcpService.KiroMcpService;
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const providerAuth = yield* ProviderAuthService.ProviderAuthService;
       const providerInstallation = yield* ProviderInstallation.ProviderInstallation;
@@ -1553,95 +1557,8 @@ export const layerWsRpc = (
           ? effect
           : Effect.fail(rpcAuthorizationError(requiredScope));
 
-      const listAcpRegistrySessions = Effect.fn("ws.acpRegistry.listSessions")(function* (
-        input: AcpRegistryListSessionsInput,
-      ) {
-        const project = yield* acpRegistrySessions.project(input.projectId);
-        const { instance, manager } = yield* acpRegistrySessions.sessionManager(input.instanceId);
-        const listed = yield* manager.listSessions({
-          cwd: project.workspaceRoot,
-          ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
-        });
-        const sessions = yield* Effect.forEach(
-          listed.sessions,
-          (session) => {
-            const threadId = AcpRegistrySessions.importedThreadId({
-              driver: instance.driverKind,
-              instanceId: input.instanceId,
-              sessionId: session.sessionId,
-            });
-            return threadManagement.getThreadShell(threadId).pipe(
-              Effect.map((thread) => ({
-                ...session,
-                importedThreadId: thread === null ? null : threadId,
-                ...(thread !== null &&
-                AgentSessionImporter.isNativeHistoryPending({
-                  historyOrigin: thread.historyOrigin,
-                  hasRun: thread.latestRunId !== null,
-                })
-                  ? { nativeHistoryPending: true }
-                  : {}),
-              })),
-              Effect.mapError(
-                (cause) =>
-                  new AcpRegistryOperationError({
-                    reason: "session_import_failed",
-                    message: "Could not inspect existing imported ACP sessions.",
-                    cause,
-                  }),
-              ),
-            );
-          },
-          { concurrency: 16 },
-        );
-        return { ...listed, sessions };
-      });
-
-      const deleteAcpRegistrySession = Effect.fn("ws.acpRegistry.deleteSession")(function* (
-        input: AcpRegistryDeleteSessionInput,
-      ) {
-        return yield* acpRegistryRuntimeCoordinator.withSessionMutation(
-          Effect.gen(function* () {
-            const project = yield* acpRegistrySessions.project(input.projectId);
-            const { instance, manager } = yield* acpRegistrySessions.sessionManager(
-              input.instanceId,
-            );
-            const snapshot = yield* instance.snapshot.getSnapshot;
-            if (snapshot.nativeSessions?.canDelete !== true) {
-              return yield* new AcpRegistryOperationError({
-                reason: "session_delete_unsupported",
-                message: "The ACP agent does not advertise session deletion.",
-              });
-            }
-            const threadId = AcpRegistrySessions.importedThreadId({
-              driver: instance.driverKind,
-              instanceId: input.instanceId,
-              sessionId: input.sessionId,
-            });
-            const importedThread = yield* threadManagement.getThreadShell(threadId).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new AcpRegistryOperationError({
-                    reason: "session_delete_failed",
-                    message: "Could not inspect the imported ACP session mapping.",
-                    cause,
-                  }),
-              ),
-            );
-            if (importedThread !== null) {
-              return yield* new AcpRegistryOperationError({
-                reason: "session_delete_failed",
-                message: "Delete the imported T3 thread before deleting its native ACP session.",
-              });
-            }
-            yield* manager.deleteSession({
-              cwd: project.workspaceRoot,
-              sessionId: input.sessionId,
-            });
-            return { deleted: true } as const;
-          }),
-        );
-      });
+      const listAcpRegistrySessions = acpRegistrySessions.listSessions;
+      const deleteAcpRegistrySession = acpRegistrySessions.deleteSession;
 
       const listAcpRegistryProviders = Effect.fn("ws.acpRegistry.listProviders")(function* (
         input: AcpRegistryListProvidersInput,
@@ -1649,7 +1566,7 @@ export const layerWsRpc = (
         const project = yield* acpRegistrySessions.project(input.projectId);
         const { instance, manager } = yield* acpRegistrySessions.sessionManager(input.instanceId);
         const snapshot = yield* instance.snapshot.getSnapshot;
-        if (snapshot.configurableProviders !== true) {
+        if (snapshot.configurableProviders !== true || manager.listProviders === undefined) {
           return yield* new AcpRegistryOperationError({
             reason: "providers_unsupported",
             message: "The ACP agent does not advertise provider configuration.",
@@ -1663,6 +1580,12 @@ export const layerWsRpc = (
       ) {
         const project = yield* acpRegistrySessions.project(input.projectId);
         const { manager } = yield* acpRegistrySessions.sessionManager(input.instanceId);
+        if (manager.listProviders === undefined || manager.setProvider === undefined) {
+          return yield* new AcpRegistryOperationError({
+            reason: "providers_unsupported",
+            message: "The ACP agent does not advertise provider configuration.",
+          });
+        }
         if (input.headers !== undefined && Object.keys(input.headers).length > 32) {
           return yield* new AcpRegistryOperationError({
             reason: "provider_configuration_failed",
@@ -1705,6 +1628,12 @@ export const layerWsRpc = (
       ) {
         const project = yield* acpRegistrySessions.project(input.projectId);
         const { manager } = yield* acpRegistrySessions.sessionManager(input.instanceId);
+        if (manager.listProviders === undefined || manager.disableProvider === undefined) {
+          return yield* new AcpRegistryOperationError({
+            reason: "providers_unsupported",
+            message: "The ACP agent does not advertise provider configuration.",
+          });
+        }
         const listed = yield* manager.listProviders(project.workspaceRoot);
         const provider = listed.providers.find(
           (candidate) => candidate.providerId === input.providerId,
@@ -2256,6 +2185,21 @@ export const layerWsRpc = (
                 .pipe(Effect.map((accepted) => ({ accepted }))),
             ),
           ),
+        [WS_METHODS.kiroMcpStatus]: (input) => kiroMcp.getStatus(input, currentSessionId),
+        [WS_METHODS.kiroMcpBeginSignIn]: (input) => kiroMcp.beginSignIn(input, currentSessionId),
+        [WS_METHODS.kiroMcpTakeAuthorizationUrl]: (input) =>
+          kiroMcp.takeAuthorizationUrl(input, currentSessionId),
+        [WS_METHODS.kiroMcpCancelSignIn]: (input) => kiroMcp.cancelSignIn(input, currentSessionId),
+        [WS_METHODS.kiroMemoryList]: (input) => kiroMemory.list(input),
+        [WS_METHODS.kiroMemoryGet]: (input) => kiroMemory.get(input),
+        [WS_METHODS.kiroMemoryCreate]: (input) => kiroMemory.create(input),
+        [WS_METHODS.kiroMemoryUpdate]: (input) => kiroMemory.update(input),
+        [WS_METHODS.kiroMemoryDelete]: (input) => kiroMemory.delete(input),
+        [WS_METHODS.kiroMemoryGetSyncStatus]: (input) => kiroMemory.getSyncStatus(input),
+        [WS_METHODS.kiroMemorySync]: (input) => kiroMemory.sync(input),
+        [WS_METHODS.kiroPowersList]: (input) => kiroPowers.list(input),
+        [WS_METHODS.kiroPowersInstall]: (input) => kiroPowers.install(input),
+        [WS_METHODS.kiroPowersRemove]: (input) => kiroPowers.remove(input),
         [WS_METHODS.serverListAcpRegistrySessions]: (input) =>
           Effect.annotateCurrentSpan({
             "provider.instance_id": input.instanceId,
@@ -2322,6 +2266,12 @@ export const layerWsRpc = (
                         }),
                     ),
                   );
+                  if (manager.logout === undefined) {
+                    return yield* new AcpRegistryOperationError({
+                      reason: "logout_failed",
+                      message: "The ACP agent does not advertise logout.",
+                    });
+                  }
                   yield* manager.logout(config.cwd);
                 }
                 yield* providerRegistry.refreshInstance(input.instanceId);
@@ -3439,6 +3389,9 @@ export const layer = Layer.unwrap(
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
               Layer.provide(AgentSessionScanner.layer),
               Layer.provide(AcpRegistrySessions.layer),
+              Layer.provide(KiroMemoryService.layer),
+              Layer.provide(KiroPowersService.layer),
+              Layer.provide(KiroMcpService.layer),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(Layer.succeed(NpmRelease.NpmRelease, npmRelease)),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),

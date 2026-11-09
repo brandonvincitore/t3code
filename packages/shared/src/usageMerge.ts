@@ -19,6 +19,8 @@ export interface ProviderTotals {
   readonly provider: UsageProviderKind;
   readonly costUsd: number;
   readonly totalTokens: number;
+  /** Provider-billed credits; not convertible to costUsd. */
+  readonly credits: number;
   readonly records: number;
   readonly sessions: number;
   readonly costShare: number;
@@ -31,6 +33,7 @@ export interface ModelTotals {
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly tokens: UsageTokenTotals;
+  readonly credits: number;
   readonly records: number;
   readonly unpricedRecords: number;
   readonly unpricedTokens: number;
@@ -347,7 +350,7 @@ export function mergeUsage(
 
   const providerAccumulator = new Map<
     UsageProviderKind,
-    { costUsd: number; totalTokens: number; records: number; sessions: number }
+    { costUsd: number; totalTokens: number; credits: number; records: number; sessions: number }
   >();
   const modelAccumulator = new Map<
     string,
@@ -356,6 +359,7 @@ export function mergeUsage(
       costUsd: number;
       totalTokens: number;
       tokens: UsageTokenTotals;
+      credits: number;
       records: number;
       unpricedRecords: number;
       unpricedTokens: number;
@@ -396,6 +400,7 @@ export function mergeUsage(
       const provider = providerAccumulator.get(providerKind) ?? {
         costUsd: 0,
         totalTokens: 0,
+        credits: 0,
         records: 0,
         sessions: 0,
       };
@@ -429,11 +434,13 @@ export function mergeUsage(
       const provider = providerAccumulator.get(bucket.provider) ?? {
         costUsd: 0,
         totalTokens: 0,
+        credits: 0,
         records: 0,
         sessions: 0,
       };
       provider.costUsd += bucket.costUsd;
       provider.totalTokens += tokens;
+      provider.credits += bucket.credits ?? 0;
       provider.records += bucket.records;
       providerAccumulator.set(bucket.provider, provider);
 
@@ -449,6 +456,7 @@ export function mergeUsage(
           outputTokens: 0,
           reasoningTokens: 0,
         },
+        credits: 0,
         records: 0,
         unpricedRecords: 0,
         unpricedTokens: 0,
@@ -462,6 +470,7 @@ export function mergeUsage(
         outputTokens: model.tokens.outputTokens + bucket.totals.outputTokens,
         reasoningTokens: model.tokens.reasoningTokens + bucket.totals.reasoningTokens,
       };
+      model.credits += bucket.credits ?? 0;
       model.records += bucket.records;
       model.unpricedRecords += bucket.unpricedRecords;
       if (bucket.records > 0) {
@@ -511,6 +520,7 @@ export function mergeUsage(
       provider,
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
+      credits: totals.credits,
       records: totals.records,
       sessions: totals.sessions,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
@@ -525,6 +535,7 @@ export function mergeUsage(
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
       tokens: totals.tokens,
+      credits: totals.credits,
       records: totals.records,
       unpricedRecords: totals.unpricedRecords,
       unpricedTokens: totals.unpricedTokens,

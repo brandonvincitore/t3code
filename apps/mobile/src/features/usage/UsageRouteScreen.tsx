@@ -18,12 +18,14 @@ import {
   enumerateDays,
   enumerateHourStarts,
   formatCount,
+  formatCredits,
   formatDayShort,
   formatHourShort,
   formatPercent,
   formatTokens,
   formatUsageContractMismatch,
   formatUsd,
+  isCreditsOnly,
   makeWindow,
   usageSourceMessages,
 } from "@t3tools/shared/usageFormat";
@@ -425,7 +427,11 @@ function ChartCard(props: {
     <UsageDailyChart days={props.days} daily={props.daily} metric={metric} height={height} />
   ) : (
     <View style={{ height }} className="items-center justify-center">
-      <Text className="text-base text-foreground-muted">No activity in this window.</Text>
+      <Text className="text-base text-foreground-muted">
+        {merged.providers.some((provider) => provider.provider === "kiro" && provider.records > 0)
+          ? "Kiro credits are shown in the totals. Token and dollar charts are unavailable."
+          : "No activity in this window."}
+      </Text>
     </View>
   );
 
@@ -550,9 +556,11 @@ function ProviderSection(props: {
                     : "text-lg tabular-nums text-foreground"
                 }
               >
-                {metric === "cost"
-                  ? formatUsd(provider.costUsd)
-                  : formatTokens(provider.totalTokens)}
+                {isCreditsOnly(provider)
+                  ? formatCredits(provider.credits)
+                  : metric === "cost"
+                    ? formatUsd(provider.costUsd)
+                    : formatTokens(provider.totalTokens)}
               </Text>
             </View>
             {props.compact ? null : (
@@ -565,9 +573,11 @@ function ProviderSection(props: {
               </View>
             )}
             <Text className="text-sm text-foreground-muted">
-              {metric === "cost"
-                ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
-                : `${formatPercent(share)} of tokens · ${formatUsd(provider.costUsd)}`}
+              {isCreditsOnly(provider)
+                ? "Billed in credits · no token data"
+                : metric === "cost"
+                  ? `${formatPercent(share)} of cost · ${formatTokens(provider.totalTokens)} tokens`
+                  : `${formatPercent(share)} of tokens · ${formatUsd(provider.costUsd)}`}
             </Text>
           </View>
         );
@@ -777,21 +787,25 @@ function ModelsSection(props: {
                 {model.model}
               </Text>
               <Text className="text-sm text-foreground-muted">
-                {metric === "tokens"
-                  ? `${formatPercent(model.tokenShare)} of tokens · ${
-                      isModelCostUnknown(model) ? "no known rates" : formatUsd(model.costUsd)
-                    }`
-                  : isModelCostUnknown(model)
-                    ? `no known rates · ${formatTokens(model.totalTokens)} tokens`
-                    : `${formatPercent(model.costShare)} of cost · ${formatTokens(model.totalTokens)} tokens`}
+                {isCreditsOnly(model)
+                  ? `Billed in ${formatCredits(model.credits)} · no token data`
+                  : metric === "tokens"
+                    ? `${formatPercent(model.tokenShare)} of tokens · ${
+                        isModelCostUnknown(model) ? "no known rates" : formatUsd(model.costUsd)
+                      }`
+                    : isModelCostUnknown(model)
+                      ? `no known rates · ${formatTokens(model.totalTokens)} tokens`
+                      : `${formatPercent(model.costShare)} of cost · ${formatTokens(model.totalTokens)} tokens`}
               </Text>
             </View>
             <Text className="text-base tabular-nums text-foreground">
-              {metric === "tokens"
-                ? formatTokens(model.totalTokens)
-                : isModelCostUnknown(model)
-                  ? "Unpriced"
-                  : formatUsd(model.costUsd)}
+              {isCreditsOnly(model)
+                ? formatCredits(model.credits)
+                : metric === "tokens"
+                  ? formatTokens(model.totalTokens)
+                  : isModelCostUnknown(model)
+                    ? "Unpriced"
+                    : formatUsd(model.costUsd)}
             </Text>
           </View>
         ))}

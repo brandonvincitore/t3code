@@ -1,4 +1,34 @@
 import {
+  KiroPowersInput,
+  KiroPowersInstallInput,
+  KiroPowersRemoveInput,
+  KiroPowersState,
+  KiroPowersError,
+} from "./kiroPowers.ts";
+import {
+  KiroMemoryCreateInput,
+  KiroMemoryCreateResult,
+  KiroMemoryDeleteResult,
+  KiroMemoryGetInput,
+  KiroMemoryGetResult,
+  KiroMemoryListInput,
+  KiroMemoryListResult,
+  KiroMemorySyncStatus,
+  KiroMemoryTarget,
+  KiroMemoryUpdateInput,
+  KiroMemoryUpdateResult,
+  KiroMemoryError,
+} from "./kiroMemory.ts";
+import {
+  KiroMcpStatusInput,
+  KiroMcpStatus,
+  KiroMcpBeginSignInInput,
+  KiroMcpBeginSignInResult,
+  KiroMcpAttemptInput,
+  KiroMcpAuthorizationResult,
+  KiroMcpError,
+} from "./kiroMcp.ts";
+import {
   OrchestrationV2SearchThreadError,
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -498,6 +528,20 @@ export const WS_METHODS = {
   deviceDetail: "device.detail",
   deviceAction: "device.action",
 
+  kiroMcpStatus: "kiro.mcp.status",
+  kiroMcpBeginSignIn: "kiro.mcp.beginSignIn",
+  kiroMcpTakeAuthorizationUrl: "kiro.mcp.takeAuthorizationUrl",
+  kiroMcpCancelSignIn: "kiro.mcp.cancelSignIn",
+  kiroMemoryList: "kiro.memory.list",
+  kiroMemoryGet: "kiro.memory.get",
+  kiroMemoryCreate: "kiro.memory.create",
+  kiroMemoryUpdate: "kiro.memory.update",
+  kiroMemoryDelete: "kiro.memory.delete",
+  kiroMemoryGetSyncStatus: "kiro.memory.getSyncStatus",
+  kiroMemorySync: "kiro.memory.sync",
+  kiroPowersList: "kiro.powers.list",
+  kiroPowersInstall: "kiro.powers.install",
+  kiroPowersRemove: "kiro.powers.remove",
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
   serverGetNpmRelease: "server.getNpmRelease",
@@ -871,6 +915,79 @@ const WsServerAcceptAcpRegistryUrlAuthRpc = Rpc.make(WS_METHODS.serverAcceptAcpR
   payload: AcpRegistryAcceptUrlAuthInput,
   success: AcpRegistryAcceptUrlAuthResult,
   error: EnvironmentAuthorizationError,
+});
+
+const WsKiroMcpStatusRpc = Rpc.make(WS_METHODS.kiroMcpStatus, {
+  payload: KiroMcpStatusInput,
+  success: KiroMcpStatus,
+  error: Schema.Union([KiroMcpError, EnvironmentAuthorizationError]),
+});
+const WsKiroMcpBeginSignInRpc = Rpc.make(WS_METHODS.kiroMcpBeginSignIn, {
+  payload: KiroMcpBeginSignInInput,
+  success: KiroMcpBeginSignInResult,
+  error: Schema.Union([KiroMcpError, EnvironmentAuthorizationError]),
+});
+const WsKiroMcpTakeAuthorizationUrlRpc = Rpc.make(WS_METHODS.kiroMcpTakeAuthorizationUrl, {
+  payload: KiroMcpAttemptInput,
+  success: KiroMcpAuthorizationResult,
+  error: Schema.Union([KiroMcpError, EnvironmentAuthorizationError]),
+});
+const WsKiroMcpCancelSignInRpc = Rpc.make(WS_METHODS.kiroMcpCancelSignIn, {
+  payload: KiroMcpAttemptInput,
+  success: Schema.Void,
+  error: Schema.Union([KiroMcpError, EnvironmentAuthorizationError]),
+});
+
+const WsKiroMemoryListRpc = Rpc.make(WS_METHODS.kiroMemoryList, {
+  payload: KiroMemoryListInput,
+  success: KiroMemoryListResult,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+const WsKiroMemoryGetRpc = Rpc.make(WS_METHODS.kiroMemoryGet, {
+  payload: KiroMemoryGetInput,
+  success: KiroMemoryGetResult,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+const WsKiroMemoryCreateRpc = Rpc.make(WS_METHODS.kiroMemoryCreate, {
+  payload: KiroMemoryCreateInput,
+  success: KiroMemoryCreateResult,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+const WsKiroMemoryUpdateRpc = Rpc.make(WS_METHODS.kiroMemoryUpdate, {
+  payload: KiroMemoryUpdateInput,
+  success: KiroMemoryUpdateResult,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+const WsKiroMemoryDeleteRpc = Rpc.make(WS_METHODS.kiroMemoryDelete, {
+  payload: KiroMemoryGetInput,
+  success: KiroMemoryDeleteResult,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+const WsKiroMemoryGetSyncStatusRpc = Rpc.make(WS_METHODS.kiroMemoryGetSyncStatus, {
+  payload: KiroMemoryTarget,
+  success: KiroMemorySyncStatus,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+const WsKiroMemorySyncRpc = Rpc.make(WS_METHODS.kiroMemorySync, {
+  payload: KiroMemoryTarget,
+  success: KiroMemorySyncStatus,
+  error: Schema.Union([KiroMemoryError, EnvironmentAuthorizationError]),
+});
+
+const WsKiroPowersListRpc = Rpc.make(WS_METHODS.kiroPowersList, {
+  payload: KiroPowersInput,
+  success: KiroPowersState,
+  error: Schema.Union([KiroPowersError, EnvironmentAuthorizationError]),
+});
+const WsKiroPowersInstallRpc = Rpc.make(WS_METHODS.kiroPowersInstall, {
+  payload: KiroPowersInstallInput,
+  success: Schema.Void,
+  error: Schema.Union([KiroPowersError, EnvironmentAuthorizationError]),
+});
+const WsKiroPowersRemoveRpc = Rpc.make(WS_METHODS.kiroPowersRemove, {
+  payload: KiroPowersRemoveInput,
+  success: Schema.Void,
+  error: Schema.Union([KiroPowersError, EnvironmentAuthorizationError]),
 });
 
 const WsServerListAcpRegistrySessionsRpc = Rpc.make(WS_METHODS.serverListAcpRegistrySessions, {
@@ -2047,6 +2164,20 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerPrepareAcpRegistryAgentRpc,
   WsServerUninstallAcpRegistryManagedBinaryRpc,
   WsServerAcceptAcpRegistryUrlAuthRpc,
+  WsKiroMcpStatusRpc,
+  WsKiroMcpBeginSignInRpc,
+  WsKiroMcpTakeAuthorizationUrlRpc,
+  WsKiroMcpCancelSignInRpc,
+  WsKiroMemoryListRpc,
+  WsKiroMemoryGetRpc,
+  WsKiroMemoryCreateRpc,
+  WsKiroMemoryUpdateRpc,
+  WsKiroMemoryDeleteRpc,
+  WsKiroMemoryGetSyncStatusRpc,
+  WsKiroMemorySyncRpc,
+  WsKiroPowersListRpc,
+  WsKiroPowersInstallRpc,
+  WsKiroPowersRemoveRpc,
   WsServerListAcpRegistrySessionsRpc,
   WsServerImportAcpRegistrySessionRpc,
   WsServerDeleteAcpRegistrySessionRpc,

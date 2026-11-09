@@ -33,6 +33,25 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
 describe("fallbackTextGenerationModelSelection", () => {
+  it("uses Kiro only for title fallback, including account-specific instances", () => {
+    const configured = ProviderInstanceId.make("kiro_work");
+    const providerInstances = {
+      [configured]: { driver: ProviderDriverKind.make("kiro"), enabled: true, config: {} },
+    };
+    const enabled = (instanceId: ProviderInstanceId) => instanceId === configured;
+    expect(
+      fallbackTextGenerationModelSelection(providerInstances, enabled, {
+        includeConfiguredInstances: true,
+      }),
+    ).toBeNull();
+    expect(
+      fallbackTextGenerationModelSelection(providerInstances, enabled, {
+        includeConfiguredInstances: true,
+        includeThreadTitleProviders: true,
+      }),
+    ).toEqual({ instanceId: configured, model: "default" });
+  });
+
   it("uses Big Pickle when only OpenCode is enabled", () => {
     expect(
       fallbackTextGenerationModelSelection({}, (instanceId) => instanceId === "opencode"),

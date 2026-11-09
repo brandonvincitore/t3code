@@ -19,6 +19,8 @@ export interface UsageRecord {
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
+  /** Provider-billed credits; these are not convertible to USD. */
+  readonly credits?: number;
   readonly speed: UsageSpeed;
   readonly unresolvedServiceTierTurnId?: string;
   readonly dedupeKey: string | null;
@@ -68,7 +70,7 @@ export interface TranscriptUsageFormat<State> {
    * file resumes with it. Absent means every line stands alone.
    */
   readonly state?: {
-    readonly initial: () => State;
+    readonly initial: (filePath: string) => State;
     readonly schema: Schema.Codec<State, unknown>;
   };
   /** Enable cross-file deduplication when session records can appear in multiple files. */

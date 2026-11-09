@@ -149,6 +149,7 @@ export function upsertProviderWorkspaceSnapshot(
 ): ServerProvider {
   const previousSnapshot = provider.workspaceSnapshots?.find((snapshot) => snapshot.cwd === cwd);
   const optionDescriptors = scopedSnapshot.optionDescriptors ?? previousSnapshot?.optionDescriptors;
+  const models = scopedSnapshot.workspaceModels ?? previousSnapshot?.models;
   const workspaceSnapshot = {
     cwd,
     checkedAt: scopedSnapshot.checkedAt,
@@ -158,6 +159,7 @@ export function upsertProviderWorkspaceSnapshot(
     ...(scopedSnapshot.slashCommandsPending ? { slashCommandsPending: true } : {}),
     skills: scopedSnapshot.skills,
     ...(optionDescriptors === undefined ? {} : { optionDescriptors }),
+    ...(models === undefined ? {} : { models }),
   } satisfies NonNullable<ServerProvider["workspaceSnapshots"]>[number];
   return {
     ...provider,
@@ -289,11 +291,13 @@ export const mergeProviderSnapshot = (
     ...(savedAccount?.status === "ready" ? nextWithoutMessage : nextProvider),
     ...savedAccount,
     models: mergeProviderModels(nextProvider, previousProvider.models, nextProvider.models),
-    ...(nextProvider.workspaceSnapshots !== undefined
-      ? { workspaceSnapshots: nextProvider.workspaceSnapshots }
-      : previousProvider.workspaceSnapshots !== undefined
-        ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
-        : {}),
+    ...(nextProvider.workspaceRevision !== previousProvider.workspaceRevision
+      ? { workspaceSnapshots: [] }
+      : nextProvider.workspaceSnapshots !== undefined
+        ? { workspaceSnapshots: nextProvider.workspaceSnapshots }
+        : previousProvider.workspaceSnapshots !== undefined
+          ? { workspaceSnapshots: previousProvider.workspaceSnapshots }
+          : {}),
     ...(shouldRetainMissingOpenCodeMetadata(nextProvider)
       ? {
           slashCommands:
@@ -988,6 +992,7 @@ export const layer = Layer.effect(
                 }
                 return currentProviders.map((candidate) =>
                   candidate.instanceId === input.instanceId &&
+                  candidate.workspaceRevision === provider.workspaceRevision &&
                   Equal.equals(workspaceSnapshotOf(candidate), scannedFrom)
                     ? upsertProviderWorkspaceSnapshot(candidate, input.cwd, {
                         ...scopedSnapshot,

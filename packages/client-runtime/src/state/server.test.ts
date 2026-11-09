@@ -1172,6 +1172,21 @@ describe("server state projection", () => {
       ).providers[0]?.workspaceSnapshots,
     ).toBeUndefined();
 
+    expect(
+      withFetchedWorkspaceSnapshots(
+        configWith(true, [{ ...provider(claude), workspaceRevision: 1 }]),
+        fetched,
+      ).providers[0]?.workspaceSnapshots,
+    ).toBeUndefined();
+    expect(
+      recordFetchedWorkspaceSnapshot(
+        fetched,
+        { instanceId: claude, cwd: "/a", fresh: false },
+        [{ ...provider(claude, [claudeA]), workspaceRevision: 0 }],
+        { ...provider(claude), workspaceRevision: 1 },
+      ).some((entry) => entry.instanceId === claude),
+    ).toBe(false);
+
     // Older servers send every snapshot and every drop; their config stands.
     const legacy = configWith(false, [provider(claude)]);
     expect(withFetchedWorkspaceSnapshots(legacy, fetched)).toBe(legacy);

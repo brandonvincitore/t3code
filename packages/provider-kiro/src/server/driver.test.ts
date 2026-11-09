@@ -2,7 +2,7 @@ import { assert, describe, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import { KiroSettings } from "../settings.ts";
-import { buildKiroAcpSpawnInput, kiroWorkflowSessionMeta } from "./acpSupport.ts";
+import { buildKiroAcpSpawnInput, kiroSessionMeta, kiroWorkflowSessionMeta } from "./acpSupport.ts";
 import { kiroAuthFromWhoami } from "./status.ts";
 
 const decodeSettings = Schema.decodeUnknownSync(KiroSettings);
@@ -27,6 +27,23 @@ describe("KiroDriver", () => {
         kiro: { extensionMethods: ["_kiro/workflow/new", "_kiro/workflow/cancel"] },
       }),
       { kiro: { settings: { workflows: { enabled: true } } } },
+    );
+    const workflowCapabilities = {
+      kiro: {
+        extensionMethods: ["_kiro/workflow/new", "_kiro/workflow/cancel", "_kiro/memory/list"],
+      },
+    };
+    for (const memoryMode of ["disabled", "read_only", "read_write"] as const) {
+      assert.deepEqual(kiroSessionMeta(workflowCapabilities, decodeSettings({ memoryMode })), {
+        kiro: { settings: { workflows: { enabled: true }, memory: { mode: memoryMode } } },
+      });
+      assert.isUndefined(kiroSessionMeta(undefined, decodeSettings({ memoryMode })));
+    }
+    assert.deepEqual(
+      kiroSessionMeta(workflowCapabilities, decodeSettings({ memoryMode: "default" })),
+      {
+        kiro: { settings: { workflows: { enabled: true } } },
+      },
     );
     assert.isUndefined(kiroWorkflowSessionMeta(undefined));
     assert.isUndefined(

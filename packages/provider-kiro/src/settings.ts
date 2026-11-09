@@ -24,9 +24,25 @@ export const KiroSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed([])),
       Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
     ),
+    memoryMode: Schema.Literals(["default", "disabled", "read_only", "read_write"]).pipe(
+      Schema.withDecodingDefault(Effect.succeed("default")),
+      Schema.annotateKey({
+        title: "Memory access",
+        description:
+          "Use Kiro's default, disable memory, allow recall only, or allow learning. Applies to new or reopened sessions.",
+        providerSettingsForm: {
+          options: [
+            { value: "default", label: "Kiro default" },
+            { value: "disabled", label: "Off" },
+            { value: "read_only", label: "Recall only" },
+            { value: "read_write", label: "Learn and recall" },
+          ],
+        },
+      }),
+    ),
   },
   {
-    order: ["binaryPath"],
+    order: ["binaryPath", "memoryMode"],
   },
 );
 export type KiroSettings = typeof KiroSettings.Type;

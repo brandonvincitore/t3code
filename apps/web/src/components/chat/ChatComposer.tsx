@@ -260,6 +260,7 @@ import {
 } from "@t3tools/client-runtime/state/composer-dispatch";
 import { deriveLatestContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
 import {
+  resolveProvidersForCwd,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
 } from "@t3tools/client-runtime/providerSkills";
@@ -893,7 +894,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     selectedModel,
     composerProviderState,
   } = useComposerProviderModel({
-    providerStatuses,
+    providerStatuses: resolveProvidersForCwd(providerStatuses, gitCwd),
     settings,
     activeProjectId,
     threadRef: composerDraftTarget,

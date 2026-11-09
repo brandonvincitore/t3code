@@ -5,6 +5,7 @@ import type { ModelSelection, ProviderInstanceId } from "@t3tools/contracts";
 import {
   isProviderAvailable,
   isProviderTextGenerationCapable,
+  isProviderThreadTitleGenerationCapable,
   resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
@@ -95,7 +96,13 @@ export const make = Effect.gen(function* () {
       selected?.enabled === true &&
       selected.status === "error" &&
       (!selected.installed || selected.auth.status === "unauthenticated");
-    if (unusable || exhaustedUsageWindow(selected, now, selection.model)) {
+    if (
+      (unusable ||
+        (operation === "generateThreadTitle" &&
+          (selected?.enabled !== true || !isProviderThreadTitleGenerationCapable(selected))) ||
+        exhaustedUsageWindow(selected, now, selection.model)) &&
+      !(operation === "generateThreadTitle" && selected?.driver === "kiro")
+    ) {
       const settings = yield* serverSettings.getSettings.pipe(
         Effect.mapError(
           (cause) =>
@@ -119,12 +126,17 @@ export const make = Effect.gen(function* () {
               provider.auth.status !== "unauthenticated" &&
               provider.status !== "error" &&
               isProviderAvailable(provider) &&
-              isProviderTextGenerationCapable(provider) &&
+              (operation === "generateThreadTitle"
+                ? isProviderThreadTitleGenerationCapable(provider)
+                : isProviderTextGenerationCapable(provider)) &&
               (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
               !exhaustedUsageWindow(provider, now, defaultTextGenerationModel(driver))
             );
           },
-          { includeConfiguredInstances: true },
+          {
+            includeConfiguredInstances: true,
+            includeThreadTitleProviders: operation === "generateThreadTitle",
+          },
         ) ?? selection;
     }
     return yield* resolveInstance(registry, operation, selection.instanceId).pipe(

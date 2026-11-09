@@ -53,6 +53,8 @@ import {
   makeKiroAcpRuntime,
 } from "./acpSupport.ts";
 import { makeKiroSecretStorage } from "./secretStorage.ts";
+import { makeKiroMcpSupport } from "./mcp.ts";
+import { type KiroConfigurations, recordKiroConfiguration } from "./configuration.ts";
 import {
   type KiroSkills,
   kiroSkillCommandText,
@@ -323,6 +325,8 @@ export interface KiroAdapterV2Options {
   readonly defaultModel?: Effect.Effect<string>;
   /** Where the adapter records the skills Kiro sessions advertise; the driver publishes them. */
   readonly skills?: KiroSkills;
+  readonly configurations?: KiroConfigurations;
+  readonly mcp?: Effect.Success<ReturnType<typeof makeKiroMcpSupport>>;
   /** Replaces the `kiro-cli` launch (replay tests). Kiro's session setup still applies. */
   readonly makeRuntime?: (
     input: AcpAdapterV2RuntimeInput,
@@ -670,7 +674,10 @@ function makeKiroAcpAdapterFlavor(
     });
   // Not `registerExtensions`: a replacement runtime (rollback, failed resume) wires that after `start()`.
   const makeRuntime = (input: AcpAdapterV2RuntimeInput) =>
-    makeNativeRuntime(input).pipe(Effect.tap(secretStorage.installHandlers));
+    makeNativeRuntime(input).pipe(
+      Effect.tap(secretStorage.installHandlers),
+      Effect.tap((runtime) => options.mcp?.installHandlers(runtime) ?? Effect.void),
+    );
   const stripSteeringNote = makeKiroSteeringNoteFilter();
   const workflows = makeKiroWorkflowSupport();
   return {
@@ -682,22 +689,33 @@ function makeKiroAcpAdapterFlavor(
     contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,
 
     supportsNativeWorkflows: true,
-    registerExtensions: workflows.registerExtensions,
+    registerExtensions: (context) =>
+      workflows
+        .registerExtensions(context)
+        .pipe(Effect.andThen(options.mcp?.registerExtensions(context) ?? Effect.void)),
     consumeSessionUpdate: workflows.consumeSessionUpdate,
     stopTask: workflows.stopTask,
     // Kiro V3 loads the user's hooks only when the client opts in. `v2` makes
     // Kiro run them itself; `enabled` alone hands them to the client as
     // `_kiro/hooks/*` requests, which T3 does not answer. Kiro keeps MCP OAuth
     // credentials only through `secretStorage` (see makeKiroSecretStorage).
-    clientCapabilitiesMeta: { kiro: { hooks: { enabled: true, v2: true }, secretStorage: true } },
+    clientCapabilitiesMeta: {
+      kiro: { hooks: { enabled: true, v2: true }, secretStorage: true, openExternalUrl: true },
+    },
     makeRuntime,
     promptFailure: kiroPromptFailure,
     ignoreSessionUpdate: makeKiroCloudConfigFilter(),
     normalizeSessionUpdate: (notification) =>
       stripSteeringNote(normalizeKiroSessionUpdate(notification)),
     extractSubagentUpdate: extractKiroSubagentUpdate,
-    onAvailableCommandsUpdate: (commands) => recordKiroSkills(skills, commands),
-    rewriteUserText: (text) => kiroSkillCommandText(skills, text),
+    onAvailableCommandsUpdate: (commands, context) =>
+      recordKiroSkills(skills, commands, context.cwd),
+    onSessionConfigurationUpdate: (configuration, mode, model, context) =>
+      options.configurations === undefined
+        ? Effect.void
+        : recordKiroConfiguration(options.configurations, context.cwd, configuration, mode, model),
+    rewriteUserText: (text, input) =>
+      kiroSkillCommandText(skills, text, input.runtimePolicy.cwd ?? process.cwd()),
     // See applyKiroModelSelection: `model` arrives after session/new.
     modelOptionArrivesLate: true,
     applyModelSelection: applyKiroModelSelection(
@@ -757,6 +775,8 @@ export type KiroAdapterV2DriverEnv =
 export const makeKiroAdapterV2Driver = (
   defaultModel: Effect.Effect<string>,
   skills: KiroSkills,
+  configurations?: KiroConfigurations,
+  mcp?: Effect.Success<ReturnType<typeof makeKiroMcpSupport>>,
 ): ProviderAdapterDriver<KiroSettings, KiroAdapterV2DriverEnv> => ({
   driverKind: KIRO_PROVIDER,
   configSchema: KiroSettings,
@@ -774,6 +794,8 @@ export const makeKiroAdapterV2Driver = (
         selfInvocation,
         defaultModel,
         skills,
+        ...(configurations === undefined ? {} : { configurations }),
+        ...(mcp === undefined ? {} : { mcp }),
         nativeLogging: (threadId) =>
           makeNativeLogger({
             nativeEventLogger: providerEventLoggers.native,

@@ -1,4 +1,4 @@
-import { formatPercent, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
+import { formatCredits, formatPercent, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
 import { isModelCostUnknown, type ModelTotals } from "@t3tools/shared/usageMerge";
 
 import { mergeAnsweredUsage, type EnvironmentUsageStatus } from "../../state/usage";
@@ -57,12 +57,15 @@ export function UsageModelDialog({
   const costUnknown = isModelCostUnknown(model);
   const hitRate = cacheHitRate(model);
   const perMillion = costPerMillionTokens(model);
-  const stats = [
-    { label: "Cost", value: costUnknown ? "Unpriced" : formatUsd(model.costUsd) },
-    { label: "Tokens", value: formatTokens(model.totalTokens) },
-    perMillion === null ? null : { label: "Per 1M tokens", value: formatUsd(perMillion) },
-    hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
-  ].filter((stat) => stat !== null);
+  const stats =
+    model.provider === "kiro"
+      ? [{ label: "Credits", value: formatCredits(model.credits) }]
+      : [
+          { label: "Cost", value: costUnknown ? "Unpriced" : formatUsd(model.costUsd) },
+          { label: "Tokens", value: formatTokens(model.totalTokens) },
+          perMillion === null ? null : { label: "Per 1M tokens", value: formatUsd(perMillion) },
+          hitRate === null ? null : { label: "Cache hit", value: formatPercent(hitRate) },
+        ].filter((stat) => stat !== null);
 
   return (
     <Dialog
@@ -83,7 +86,9 @@ export function UsageModelDialog({
           </div>
           <DialogDescription>
             {presentation.label}
-            {costUnknown ? "" : ` · ${formatPercent(model.costShare)} of cost`}
+            {model.provider === "kiro" || costUnknown
+              ? ""
+              : ` · ${formatPercent(model.costShare)} of cost`}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -98,41 +103,49 @@ export function UsageModelDialog({
             </div>
 
             {/* Unpriced cost is unknown, not zero, so its trend shows tokens. */}
-            <UsageProviderChart
-              providers={providers}
-              days={chartWindow.days}
-              daily={usage.daily}
-              hours={chartWindow.hours}
-              hourly={usage.hourly}
-              metric={costUnknown ? "tokens" : metric}
-              referenceTime={chartWindow.referenceTime}
-              resolution={chartWindow.resolution}
-              timeZone={chartWindow.timeZone}
-              hour12={chartWindow.hour12}
-            />
-
-            <div className="grid gap-x-10 gap-y-8 sm:grid-cols-2">
-              {costUnknown ? null : (
-                <UsageShareBar
-                  label="Cost by type"
-                  segments={costTypeSegments(usage.categoryCost)}
-                  format={formatUsd}
-                />
-              )}
-              <UsageShareBar
-                label="Tokens by type"
-                segments={tokenTypeSegments(model.tokens)}
-                format={formatTokens}
+            {model.provider === "kiro" ? (
+              <p className="text-sm text-muted-foreground">
+                Kiro reports credits. Token and dollar charts are unavailable.
+              </p>
+            ) : (
+              <UsageProviderChart
+                providers={providers}
+                days={chartWindow.days}
+                daily={usage.daily}
+                hours={chartWindow.hours}
+                hourly={usage.hourly}
+                metric={costUnknown ? "tokens" : metric}
+                referenceTime={chartWindow.referenceTime}
+                resolution={chartWindow.resolution}
+                timeZone={chartWindow.timeZone}
+                hour12={chartWindow.hour12}
               />
-              {usage.speedCost.fast + usage.speedCost.ultrafast > 0 ? (
+            )}
+
+            {model.provider === "kiro" ? null : (
+              <div className="grid gap-x-10 gap-y-8 sm:grid-cols-2">
+                {costUnknown ? null : (
+                  <UsageShareBar
+                    label="Cost by type"
+                    segments={costTypeSegments(usage.categoryCost)}
+                    format={formatUsd}
+                  />
+                )}
                 <UsageShareBar
-                  label="Cost by speed"
-                  segments={speedCostSegments(usage.speedCost)}
-                  format={formatUsd}
-                  aside={<SpeedPremium premiumUsd={usage.speedCost.premium} />}
+                  label="Tokens by type"
+                  segments={tokenTypeSegments(model.tokens)}
+                  format={formatTokens}
                 />
-              ) : null}
-            </div>
+                {usage.speedCost.fast + usage.speedCost.ultrafast > 0 ? (
+                  <UsageShareBar
+                    label="Cost by speed"
+                    segments={speedCostSegments(usage.speedCost)}
+                    format={formatUsd}
+                    aside={<SpeedPremium premiumUsd={usage.speedCost.premium} />}
+                  />
+                ) : null}
+              </div>
+            )}
           </div>
         </DialogPanel>
         {model.unpricedTokens > 0 ? (

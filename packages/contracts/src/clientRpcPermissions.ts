@@ -16,6 +16,20 @@ import { WS_METHODS } from "./rpc.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [WS_METHODS.kiroMemoryList]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMemoryGet]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMemoryCreate]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMemoryUpdate]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMemoryDelete]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMemoryGetSyncStatus]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMemorySync]: AuthProvidersManageScope,
+  [WS_METHODS.kiroPowersList]: AuthProvidersManageScope,
+  [WS_METHODS.kiroPowersInstall]: AuthProvidersManageScope,
+  [WS_METHODS.kiroPowersRemove]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMcpStatus]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMcpBeginSignIn]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMcpTakeAuthorizationUrl]: AuthProvidersManageScope,
+  [WS_METHODS.kiroMcpCancelSignIn]: AuthProvidersManageScope,
   [WS_METHODS.providerAuthRemoveMethod]: AuthProvidersManageScope,
   [WS_METHODS.previewClose]: AuthPreviewOperateScope,
   // Stopping a server signals its processes, as closing a terminal does.

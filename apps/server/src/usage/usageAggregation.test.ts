@@ -98,6 +98,42 @@ describe("UsageAggregator", () => {
     expect(result.buckets[0]?.totals.outputTokens).toBe(50);
   });
 
+  it("sums provider credits without treating them as tokens or dollars", () => {
+    const [bucket] = aggregate([
+      record({
+        provider: "kiro",
+        model: "claude-sonnet-4.5",
+        credits: 1.25,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+        },
+      }),
+      record({
+        provider: "kiro",
+        model: "claude-sonnet-4.5",
+        credits: 0.75,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+        },
+      }),
+    ]).buckets;
+
+    expect(bucket).toMatchObject({
+      credits: 2,
+      costUsd: 0,
+      costSource: "unpriced",
+      totals: { uncachedInputTokens: 0, outputTokens: 0 },
+    });
+  });
+
   it("buckets by the day in the requested time zone", () => {
     const utc = aggregate([record()], "UTC");
     const losAngeles = aggregate([record()], "America/Los_Angeles");

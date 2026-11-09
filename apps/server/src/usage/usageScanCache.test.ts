@@ -137,6 +137,28 @@ describe("scan cache round trip", () => {
       tailRecords: [pendingTail],
       position: position({ state }),
     });
+    original.set("/kiro/messages.jsonl", {
+      size: 20,
+      mtimeMs: 500,
+      provider: "kiro",
+      records: [
+        record({
+          provider: "kiro",
+          credits: 2.5,
+          dedupeKey: "kiro:execution-a",
+          totals: {
+            uncachedInputTokens: 0,
+            cachedInputTokens: 0,
+            cacheCreationTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: 0,
+          },
+        }),
+      ],
+      tailRecords: [],
+      malformedRecords: 0,
+      position: position(),
+    });
 
     original.set("/a.jsonl", {
       ...original.get("/a.jsonl")!,
@@ -157,11 +179,11 @@ describe("scan cache round trip", () => {
       TEST_FORMAT_MAP,
     );
 
-    expect(restored.size).toBe(4);
+    expect(restored.size).toBe(5);
     expect(restored).toEqual(original);
   });
 
-  it.each([5, 6, 7, 8, 10])(
+  it.each([5, 6, 7, 8, 10, 11])(
     "retains v%s history and compatible positions but invalidates obsolete state",
     (version) => {
       const original = cacheWith([["/gone.jsonl", 100, [record({ speed: "fast" })]]]);
@@ -229,13 +251,19 @@ describe("scan cache round trip", () => {
       );
       expect(restored.get("/gone-codex.jsonl")).toEqual({
         ...original.get("/gone-codex.jsonl"),
-        size: -1,
-        position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+        size: version >= 11 ? original.get("/gone-codex.jsonl")?.size : -1,
+        position:
+          version >= 11
+            ? original.get("/gone-codex.jsonl")?.position
+            : { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
       });
       expect(restored.get("/clean-codex.jsonl")).toEqual({
         ...cleanCodex,
         size: version >= 8 ? cleanCodex.size : -1,
-        position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+        position:
+          version >= 11
+            ? cleanCodex.position
+            : { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
       });
       expect(restored.get("/gone-pi.jsonl")).toEqual(
         version >= 6

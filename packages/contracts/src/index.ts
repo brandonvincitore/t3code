@@ -73,3 +73,7 @@ export * from "./secretRequest.ts";
 export * from "./secretReference.ts";
 export * from "./settingsSecretValue.ts";
 export * from "./clientRpcPermissions.ts";
+export * from "./kiroMcp.ts";
+
+export * from "./kiroMemory.ts";
+export * from "./kiroPowers.ts";

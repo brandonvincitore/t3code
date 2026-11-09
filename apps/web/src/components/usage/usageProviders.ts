@@ -47,6 +47,11 @@ export const PROVIDER_PRESENTATION = {
     color: "#0866ff",
     driverKind: ProviderDriverKind.make("muse"),
   },
+  kiro: {
+    label: "Kiro",
+    color: "#9046ff",
+    driverKind: ProviderDriverKind.make("kiro"),
+  },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;
 
 export const PROVIDER_ORDER = Object.keys(PROVIDER_PRESENTATION) as UsageProviderKind[];
@@ -56,11 +61,12 @@ export function providersWithUsage(
     readonly provider: UsageProviderKind;
     readonly costUsd: number;
     readonly totalTokens: number;
+    readonly credits?: number;
   }[],
 ): readonly UsageProviderKind[] {
   const active = new Set(
     totals
-      .filter((entry) => entry.totalTokens > 0 || entry.costUsd > 0)
+      .filter((entry) => entry.totalTokens > 0 || entry.costUsd > 0 || (entry.credits ?? 0) > 0)
       .map((entry) => entry.provider),
   );
   return PROVIDER_ORDER.filter((provider) => active.has(provider));

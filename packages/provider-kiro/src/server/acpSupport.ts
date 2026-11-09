@@ -74,7 +74,8 @@ export function kiroAutopilotValue(policy: {
     : "off";
 }
 
-type KiroAcpRuntimeSettings = Pick<KiroSettings, "binaryPath">;
+type KiroAcpRuntimeSettings = Pick<KiroSettings, "binaryPath"> &
+  Partial<Pick<KiroSettings, "memoryMode">>;
 
 const decodeWorkflowMethods = Schema.decodeUnknownOption(
   Schema.Struct({ kiro: Schema.Struct({ extensionMethods: Schema.Array(Schema.String) }) }),
@@ -85,6 +86,22 @@ export function kiroWorkflowSessionMeta(capabilities: unknown) {
   return methods?.includes("_kiro/workflow/new") && methods.includes("_kiro/workflow/cancel")
     ? { kiro: { settings: { workflows: { enabled: true } } } }
     : undefined;
+}
+
+export function kiroSessionMeta(
+  capabilities: unknown,
+  settings: KiroAcpRuntimeSettings | null | undefined,
+) {
+  const workflowSettings = kiroWorkflowSessionMeta(capabilities)?.kiro.settings;
+  const methods = Option.getOrUndefined(decodeWorkflowMethods(capabilities))?.kiro.extensionMethods;
+  const memoryMode = settings?.memoryMode;
+  const memory =
+    memoryMode !== undefined && memoryMode !== "default" && methods?.includes("_kiro/memory/list")
+      ? { mode: memoryMode }
+      : undefined;
+  return workflowSettings === undefined && memory === undefined
+    ? undefined
+    : { kiro: { settings: { ...workflowSettings, ...(memory === undefined ? {} : { memory }) } } };
 }
 
 export function buildKiroAcpSpawnInput(
@@ -158,7 +175,7 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
     AcpSessionRuntime.layer({
       ...runtimeOptions,
       // ACP sessions do not inherit the CLI's workflow feature setting.
-      sessionMeta: (initialized) => kiroWorkflowSessionMeta(initialized.agentCapabilities?._meta),
+      sessionMeta: (initialized) => kiroSessionMeta(initialized.agentCapabilities?._meta, settings),
       spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment),
     }),
   );

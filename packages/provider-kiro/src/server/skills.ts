@@ -11,15 +11,23 @@ const MAX_DESCRIPTION_LENGTH = 1_024;
 // Anchored and unambiguous (`\s*` then a literal `$`), so it scans the text once.
 const LEADING_MENTION = /^\s*\$(\S+)/;
 
-/**
- * Every global skill the instance's Kiro sessions have advertised since the
- * server started. Kiro reports them only as `available_commands_update` entries
- * with `_meta.kiro.type: "skill"`, and some updates carry none.
- */
-export type KiroSkills = SubscriptionRef.SubscriptionRef<ReadonlyArray<ServerProviderSkill>>;
+export type KiroSkills = SubscriptionRef.SubscriptionRef<
+  ReadonlyMap<string, ReadonlyArray<ServerProviderSkill>>
+>;
+
+const workspaceKey = (cwd: string | undefined) => (cwd === undefined ? "" : cwd);
 
 export const makeKiroSkills = (): Effect.Effect<KiroSkills> =>
-  SubscriptionRef.make<ReadonlyArray<ServerProviderSkill>>([]);
+  SubscriptionRef.make<ReadonlyMap<string, ReadonlyArray<ServerProviderSkill>>>(new Map());
+
+export const getKiroSkills = (
+  skills: KiroSkills,
+  cwd?: string,
+  fallback: ReadonlyArray<ServerProviderSkill> = [],
+) =>
+  SubscriptionRef.get(skills).pipe(
+    Effect.map((current) => current.get(workspaceKey(cwd)) ?? fallback),
+  );
 
 const decodeKiroSkillMeta = Schema.decodeUnknownOption(
   Schema.Struct({
@@ -51,12 +59,22 @@ const isKiroGlobalSkill = (meta: unknown) =>
 
 function kiroSkillsFromCommands(
   commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+  cwd?: string,
 ): ReadonlyArray<ServerProviderSkill> {
   const seen = new Set<string>();
   const skills: Array<ServerProviderSkill> = [];
   for (const command of commands) {
     if (skills.length === MAX_SKILLS) break;
-    if (!isKiroGlobalSkill(command._meta)) continue;
+    const meta = Option.getOrUndefined(decodeKiroSkillMeta(command._meta));
+    if (meta === undefined || (cwd === undefined && !isKiroGlobalSkill(command._meta))) continue;
+    const root = meta.kiro.resource?.source?.root;
+    if (
+      meta.kiro.resource?.source?.origin === "workspace" &&
+      typeof root === "string" &&
+      cwd !== undefined &&
+      workspaceKey(root) !== workspaceKey(cwd)
+    )
+      continue;
     const { name } = command;
     if (name.length === 0 || name.length > MAX_NAME_LENGTH || name !== name.trim()) continue;
     const key = name.toLowerCase();
@@ -67,50 +85,47 @@ function kiroSkillsFromCommands(
       name,
       ...(description ? { description } : {}),
       path: `acp://skill/${encodeURIComponent(name)}`,
-      scope: "agent",
+      scope: meta.kiro.resource?.source?.origin === "workspace" ? "project" : "agent",
       enabled: true,
     });
   }
   return skills;
 }
 
-function mergeKiroSkills(
-  current: ReadonlyArray<ServerProviderSkill>,
-  incoming: ReadonlyArray<ServerProviderSkill>,
-): Option.Option<ReadonlyArray<ServerProviderSkill>> {
-  let merged: Array<ServerProviderSkill> | undefined;
-  for (const skill of incoming) {
-    const list = merged ?? current;
-    const key = skill.name.toLowerCase();
-    const index = list.findIndex((existing) => existing.name.toLowerCase() === key);
-    const existing = list[index];
-    if (existing === undefined && list.length === MAX_SKILLS) continue;
-    if (existing?.name === skill.name && existing.description === skill.description) continue;
-    merged ??= [...current];
-    if (existing === undefined) merged.push(skill);
-    else merged[index] = skill;
-  }
-  return Option.fromUndefinedOr(merged);
-}
-
-/** Adds an update's skills, replacing same-named ones in place; publishes only on a change. */
+/** Each workspace advertisement replaces its prior list, including removals. */
 export const recordKiroSkills = (
   skills: KiroSkills,
   commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+  cwd?: string,
 ): Effect.Effect<void> =>
-  SubscriptionRef.updateSome(skills, (current) =>
-    mergeKiroSkills(current, kiroSkillsFromCommands(commands)),
-  );
+  SubscriptionRef.update(skills, (current) => {
+    const incoming = kiroSkillsFromCommands(commands, cwd);
+    const key = workspaceKey(cwd);
+    if (JSON.stringify(current.get(key)) === JSON.stringify(incoming)) return current;
+    const next = new Map(current);
+    next.delete(key);
+    next.set(key, incoming);
+    // Keep recent projects without retaining every workspace visited for the server's lifetime.
+    if (next.size > 64) {
+      const oldest = next.keys().next().value;
+      if (oldest !== undefined) next.delete(oldest);
+    }
+    return next;
+  });
 
 /**
  * Kiro runs a command only from a leading `/name`, while T3's `$` picker
  * inserts `$name`. Only advertised skills are rewritten, so `$25` stays text.
  */
-export const kiroSkillCommandText = (skills: KiroSkills, text: string): Effect.Effect<string> => {
+export const kiroSkillCommandText = (
+  skills: KiroSkills,
+  text: string,
+  cwd?: string,
+): Effect.Effect<string> => {
   const match = LEADING_MENTION.exec(text);
   const name = match?.[1];
   if (match === null || name === undefined) return Effect.succeed(text);
-  return SubscriptionRef.get(skills).pipe(
+  return getKiroSkills(skills, cwd).pipe(
     Effect.map((current) =>
       current.some((skill) => skill.name === name)
         ? `/${name}${text.slice(match[0].length)}`

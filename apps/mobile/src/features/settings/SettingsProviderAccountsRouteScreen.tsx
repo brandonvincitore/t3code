@@ -1,3 +1,4 @@
+import { KiroRefinementSection } from "./KiroRefinementSection";
 import * as Dialog from "../../components/ui/Dialog";
 import {
   isAtomCommandInterrupted,
@@ -109,6 +110,15 @@ function EnvironmentProviders({
       {claudeAccounts.map((provider) => (
         <ClaudeAccount key={provider.instanceId} environment={environment} provider={provider} />
       ))}
+      {providers
+        .filter((provider) => provider.driver === "kiro")
+        .map((provider) => (
+          <KiroRefinementSection
+            key={provider.instanceId}
+            environmentId={environment.environmentId}
+            instanceId={provider.instanceId}
+          />
+        ))}
       {canAddClaude ? <AddClaudeAccount environment={environment} /> : null}
     </>
   );

@@ -387,6 +387,10 @@
       "types": "./src/usageLimits.ts",
       "import": "./src/usageLimits.ts"
     },
+    "./kiroSpecs": {
+      "types": "./src/kiroSpecs.ts",
+      "import": "./src/kiroSpecs.ts"
+    },
     "./desktopAppControl": {
       "types": "./src/desktopAppControl.ts",
       "import": "./src/desktopAppControl.ts"

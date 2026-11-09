@@ -1,3 +1,4 @@
+import { KiroThreadMcp } from "./KiroThreadMcp";
 import type {
   EditorId,
   EnvironmentId,
@@ -239,7 +240,13 @@ export function ThreadDetailsPanel(props: ThreadDetailsPanelProps) {
               ) : null}
 
               {density === "full" && !props.draftId && visible.servers ? (
-                <ThreadServersPanel environmentId={props.environmentId} threadId={props.threadId} />
+                <>
+                  <ThreadServersPanel
+                    environmentId={props.environmentId}
+                    threadId={props.threadId}
+                  />
+                  <KiroThreadMcp environmentId={props.environmentId} threadId={props.threadId} />
+                </>
               ) : null}
 
               {density === "full" && !props.draftId && visible.automations ? (

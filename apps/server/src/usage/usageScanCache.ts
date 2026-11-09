@@ -9,7 +9,7 @@ import * as Schema from "effect/Schema";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-const USAGE_SCAN_CACHE_VERSION = 11 as const;
+const USAGE_SCAN_CACHE_VERSION = 12 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -17,8 +17,9 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * replace it, dropping saved usage for deleted transcripts. Separate files keep
  * both.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v11.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v12.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v11.json",
   "usage-scan-cache-v10.json",
   "usage-scan-cache-v9.json",
   "usage-scan-cache-v8.json",
@@ -57,7 +58,8 @@ type SerializedRecord = readonly [
   reportedCostUsd: number | null,
   speed: number,
   rateModelIndex?: number | null,
-  unresolvedServiceTierTurnId?: string,
+  unresolvedServiceTierTurnId?: string | null,
+  credits?: number,
 ];
 
 interface SerializedFile {
@@ -116,9 +118,10 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     record.rateModel === undefined
       ? null
       : intern(tables.models, tables.modelIndex, record.rateModel),
-    ...(record.unresolvedServiceTierTurnId === undefined
+    ...(record.unresolvedServiceTierTurnId === undefined && record.credits === undefined
       ? ([] as const)
-      : ([record.unresolvedServiceTierTurnId] as const)),
+      : ([record.unresolvedServiceTierTurnId ?? null] as const)),
+    ...(record.credits === undefined ? ([] as const) : ([record.credits] as const)),
   ];
   return {
     s: entry.size,
@@ -213,6 +216,7 @@ export function decodeScanCache(
         speedIndex,
         rateModelIndex,
         unresolvedServiceTierTurnId,
+        credits,
       ] = row as SerializedRecord;
       const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
@@ -222,14 +226,15 @@ export function decodeScanCache(
         typeof timestampMs !== "number" ||
         !Number.isFinite(timestampMs) ||
         model === undefined ||
-        (unresolvedServiceTierTurnId !== undefined &&
-          typeof unresolvedServiceTierTurnId !== "string") ||
+        (unresolvedServiceTierTurnId != null && typeof unresolvedServiceTierTurnId !== "string") ||
         (rateModelIndex != null && rateModel === undefined) ||
         !Number.isFinite(uncached) ||
         !Number.isFinite(cached) ||
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
         !Number.isFinite(reasoning) ||
+        (credits !== undefined &&
+          (typeof credits !== "number" || !Number.isFinite(credits) || credits < 0)) ||
         speed === undefined
       ) {
         return null;
@@ -254,7 +259,8 @@ export function decodeScanCache(
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         speed,
-        ...(version >= 7 && unresolvedServiceTierTurnId !== undefined
+        ...(version >= 12 && typeof credits === "number" ? { credits } : {}),
+        ...(version >= 7 && typeof unresolvedServiceTierTurnId === "string"
           ? { unresolvedServiceTierTurnId }
           : {}),
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,

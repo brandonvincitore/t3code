@@ -13981,6 +13981,16 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         commandId: command.commandId,
         threadId: commandThreadId(command),
         commandType: command.type,
+        ...(command.type === "thread.create" && command.importedNativeThread !== undefined
+          ? {
+              unlessNativeThreadOwned: {
+                driver: command.importedNativeThread.ref.driver,
+                providerInstanceId: command.modelSelection.instanceId,
+                appThreadId: command.threadId,
+                nativeThreadRef: command.importedNativeThread.ref,
+              },
+            }
+          : {}),
         acceptedAt,
         events: plan.events,
         effects: plan.effects,

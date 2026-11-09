@@ -668,6 +668,7 @@ type ServerProviderEntry = ServerConfig["providers"][number];
 const snapshotBasis = (provider: ServerProviderEntry | undefined) =>
   provider && {
     enabled: provider.enabled,
+    workspaceRevision: provider.workspaceRevision,
     slashCommands: provider.slashCommands,
     skills: provider.skills,
   };
@@ -718,9 +719,18 @@ export function recordFetchedWorkspaceSnapshot(
   configProvider: ServerProviderEntry | undefined,
 ): ReadonlyArray<FetchedWorkspaceSnapshot> {
   const basis = snapshotBasis(configProvider);
-  const snapshot = providers
-    .find((provider) => provider.instanceId === input.instanceId)
-    ?.workspaceSnapshots?.find((candidate) => candidate.cwd === input.cwd);
+  const responseProvider = providers.find((provider) => provider.instanceId === input.instanceId);
+  if (
+    responseProvider &&
+    responseProvider.workspaceRevision !== configProvider?.workspaceRevision
+  ) {
+    return current.filter(
+      (entry) => entry.instanceId !== input.instanceId || entry.snapshot.cwd !== input.cwd,
+    );
+  }
+  const snapshot = responseProvider?.workspaceSnapshots?.find(
+    (candidate) => candidate.cwd === input.cwd,
+  );
   const stored = current.find(
     (entry) => entry.instanceId === input.instanceId && entry.snapshot.cwd === input.cwd,
   );
@@ -1483,6 +1493,128 @@ export function createServerEnvironmentAtoms<R, E>(
         mode: "singleFlight",
         key: ({ environmentId, input }) =>
           `${environmentId}:${input.instanceId}:${input.elicitationId}`,
+      },
+    }),
+    kiroMcpStatus: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.mcp.status",
+      tag: WS_METHODS.kiroMcpStatus,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.threadId}`,
+      },
+    }),
+    kiroMcpBeginSignIn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.mcp.beginSignIn",
+      tag: WS_METHODS.kiroMcpBeginSignIn,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.threadId}`,
+      },
+    }),
+    kiroMcpTakeAuthorizationUrl: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.mcp.takeAuthorizationUrl",
+      tag: WS_METHODS.kiroMcpTakeAuthorizationUrl,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.threadId}`,
+      },
+    }),
+    kiroMcpCancelSignIn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.mcp.cancelSignIn",
+      tag: WS_METHODS.kiroMcpCancelSignIn,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) => `${environmentId}:${input.threadId}`,
+      },
+    }),
+    kiroMemoryList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.list",
+      tag: WS_METHODS.kiroMemoryList,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroMemoryGet: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.get",
+      tag: WS_METHODS.kiroMemoryGet,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroMemoryCreate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.create",
+      tag: WS_METHODS.kiroMemoryCreate,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroMemoryUpdate: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.update",
+      tag: WS_METHODS.kiroMemoryUpdate,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroMemoryDelete: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.delete",
+      tag: WS_METHODS.kiroMemoryDelete,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroMemoryGetSyncStatus: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.getSyncStatus",
+      tag: WS_METHODS.kiroMemoryGetSyncStatus,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroMemorySync: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.memory.sync",
+      tag: WS_METHODS.kiroMemorySync,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroPowersList: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.powers.list",
+      tag: WS_METHODS.kiroPowersList,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroPowersInstall: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.powers.install",
+      tag: WS_METHODS.kiroPowersInstall,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
+      },
+    }),
+    kiroPowersRemove: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:kiro.powers.remove",
+      tag: WS_METHODS.kiroPowersRemove,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.instanceId}:${input.projectId}`,
       },
     }),
     listAcpRegistrySessions: createEnvironmentRpcCommand(runtime, {

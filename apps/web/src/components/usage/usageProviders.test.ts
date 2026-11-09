@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { rankProvidersByMetric } from "./usageProviders";
+import { providersWithUsage, rankProvidersByMetric } from "./usageProviders";
 
 describe("rankProvidersByMetric", () => {
   it("ranks by the selected metric, highest first", () => {
@@ -25,4 +25,10 @@ describe("rankProvidersByMetric", () => {
     expect(rankProvidersByMetric(providers, totals, "tokens")).toEqual(["grok", "claude", "codex"]);
     expect(providers).toEqual(["claude", "codex", "grok"]);
   });
+});
+
+it("includes providers whose usage is recorded only in credits", () => {
+  expect(
+    providersWithUsage([{ provider: "kiro", costUsd: 0, totalTokens: 0, credits: 2.5 }]),
+  ).toContain("kiro");
 });

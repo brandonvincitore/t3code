@@ -380,11 +380,13 @@ export interface AcpAdapterV2Flavor {
   readonly ignoreSessionUpdate?: (notification: EffectAcpSchema.SessionNotification) => boolean;
   readonly onAvailableCommandsUpdate?: (
     commands: ReadonlyArray<EffectAcpSchema.AvailableCommand>,
+    context: { readonly cwd: string; readonly sessionId: string },
   ) => Effect.Effect<void>;
   readonly onSessionConfigurationUpdate?: (
     configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
     modeState: AcpSessionModeState | undefined,
     modelState: EffectAcpSchema.SessionModelState | null | undefined,
+    context: { readonly cwd: string; readonly sessionId: string },
   ) => Effect.Effect<void>;
   readonly onUrlElicitation?: (input: {
     readonly elicitationId: string;
@@ -7048,8 +7050,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     );
               if (notification.update.sessionUpdate === "available_commands_update") {
                 yield* (
-                  flavor.onAvailableCommandsUpdate?.(notification.update.availableCommands) ??
-                    Effect.void
+                  flavor.onAvailableCommandsUpdate?.(notification.update.availableCommands, {
+                    cwd: latestRuntimePolicy.cwd ?? process.cwd(),
+                    sessionId: notification.sessionId,
+                  }) ?? Effect.void
                 );
               }
               if (
@@ -7061,6 +7065,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     yield* runtime.getConfigOptions,
                     yield* runtime.getModeState,
                     (yield* Ref.get(activeSessionSetup))?.sessionSetupResult.models,
+                    {
+                      cwd: latestRuntimePolicy.cwd ?? process.cwd(),
+                      sessionId: notification.sessionId,
+                    },
                   ) ?? Effect.void
                 );
               }
@@ -8325,6 +8333,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               yield* runtime.getConfigOptions,
               yield* runtime.getModeState,
               (yield* Ref.get(activeSessionSetup))?.sessionSetupResult.models,
+              { cwd: runtimePolicy.cwd ?? process.cwd(), sessionId: startResult.sessionId },
             ) ?? Effect.void
           );
         });

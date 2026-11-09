@@ -1,8 +1,7 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as SubscriptionRef from "effect/SubscriptionRef";
 
-import { kiroSkillCommandText, makeKiroSkills, recordKiroSkills } from "./skills.ts";
+import { getKiroSkills, kiroSkillCommandText, makeKiroSkills, recordKiroSkills } from "./skills.ts";
 
 const skill = (name: string, source?: { readonly origin: string; readonly root?: string }) => ({
   name,
@@ -31,41 +30,38 @@ describe("recordKiroSkills", () => {
         { name: "compact", description: "Compact the conversation" },
       ]);
       assert.deepEqual(
-        (yield* SubscriptionRef.get(skills)).map(({ name, path }) => ({ name, path })),
+        (yield* getKiroSkills(skills)).map(({ name, path }) => ({ name, path })),
         [{ name: "deploy", path: "acp://skill/deploy" }],
       );
     }),
   );
 
-  // Shaped like kiro-cli 3.0.0, which lists `<cwd>/.kiro/skills` beside `~/.kiro/skills`.
-  it.effect("leaves out skills Kiro scopes to a workspace", () =>
+  it.effect("isolates workspaces and replaces removed skill advertisements", () =>
     Effect.gen(function* () {
       const skills = yield* makeKiroSkills();
-      yield* recordKiroSkills(skills, [
-        skill("project-skill", { origin: "workspace", root: "/abs/project/path" }),
-        skill("user-skill", { origin: "user" }),
-      ]);
-      assert.deepEqual(
-        (yield* SubscriptionRef.get(skills)).map(({ name }) => name),
-        ["user-skill"],
+      yield* recordKiroSkills(
+        skills,
+        [
+          skill("project-skill", { origin: "workspace", root: "/work/a" }),
+          skill("user-skill", { origin: "user" }),
+        ],
+        "/work/a",
       );
-      assert.equal(yield* kiroSkillCommandText(skills, "$project-skill x"), "$project-skill x");
-      assert.equal(yield* kiroSkillCommandText(skills, "$user-skill x"), "/user-skill x");
-    }),
-  );
-
-  it.effect("keeps skills from earlier sessions and updates without skills", () =>
-    Effect.gen(function* () {
-      const skills = yield* makeKiroSkills();
-      yield* recordKiroSkills(skills, [skill("deploy-a")]);
-      yield* recordKiroSkills(skills, [skill("deploy-b")]);
-      const merged = yield* SubscriptionRef.get(skills);
-      yield* recordKiroSkills(skills, [agent("reviewer")]);
-      assert.strictEqual(yield* SubscriptionRef.get(skills), merged);
-      assert.deepEqual(
-        merged.map(({ name }) => name),
-        ["deploy-a", "deploy-b"],
+      yield* recordKiroSkills(skills, [skill("other")], "/work/b");
+      assert.equal(
+        yield* kiroSkillCommandText(skills, "$project-skill x", "/work/a"),
+        "/project-skill x",
       );
+      assert.equal(
+        yield* kiroSkillCommandText(skills, "$project-skill x", "/work/b"),
+        "$project-skill x",
+      );
+      yield* recordKiroSkills(skills, [agent("reviewer")], "/work/a");
+      assert.equal(
+        yield* kiroSkillCommandText(skills, "$project-skill x", "/work/a"),
+        "$project-skill x",
+      );
+      assert.equal(yield* kiroSkillCommandText(skills, "$other x", "/work/b"), "/other x");
     }),
   );
 });

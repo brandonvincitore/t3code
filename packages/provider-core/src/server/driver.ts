@@ -1,5 +1,8 @@
 // Context tags are runtime singletons; drivers need multiple instances.
 import type {
+  KiroMcpController,
+  KiroMemoryController,
+  KiroPowersController,
   ProviderConsumeResetCreditOutcome,
   AcpRegistryListSessionsResult,
   AcpRegistryListProvidersResult,
@@ -30,7 +33,9 @@ export interface ProviderDriverMetadata {
 }
 
 export type ProviderWorkspaceSnapshot = ServerProvider &
-  Pick<ServerProviderWorkspaceSnapshot, "slashCommandsPending" | "optionDescriptors">;
+  Pick<ServerProviderWorkspaceSnapshot, "slashCommandsPending" | "optionDescriptors"> & {
+    readonly workspaceModels?: ServerProvider["models"];
+  };
 
 export interface ProviderInstance {
   readonly instanceId: ProviderInstanceId;
@@ -52,25 +57,28 @@ export interface ProviderInstance {
   readonly orchestrationAdapter: ProviderAdapter.ProviderAdapterV2["Service"];
   readonly textGeneration: ProviderTextGeneration;
   readonly auth?: ProviderAuthController;
+  readonly kiroMcp?: KiroMcpController;
+  readonly kiroMemory?: KiroMemoryController;
+  readonly kiroPowers?: KiroPowersController;
   readonly acpSessionManagement?: {
     readonly listSessions: (input: {
       readonly cwd: string;
       readonly cursor?: string;
     }) => Effect.Effect<AcpRegistryListSessionsResult, AcpRegistryOperationError>;
-    readonly logout: (cwd: string) => Effect.Effect<void, AcpRegistryOperationError>;
+    readonly logout?: (cwd: string) => Effect.Effect<void, AcpRegistryOperationError>;
     readonly deleteSession: (input: {
       readonly cwd: string;
       readonly sessionId: string;
     }) => Effect.Effect<void, AcpRegistryOperationError>;
-    readonly listProviders: (
+    readonly listProviders?: (
       cwd: string,
     ) => Effect.Effect<AcpRegistryListProvidersResult, AcpRegistryOperationError>;
-    readonly setProvider: (
+    readonly setProvider?: (
       input: Omit<AcpRegistrySetProviderInput, "instanceId" | "projectId"> & {
         readonly cwd: string;
       },
     ) => Effect.Effect<void, AcpRegistryOperationError>;
-    readonly disableProvider: (input: {
+    readonly disableProvider?: (input: {
       readonly cwd: string;
       readonly providerId: string;
     }) => Effect.Effect<void, AcpRegistryOperationError>;
