@@ -1,4 +1,4 @@
-import type { OrchestrationV2UserInputQuestion } from "@t3tools/contracts";
+import { OrchestrationV2UserInputQuestion } from "@t3tools/contracts";
 import type { AcpAdapterV2ExtensionContext } from "@t3tools/provider-acp/server/adapter";
 import { parseElicitationForm } from "@t3tools/provider-acp/server/elicitationForm";
 import * as Effect from "effect/Effect";
@@ -44,6 +44,7 @@ const decodeForm = Schema.decodeUnknownOption(
     requestedSchema: AcpSchema.ElicitationSchema,
   }),
 );
+const isUserInputQuestion = Schema.is(OrchestrationV2UserInputQuestion);
 
 function questionOptions(
   params: typeof KiroQuestion.Type,
@@ -111,7 +112,12 @@ export const registerKiroQuestionExtensions = Effect.fn("KiroQuestions.registerE
           const decoded = decodeForm(params.elicitation);
           if (Option.isNone(decoded)) return { action: "cancel" };
           const form = parseElicitationForm(decoded.value.requestedSchema, decoded.value.message);
-          if (form === undefined || form.questions.length === 0) return { action: "cancel" };
+          if (
+            form === undefined ||
+            form.questions.length === 0 ||
+            !form.questions.every(isUserInputQuestion)
+          )
+            return { action: "cancel" };
           const identity = `${params.sessionId}:kiro-elicitation:${params.toolCallId}:${requestContext.requestId}`;
           const input = yield* requestUserInput(
             {

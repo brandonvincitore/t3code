@@ -890,9 +890,9 @@ describe("Kiro native question callbacks", () => {
       }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.live(
-    "dismisses unknown sessions, idle questions and URL elicitations without opening a card",
-    () => {
+  it.live.each(["", " \t\n "] as const)(
+    "dismisses unknown sessions, idle questions, URL and blank elicitations before a described form (message=%j)",
+    (message) => {
       const replayGate = makeProviderReplayGate(["idle-handled"]);
       return runKiroScript({
         replayGate,
@@ -927,22 +927,71 @@ describe("Kiro native question callbacks", () => {
             },
           }),
           kiroSecretResponse(mcp, { action: "cancel" }),
+          kiroSecretRequest(mcp, {
+            sessionId: SESSION_ID,
+            toolCallId: "blank-form",
+            elicitation: {
+              mode: "form",
+              message,
+              requestedSchema: {
+                type: "object",
+                properties: { answer: { type: "string" } },
+                required: ["answer"],
+              },
+            },
+          }),
+          kiroSecretResponse(mcp, { action: "cancel" }),
+          kiroSecretRequest(mcp, {
+            sessionId: SESSION_ID,
+            toolCallId: "described-form",
+            elicitation: {
+              mode: "form",
+              message,
+              requestedSchema: {
+                type: "object",
+                properties: { answer: { type: "string", description: "Which project?" } },
+                required: ["answer"],
+              },
+            },
+          }),
+          kiroSecretResponse(mcp, {
+            action: "accept",
+            content: { answer: "the sample workspace" },
+          }),
           answer("session/prompt", { stopReason: "end_turn" }),
           ...closeSession,
         ],
-        drive: ({ events, startTurn }) =>
+        drive: ({ events, startTurn, answerQuestion }) =>
           Effect.gen(function* () {
             yield* Effect.promise(() => replayGate.waitForReached("idle-handled"));
             replayGate.release("idle-handled");
             yield* startTurn;
-            const turn = yield* collectTurn(events);
+            const turn = yield* collectTurn(
+              events.pipe(
+                Stream.tap((event) => {
+                  if (
+                    event.type !== "turn_item.updated" ||
+                    event.turnItem.type !== "user_input_request"
+                  )
+                    return Effect.void;
+                  assert.deepEqual(event.turnItem.questions, [
+                    { id: "answer", header: "Question 1", question: "Which project?", options: [] },
+                  ]);
+                  assert.include(event.turnItem.nativeItemRef?.nativeId, "described-form");
+                  return answerQuestion(event.turnItem.requestId, {
+                    answer: "the sample workspace",
+                  });
+                }),
+              ),
+            );
             assert.equal(terminalStatus(turn), "completed");
-            assert.isFalse(
-              turn.some(
+            assert.lengthOf(
+              turn.filter(
                 (event) =>
                   event.type === "turn_item.updated" &&
                   event.turnItem.type === "user_input_request",
               ),
+              1,
             );
           }),
       }).pipe(Effect.provide(testLayer), Effect.scoped);
