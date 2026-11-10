@@ -44,6 +44,7 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
     (option) => option.id === KIRO_MODEL_CONFIG_ID || option.category === "model",
   );
   const currentModel = model?.type === "select" ? model.currentValue : modelState?.currentModelId;
+  const hasModelCatalog = model?.type === "select" || modelState != null;
   const models = kiroConfigModels(
     model?.type === "select"
       ? configOptions
@@ -57,6 +58,7 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
           },
         ],
   );
+  const withdrewModels = hasModelCatalog && models.length === 0;
   const agentOption = configOptions.find((option) => option.id === KIRO_AGENT_CONFIG_ID);
   const agent =
     agentOption?.type === "select" ? agentOption.currentValue : modeState?.currentModeId;
@@ -66,10 +68,15 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
     const previous = current.get(key);
     const sameAgent =
       agent === undefined || previous?.agent === undefined || agent === previous.agent;
-    const effortByModel = new Map(sameAgent ? previous?.effortByModel : undefined);
-    if (currentModel !== undefined) {
+    const effortByModel = new Map(
+      sameAgent && !withdrewModels ? previous?.effortByModel : undefined,
+    );
+    for (const model of models) {
+      if (model.effort !== undefined) effortByModel.set(model.value, model.effort);
+    }
+    if (currentModel !== undefined && !withdrewModels) {
       const advertised = models.find((model) => model.value === currentModel)?.effort;
-      if (effort !== undefined) {
+      if (effort !== undefined && advertised !== null) {
         const choices =
           effort.type === "select"
             ? effort.options.filter((choice) => choice.id !== "default")
@@ -91,11 +98,11 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
               }
             : null,
         );
-      } else if (advertised === null) effortByModel.delete(currentModel);
+      }
       // Kiro can advertise the model before its effort; absence is not a capability denial.
     }
     const incoming = {
-      models: models.length === 0 && sameAgent ? (previous?.models ?? models) : models,
+      models: !hasModelCatalog && sameAgent ? (previous?.models ?? models) : models,
       agent: agent ?? previous?.agent,
       options: descriptors.filter((option) => option.id !== KIRO_EFFORT_CONFIG_ID),
       effortByModel,

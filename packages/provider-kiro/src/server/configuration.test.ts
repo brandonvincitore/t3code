@@ -50,7 +50,7 @@ const effort = {
 };
 
 describe("Kiro workspace configuration", () => {
-  it.effect("uses live model choices and effort only in their workspace and model", () =>
+  it.effect.each(["denial", "withdrawal"])("scopes %s by workspace and model", (change) =>
     Effect.gen(function* () {
       const configurations = yield* makeKiroConfigurations();
       const draft = yield* buildInitialKiroProviderSnapshot(
@@ -142,11 +142,91 @@ describe("Kiro workspace configuration", () => {
           ?.optionDescriptors?.[0]?.currentValue,
         "high",
       );
+      const reasoningFor = (snapshot: ServerProvider, slug: string) =>
+        snapshot.models
+          .find((entry) => entry.slug === slug)
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort");
+      if (change === "denial") {
+        const denied = {
+          ...model("other-model"),
+          options: model("other-model").options.map((choice) =>
+            choice.value === "future-model"
+              ? { ...choice, _meta: { kiro: { hasEffort: false } } }
+              : choice,
+          ),
+        };
+        yield* recordKiroConfiguration(configurations, "/work/a", [denied, effort]);
+        const deniedOther = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.isUndefined(reasoningFor(deniedOther, "future-model"));
+        assert.equal(reasoningFor(deniedOther, "other-model")?.currentValue, "medium");
+        yield* recordKiroConfiguration(configurations, "/work/a", [model("other-model")]);
+        const omitted = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.isUndefined(reasoningFor(omitted, "future-model"));
+        assert.equal(reasoningFor(omitted, "other-model")?.currentValue, "medium");
+        yield* recordKiroConfiguration(configurations, "/work/a", []);
+        const missing = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.isUndefined(reasoningFor(missing, "future-model"));
+        yield* recordKiroConfiguration(configurations, "/work/a", [
+          { ...denied, currentValue: "future-model" },
+          effort,
+        ]);
+        const stale = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.isUndefined(reasoningFor(stale, "future-model"));
+        const restored = {
+          ...model("other-model"),
+          options: model("other-model").options.map((choice) =>
+            choice.value === "future-model"
+              ? {
+                  ...choice,
+                  _meta: {
+                    kiro: {
+                      hasEffort: true,
+                      effortLevels: ["medium", "extreme"],
+                      defaultEffortLevel: "medium",
+                    },
+                  },
+                }
+              : choice,
+          ),
+        };
+        yield* recordKiroConfiguration(configurations, "/work/a", [restored, effort]);
+        const restoredOther = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.equal(reasoningFor(restoredOther, "future-model")?.currentValue, "medium");
+        assert.equal(reasoningFor(restoredOther, "other-model")?.currentValue, "medium");
+        yield* recordKiroConfiguration(configurations, "/work/a", [
+          { ...restored, currentValue: "future-model" },
+          { ...effort, currentValue: "extreme" },
+        ]);
+        const actual = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.equal(reasoningFor(actual, "future-model")?.currentValue, "extreme");
+      } else {
+        yield* recordKiroConfiguration(configurations, "/work/a", [
+          { ...model("future-model"), options: [] },
+          effort,
+        ]);
+        const withdrawn = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.isUndefined(withdrawn.models.find((entry) => entry.slug === "gpt-6.1-luna"));
+        assert.equal(reasoningFor(withdrawn, "future-model")?.currentValue, "low");
+        assert.equal(withdrawn.models[0]?.slug, "default");
+        yield* recordKiroConfiguration(configurations, "/work/a", []);
+        const stillWithdrawn = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.isUndefined(stillWithdrawn.models.find((entry) => entry.slug === "gpt-6.1-luna"));
+        assert.equal(reasoningFor(stillWithdrawn, "future-model")?.currentValue, "low");
+        yield* recordKiroConfiguration(configurations, "/work/a", [model("future-model"), effort]);
+        const restored = yield* applyKiroConfiguration(configurations, "/work/a", base);
+        assert.equal(reasoningFor(restored, "gpt-6.1-luna")?.currentValue, "high");
+        assert.equal(reasoningFor(restored, "future-model")?.currentValue, "medium");
+      }
+      assert.strictEqual(yield* applyKiroConfiguration(configurations, "/work/b", base), base);
       yield* recordKiroConfiguration(configurations, "/work/a", [
         {
           ...model("future-model"),
           options: [
-            { value: "future-model", name: "Future model", _meta: { kiro: { hasEffort: false } } },
+            {
+              value: "future-model",
+              name: "Future model",
+              _meta: { kiro: { hasEffort: false } },
+            },
           ],
         },
       ]);
