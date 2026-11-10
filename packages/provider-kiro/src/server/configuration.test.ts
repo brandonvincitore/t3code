@@ -22,6 +22,19 @@ const model = (value: string) => ({
   options: [
     { value: "future-model", name: "Future model" },
     { value: "other-model", name: "Other model" },
+    { value: "claude-sonnet-5.5", name: "claude-sonnet-5.5" },
+    {
+      value: "gpt-6.1-luna",
+      name: "gpt-6.1-luna",
+      _meta: {
+        kiro: {
+          hasEffort: true,
+          effortLevels: ["low", "high"],
+          defaultEffortLevel: "high",
+        },
+      },
+    },
+    { value: "default", name: "Internal default" },
   ],
 });
 const effort = {
@@ -68,6 +81,21 @@ describe("Kiro workspace configuration", () => {
         continuation: { groupKey: "kiro:instance:kiro-test" },
         instanceId: ProviderInstanceId.make("kiro-test"),
       });
+      assert.strictEqual(yield* applyKiroConfiguration(configurations, "/work/a", base), base);
+      yield* recordKiroConfiguration(configurations, "/work/a", [], undefined, {
+        currentModelId: "claude-sonnet-5.5",
+        availableModels: [{ modelId: "claude-sonnet-5.5", name: "claude-sonnet-5.5" }],
+      });
+      const late = yield* applyKiroConfiguration(configurations, "/work/a", base);
+      assert.equal(
+        late.models.find((entry) => entry.slug === "claude-sonnet-5.5")?.name,
+        "Claude Sonnet 5.5",
+      );
+      assert.equal(
+        late.models.find((entry) => entry.slug === "claude-sonnet-5.5")?.capabilities
+          ?.optionDescriptors?.[0]?.currentValue,
+        "high",
+      );
       yield* recordKiroConfiguration(configurations, "/work/a", [model("future-model"), effort]);
       const a = yield* applyKiroConfiguration(configurations, "/work/a", base);
       const future = a.models.find((entry) => entry.slug === "future-model");
@@ -86,11 +114,84 @@ describe("Kiro workspace configuration", () => {
       );
       assert.strictEqual(yield* applyKiroConfiguration(configurations, "/work/b", base), base);
       yield* recordKiroConfiguration(configurations, "/work/a", [model("future-model")]);
+      const pending = yield* applyKiroConfiguration(configurations, "/work/a", base);
+      assert.equal(
+        pending.models.find((entry) => entry.slug === "future-model")?.capabilities
+          ?.optionDescriptors?.[0]?.currentValue,
+        "medium",
+      );
+      assert.equal(
+        pending.models.find((entry) => entry.slug === "claude-sonnet-5.5")?.name,
+        "Claude Sonnet 5.5",
+      );
+      assert.equal(
+        pending.models.find((entry) => entry.slug === "claude-sonnet-5.5")?.capabilities
+          ?.optionDescriptors?.[0]?.currentValue,
+        "high",
+      );
+      assert.equal(
+        pending.models.find((entry) => entry.slug === "gpt-6.1-luna")?.capabilities
+          ?.optionDescriptors?.[0]?.currentValue,
+        "high",
+      );
+      assert.equal(pending.models.filter((entry) => entry.slug === "default").length, 1);
+      yield* recordKiroConfiguration(configurations, "/work/a", []);
+      const partial = yield* applyKiroConfiguration(configurations, "/work/a", base);
+      assert.equal(
+        partial.models.find((entry) => entry.slug === "gpt-6.1-luna")?.capabilities
+          ?.optionDescriptors?.[0]?.currentValue,
+        "high",
+      );
+      yield* recordKiroConfiguration(configurations, "/work/a", [
+        {
+          ...model("future-model"),
+          options: [
+            { value: "future-model", name: "Future model", _meta: { kiro: { hasEffort: false } } },
+          ],
+        },
+      ]);
       const removed = yield* applyKiroConfiguration(configurations, "/work/a", base);
       assert.equal(
         removed.models.find((entry) => entry.slug === "future-model")?.capabilities
           ?.optionDescriptors?.length,
         0,
+      );
+      yield* recordKiroConfiguration(configurations, "/work/a", [
+        model("future-model"),
+        { ...effort, currentValue: "default", options: [{ value: "default", name: "Default" }] },
+      ]);
+      const internalOnly = yield* applyKiroConfiguration(configurations, "/work/a", base);
+      assert.equal(
+        internalOnly.models.find((entry) => entry.slug === "future-model")?.capabilities
+          ?.optionDescriptors?.length,
+        0,
+      );
+      const agent = (currentValue: string) => ({
+        id: "mode",
+        name: "Agent",
+        type: "select" as const,
+        currentValue,
+        options: [
+          { value: "vibe", name: "Default" },
+          { value: "planner", name: "Planner" },
+        ],
+      });
+      yield* recordKiroConfiguration(configurations, "/work/a", [
+        agent("vibe"),
+        model("future-model"),
+        effort,
+      ]);
+      yield* recordKiroConfiguration(configurations, "/work/a", [
+        agent("planner"),
+        model("future-model"),
+      ]);
+      const switched = yield* applyKiroConfiguration(configurations, "/work/a", base);
+      assert.equal(
+        switched.models
+          .find((entry) => entry.slug === "future-model")
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort")
+          ?.currentValue,
+        "low",
       );
     }),
   );

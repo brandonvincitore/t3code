@@ -25,8 +25,9 @@ organization sets another. A model your account cannot use stops the turn with a
 running on another model.
 
 Models with adjustable reasoning effort, such as recent Claude Opus and Sonnet models and GPT-5.6,
-show a **Reasoning** setting with only the levels Kiro offers for that model. Your default model and
-models without effort control run at Kiro's own setting.
+show a **Reasoning** setting with only the levels Kiro offers for that model, including a concrete
+Kiro default model. You can choose a level before your first message. With no level selected, Kiro
+keeps its own setting. The `auto` model has no effort control.
 
 ## Agents
 

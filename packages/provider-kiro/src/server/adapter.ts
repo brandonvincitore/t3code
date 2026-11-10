@@ -52,6 +52,7 @@ import {
   kiroPermissionDisposition,
   makeKiroAcpRuntime,
 } from "./acpSupport.ts";
+import { kiroConfigModels, kiroModelCapabilities } from "./models.ts";
 import { makeKiroSecretStorage } from "./secretStorage.ts";
 import { makeKiroMcpSupport } from "./mcp.ts";
 import { type KiroConfigurations, recordKiroConfiguration } from "./configuration.ts";
@@ -355,21 +356,41 @@ const applyKiroModel = Effect.fn("KiroAdapterV2.applyKiroModel")(function* (
   defaultModel: Effect.Effect<string>,
   agentSwitched: boolean,
 ) {
-  const modelOption = findKiroModelOption(yield* runtime.getConfigOptions);
+  const config = yield* runtime.getConfigOptions;
+  const modelOption = findKiroModelOption(config);
   const current = modelOption?.type === "select" ? modelOption.currentValue : undefined;
   const selected = modelSelection.model.trim();
   const isDefault = selected.length === 0 || selected === KIRO_DEFAULT_MODEL;
-  // Before Kiro advertises `model` the session is new, so it already runs
-  // Kiro's default, unless an agent switch just moved it to the agent's model.
-  if (isDefault && modelOption?.type !== "select" && !agentSwitched) {
+  const wantsEffort =
+    getModelSelectionStringOptionValue(modelSelection, "reasoningEffort") !== undefined;
+  const requested = isDefault ? yield* defaultModel : selected;
+  // Reassert a concrete default only to unlock a requested effort on Kiro versions
+  // that advertise it after a model write. An untouched default keeps Kiro's choice.
+  if (
+    isDefault &&
+    modelOption?.type !== "select" &&
+    !agentSwitched &&
+    (!wantsEffort || requested === KIRO_FALLBACK_DEFAULT_MODEL)
+  ) {
     return current;
   }
-  const requested = isDefault ? yield* defaultModel : selected;
   if (requested === current) {
-    return current;
+    const effort = kiroConfigModels(config).find((model) => model.value === requested)?.effort;
+    const supportsEffort =
+      effort === undefined
+        ? (kiroModelCapabilities(requested).optionDescriptors?.length ?? 0) > 0
+        : effort !== null;
+    if (
+      !wantsEffort ||
+      !supportsEffort ||
+      config.some((option) => option.id === KIRO_EFFORT_CONFIG_ID)
+    ) {
+      return current;
+    }
   }
   yield* runtime.setConfigOption(modelOption?.id ?? KIRO_MODEL_CONFIG_ID, requested, {
     allowUnlistedValue: true,
+    force: requested === current,
   });
   return requested;
 });

@@ -1178,15 +1178,13 @@ export class AcpSessionRuntime extends Context.Service<
       meta?: EffectAcpSchema.SetSessionModelRequest["_meta"],
     ) => Effect.Effect<EffectAcpSchema.SetSessionModelResponse, EffectAcpErrors.AcpError>;
     /**
-     * Writes a session configuration option. A select value the option does
-     * not list is refused unless `allowUnlistedValue` is set, for agents that
-     * take any value and judge it themselves (a custom model id the agent
-     * does not list).
+     * Writes an option. `allowUnlistedValue` lets the agent validate an unknown
+     * select value. `force` reasserts the current value to refresh dependent options.
      */
     readonly setConfigOption: (
       configId: string,
       value: string | boolean,
-      options?: { readonly allowUnlistedValue?: boolean },
+      options?: { readonly allowUnlistedValue?: boolean; readonly force?: boolean },
     ) => Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError>;
     readonly setModel: (model: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     readonly request: (
@@ -2032,7 +2030,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   const setConfigOption = (
     configId: string,
     value: string | boolean,
-    options?: { readonly allowUnlistedValue?: boolean },
+    options?: { readonly allowUnlistedValue?: boolean; readonly force?: boolean },
   ): Effect.Effect<EffectAcpSchema.SetSessionConfigOptionResponse, EffectAcpErrors.AcpError> =>
     validateConfigOptionValue(configId, value, options?.allowUnlistedValue === true).pipe(
       Effect.andThen(getStartedState),
@@ -2040,7 +2038,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
         SubscriptionRef.get(configOptionsRef).pipe(
           Effect.flatMap((configOptions) => {
             const existing = findSessionConfigOption(configOptions, configId);
-            if (existing && configOptionCurrentValueMatches(existing, value)) {
+            if (!options?.force && existing && configOptionCurrentValueMatches(existing, value)) {
               return Effect.succeed({
                 configOptions,
               } satisfies EffectAcpSchema.SetSessionConfigOptionResponse);

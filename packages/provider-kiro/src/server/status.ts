@@ -24,6 +24,12 @@ import {
   makeKiroAcpRuntime,
   kiroWorkflowSessionMeta,
 } from "./acpSupport.ts";
+import {
+  kiroConfigModels,
+  kiroModelCapabilities,
+  kiroModelName,
+  mergeKiroConfigModels,
+} from "./models.ts";
 import { kiroSessionCapabilities } from "./nativeSessions.ts";
 import { kiroWorkflowPreferenceDescriptor } from "./workflowPreferences.ts";
 import {
@@ -32,7 +38,6 @@ import {
   COMPACT_SLASH_COMMAND,
   isCommandMissingCause,
   parseGenericCliVersion,
-  buildSelectOptionDescriptor,
   type ProviderProbeResult,
   providerModelsFromSettings,
   type ServerProviderDraft,
@@ -171,61 +176,6 @@ export function kiroAuthFromWhoami(
   };
 }
 
-const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
-const CLAUDE_4_6_EFFORT_LEVELS = ["low", "medium", "high", "max"];
-const GPT_5_6_EFFORT_LEVELS = ["none", ...CLAUDE_EFFORT_LEVELS];
-const KIMI_K3_EFFORT_LEVELS = ["low", "high", "max"];
-
-/**
- * Reasoning levels per Kiro model id and its default level, copied from what
- * Kiro 2.32.0 (Haiku 5.5: 2.37.1) advertises, since `--list-models` names none.
- * Unlisted models take no effort; the adapter sends only a level the live session offers.
- */
-const KIRO_MODEL_EFFORT: Readonly<
-  Record<string, { readonly levels: ReadonlyArray<string>; readonly defaultLevel: string }>
-> = {
-  "claude-fable-5.1": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-opus-5.5": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "medium" },
-  "claude-opus-5": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-opus-4.8": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-opus-4.7": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "xhigh" },
-  "claude-opus-4.6": { levels: CLAUDE_4_6_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-sonnet-5.5": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-sonnet-5": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-sonnet-4.6": { levels: CLAUDE_4_6_EFFORT_LEVELS, defaultLevel: "high" },
-  "claude-haiku-5.5": { levels: CLAUDE_EFFORT_LEVELS, defaultLevel: "medium" },
-  "gpt-5.6-sol": { levels: GPT_5_6_EFFORT_LEVELS, defaultLevel: "high" },
-  "gpt-5.6-terra": { levels: GPT_5_6_EFFORT_LEVELS, defaultLevel: "high" },
-  "gpt-5.6-luna": { levels: GPT_5_6_EFFORT_LEVELS, defaultLevel: "high" },
-  "kimi-k3": { levels: KIMI_K3_EFFORT_LEVELS, defaultLevel: "max" },
-};
-const KIRO_EFFORT_LABELS: Readonly<Record<string, string>> = {
-  none: "None",
-  low: "Low",
-  medium: "Medium",
-  high: "High",
-  xhigh: "Extra High",
-  max: "Max",
-};
-
-function kiroModelCapabilities(modelId: string): ModelCapabilities {
-  const effort = KIRO_MODEL_EFFORT[modelId];
-  if (effort === undefined) return EMPTY_CAPABILITIES;
-  return createModelCapabilities({
-    optionDescriptors: [
-      buildSelectOptionDescriptor({
-        id: "reasoningEffort",
-        label: "Reasoning",
-        options: effort.levels.map((level) => ({
-          value: level,
-          label: KIRO_EFFORT_LABELS[level] ?? level,
-          isDefault: level === effort.defaultLevel,
-        })),
-      }),
-    ],
-  });
-}
-
 const KiroModelList = Schema.fromJsonString(
   Schema.Struct({
     models: Schema.Array(
@@ -242,8 +192,8 @@ const decodeKiroModelList = Schema.decodeUnknownOption(KiroModelList);
 /**
  * Reads `kiro-cli chat --list-models --format json`, the account's models. The
  * default entry keeps its name but takes the "default" slug, with Kiro's id as its
- * alias. Sessions advertise models only after they start; anything unparsable
- * keeps the built-in list.
+ * alias. The config template enriches this list; anything unparsable keeps
+ * the built-in list.
  */
 function kiroModelsFromList(
   output: { readonly code: number; readonly stdout: string } | undefined,
@@ -256,24 +206,27 @@ function kiroModelsFromList(
   const defaultModel: ServerProviderModel = {
     slug: KIRO_DEFAULT_MODEL_SLUG,
     // Named after the model it runs, so a named default isn't hidden behind "Kiro default".
-    name: listedDefault ? (listedDefault.model_name ?? listedDefault.model_id) : "Kiro default",
+    name: listedDefault
+      ? kiroModelName(listedDefault.model_name?.trim() || listedDefault.model_id)
+      : "Kiro default",
     aliases: [defaultId],
     isCustom: false,
     isDefault: true,
-    // A new session on Kiro's default gets no model write, so Kiro never
-    // advertises its effort option and a level could not be applied.
-    capabilities: EMPTY_CAPABILITIES,
+    capabilities: kiroModelCapabilities(defaultId),
   };
-  const models = list.models.map((model) =>
-    model === listedDefault
-      ? defaultModel
-      : {
-          slug: model.model_id,
-          name: model.model_name ?? model.model_id,
-          isCustom: false,
-          capabilities: kiroModelCapabilities(model.model_id),
-        },
-  );
+  const models = list.models
+    .filter((model) => model.model_id !== KIRO_DEFAULT_MODEL_SLUG)
+    .slice(0, 256)
+    .map((model) =>
+      model === listedDefault
+        ? defaultModel
+        : {
+            slug: model.model_id,
+            name: kiroModelName(model.model_name?.trim() || model.model_id),
+            isCustom: false,
+            capabilities: kiroModelCapabilities(model.model_id),
+          },
+    );
   // New threads select "default", so it is listed even when Kiro's list leaves its default out.
   return models.includes(defaultModel) ? models : [defaultModel, ...models];
 }
@@ -290,23 +243,22 @@ export function kiroDefaultModelId(models: ReadonlyArray<ServerProviderModel>): 
 }
 
 const KiroConfigTemplate = Schema.Struct({
-  configOptions: Schema.Array(
-    Schema.Struct({
-      id: Schema.String,
-      type: Schema.String,
-      currentValue: Schema.optional(Schema.Unknown),
-      options: Schema.optional(
-        Schema.Array(
-          Schema.Struct({
-            value: Schema.String,
-            name: Schema.String,
-            description: Schema.optional(Schema.NullOr(Schema.String)),
-          }),
-        ),
-      ),
-    }),
-  ),
+  configOptions: Schema.Array(Schema.Unknown),
 });
+const decodeKiroAgentOption = Schema.decodeUnknownOption(
+  Schema.Struct({
+    id: Schema.Literal(KIRO_AGENT_CONFIG_ID),
+    type: Schema.Literal("select"),
+    currentValue: Schema.optional(Schema.String),
+    options: Schema.Array(
+      Schema.Struct({
+        value: Schema.String,
+        name: Schema.String,
+        description: Schema.optional(Schema.NullOr(Schema.String)),
+      }),
+    ),
+  }),
+);
 const decodeKiroConfigTemplate = Schema.decodeUnknownOption(KiroConfigTemplate);
 const decodeKiroExtensionMethods = Schema.decodeUnknownOption(
   Schema.Struct({ kiro: Schema.Struct({ extensionMethods: Schema.Array(Schema.String) }) }),
@@ -319,9 +271,10 @@ const decodeKiroExtensionMethods = Schema.decodeUnknownOption(
  */
 export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor | undefined {
   const decoded = Option.getOrUndefined(decodeKiroConfigTemplate(template));
-  const mode = decoded?.configOptions.find(
-    (option) => option.id === KIRO_AGENT_CONFIG_ID && option.type === "select",
-  );
+  const mode = decoded?.configOptions.slice(0, 16).flatMap((raw) => {
+    const option = Option.getOrUndefined(decodeKiroAgentOption(raw));
+    return option === undefined ? [] : [option];
+  })[0];
   const defaultAgent = typeof mode?.currentValue === "string" ? mode.currentValue : undefined;
   const choices = (mode?.options ?? []).flatMap((choice) => {
     const id = choice.value.trim();
@@ -351,8 +304,8 @@ export function kiroAgentDescriptor(template: unknown): ProviderOptionDescriptor
 }
 
 /**
- * Reads Kiro's agent and workflow options without opening a session, so no
- * MCP server starts and no session is stored.
+ * Reads Kiro's model, agent and workflow options without sending session/new
+ * or session/load. Discovery needs no throwaway session or session MCP tools.
  */
 const probeKiroOptions = Effect.fn("KiroProvider.probeKiroOptions")(function* (
   settings: KiroSettings,
@@ -371,6 +324,7 @@ const probeKiroOptions = Effect.fn("KiroProvider.probeKiroOptions")(function* (
   if (!methods?.includes("_kiro/config/template"))
     return {
       options: [],
+      models: [],
       nativeSessions: kiroSessionCapabilities(initialized),
       canCompact: methods?.includes("_kiro/session/compact") === true,
     };
@@ -378,7 +332,9 @@ const probeKiroOptions = Effect.fn("KiroProvider.probeKiroOptions")(function* (
   const template = yield* runtime
     .request("_kiro/config/template", workflowMeta === undefined ? {} : { _meta: workflowMeta })
     .pipe(Effect.option);
+  const decoded = Option.getOrUndefined(decodeKiroConfigTemplate(Option.getOrUndefined(template)));
   return {
+    models: kiroConfigModels(decoded?.configOptions ?? []),
     options: [
       kiroAgentDescriptor(Option.getOrUndefined(template)),
       kiroWorkflowPreferenceDescriptor(Option.getOrUndefined(template)),
@@ -495,7 +451,7 @@ export const checkKiroProviderStatus = Effect.fn("checkKiroProviderStatus")(func
         ? {}
         : { message: "Could not confirm the Kiro sign-in. Run `kiro-cli whoami` to check." }),
     },
-    listed,
+    mergeKiroConfigModels(listed ?? KIRO_BUILT_IN_MODELS, options?.models ?? []),
     options?.options,
   );
   return {

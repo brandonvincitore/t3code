@@ -445,6 +445,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   /** Frames for the runtime a rollback starts, replayed by a second agent process. */
   readonly replacementFrames?: ReadonlyArray<Frame>;
   readonly model?: string;
+  readonly defaultModel?: string;
   /** Option selections (e.g. reasoningEffort) for the session and `startTurn`. */
   readonly options?: ModelSelection["options"];
   readonly runtimeMode?: RuntimeMode;
@@ -527,6 +528,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     settings: ENABLED_KIRO_SETTINGS,
     environment: input.environment ?? {},
     selfInvocation: yield* resolveSelfInvocation(),
+    ...(input.defaultModel === undefined
+      ? {}
+      : { defaultModel: Effect.succeed(input.defaultModel) }),
     makeRuntime: (runtimeInput) => {
       const script = scripts[runtimesMade++];
       if (script === undefined) {
@@ -2075,6 +2079,56 @@ describe("KiroAdapterV2", () => {
             yield* startTurnOn(ordinal, model, reasoning("high"));
             assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
           }
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live.each([
+    { label: "default", model: "default", advertised: false, wantsEffort: true },
+    { label: "explicit", model: "claude-opus-5.5", advertised: false, wantsEffort: true },
+    { label: "advertised-default", model: "default", advertised: true, wantsEffort: true },
+    { label: "untouched-default", model: "default", advertised: false, wantsEffort: false },
+  ])("honors $label before the first prompt with late model options", (row) =>
+    runKiroScript({
+      scenario: `first-prompt-${row.label}`,
+      model: row.model,
+      defaultModel: "claude-opus-5.5",
+      ...(row.wantsEffort ? { options: reasoning("high") } : {}),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer(
+          "session/new",
+          sessionSetup([
+            modeOption,
+            ...(row.advertised ? [kiroModelOption("claude-opus-5.5")] : []),
+          ]),
+        ),
+        ...(row.wantsEffort
+          ? [
+              setConfig("model", "claude-opus-5.5"),
+              configResult([
+                modeOption,
+                kiroModelOption("claude-opus-5.5"),
+                effortOption("medium", CLAUDE_EFFORT_LEVELS),
+              ]),
+              setConfig("effortLevel", "high"),
+              configResult([
+                modeOption,
+                kiroModelOption("claude-opus-5.5"),
+                effortOption("high", CLAUDE_EFFORT_LEVELS),
+              ]),
+            ]
+          : []),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ events, startTurn }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
         }),
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );

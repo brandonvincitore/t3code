@@ -97,6 +97,7 @@ const acpProcess = (
   templateParams: Array<unknown>,
   extensionMethods: ReadonlyArray<string>,
   afterSessionNew?: ReadonlyArray<unknown>,
+  requests: Array<string> = [],
 ) =>
   Effect.gen(function* () {
     const output = yield* Queue.unbounded<Uint8Array>();
@@ -115,6 +116,7 @@ const acpProcess = (
       });
     const reply = Effect.fnUntraced(function* (line: string) {
       const request = decodeRequest(line);
+      requests.push(request.method);
       const sessions = afterSessionNew !== undefined;
       if (sessions && request.method === "session/new") {
         yield* send({ id: request.id, result: { sessionId: KIRO_SESSION_ID } });
@@ -175,14 +177,15 @@ function kiroCli(
 ) {
   const invoked: Array<string> = [];
   const templateParams: Array<unknown> = [];
+  const requests: Array<string> = [];
   const spawner = ChildProcessSpawner.make((command) => {
     const args = ChildProcess.isStandardCommand(command) ? command.args.join(" ") : "";
     invoked.push(args);
     return args === KIRO_ACP_ARGS && (template !== undefined || afterSessionNew !== undefined)
-      ? acpProcess(template, templateParams, extensionMethods, afterSessionNew)
+      ? acpProcess(template, templateParams, extensionMethods, afterSessionNew, requests)
       : Effect.succeed(processHandle(outputs[args] ?? { stdout: "", code: 127 }));
   });
-  return { invoked, templateParams, spawner };
+  return { invoked, templateParams, requests, spawner };
 }
 
 const check = (
@@ -198,7 +201,12 @@ const check = (
     const snapshot = yield* checkKiroProviderStatus(options.settings ?? settings, {}).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
     );
-    return { snapshot, invoked: cli.invoked, templateParams: cli.templateParams };
+    return {
+      snapshot,
+      invoked: cli.invoked,
+      templateParams: cli.templateParams,
+      requests: cli.requests,
+    };
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
 
 describe("KiroProvider", () => {
@@ -293,8 +301,8 @@ describe("KiroProvider", () => {
         snapshot.models.map((model) => [model.slug, model.name, model.isDefault === true]),
         [
           ["default", "auto", true],
-          ["claude-sonnet-4.5", "claude-sonnet-4.5", false],
-          ["claude-haiku-4.5", "claude-haiku-4.5", false],
+          ["claude-sonnet-4.5", "Claude Sonnet 4.5", false],
+          ["claude-haiku-4.5", "Claude Haiku 4.5", false],
         ],
       );
     }),
@@ -320,8 +328,8 @@ describe("KiroProvider", () => {
         listed.snapshot.models.map((model) => [model.slug, model.name]),
         [
           ["auto", "auto"],
-          ["default", "claude-sonnet-4.5"],
-          ["claude-haiku-4.5", "claude-haiku-4.5"],
+          ["default", "Claude Sonnet 4.5"],
+          ["claude-haiku-4.5", "Claude Haiku 4.5"],
         ],
       );
       assert.equal(kiroDefaultModelId(listed.snapshot.models), "claude-sonnet-4.5");
@@ -349,7 +357,7 @@ describe("KiroProvider", () => {
         snapshot.models.map((model) => [model.slug, model.name, model.isDefault === true]),
         [
           ["default", "Kiro default", true],
-          ["claude-sonnet-4.5", "claude-sonnet-4.5", false],
+          ["claude-sonnet-4.5", "Claude Sonnet 4.5", false],
         ],
       );
       assert.equal(kiroDefaultModelId(snapshot.models), "auto");
@@ -373,69 +381,207 @@ describe("KiroProvider", () => {
     default_model: "auto",
   });
 
-  it.effect("offers each model only the reasoning levels Kiro takes for it", () =>
-    Effect.gen(function* () {
-      const { snapshot } = yield* check({
-        "--version": { stdout: "kiro-cli 2.27.0\n", code: 0 },
-        "whoami --format json": { stdout: '{"accountType":"SocialGitHub"}\n', code: 0 },
-        "chat --list-models --format json": { stdout: KIRO_EFFORT_MODEL_LIST, code: 0 },
-      });
-      const reasoning = snapshot.models.map((model) => {
-        const descriptors = model.capabilities?.optionDescriptors ?? [];
-        const select = descriptors.find((descriptor) => descriptor.id === "reasoningEffort");
-        return select?.type === "select"
-          ? {
-              slug: model.slug,
-              label: select.label,
-              levels: select.options.map((choice) => choice.id),
-              defaults: select.options.filter((choice) => choice.isDefault).map((c) => c.id),
-              currentValue: select.currentValue,
-            }
-          : { slug: model.slug, descriptors: descriptors.length };
-      });
-      assert.deepEqual(reasoning, [
-        // Kiro default and models without effort get no Reasoning select.
-        { slug: "default", descriptors: 0 },
-        {
-          slug: "claude-fable-5.1",
-          label: "Reasoning",
-          levels: ["low", "medium", "high", "xhigh", "max"],
-          defaults: ["high"],
-          currentValue: "high",
-        },
-        {
-          slug: "claude-opus-5.5",
-          label: "Reasoning",
-          levels: ["low", "medium", "high", "xhigh", "max"],
-          defaults: ["medium"],
-          currentValue: "medium",
-        },
-        {
-          slug: "claude-haiku-5.5",
-          label: "Reasoning",
-          levels: ["low", "medium", "high", "xhigh", "max"],
-          defaults: ["medium"],
-          currentValue: "medium",
-        },
-        // Opus 4.6 has no xhigh, and Kiro runs it at high by default.
-        {
-          slug: "claude-opus-4.6",
-          label: "Reasoning",
-          levels: ["low", "medium", "high", "max"],
-          defaults: ["high"],
-          currentValue: "high",
-        },
-        // Kimi K3 skips medium and runs at max by default.
-        {
-          slug: "kimi-k3",
-          label: "Reasoning",
-          levels: ["low", "high", "max"],
-          defaults: ["max"],
-          currentValue: "max",
-        },
-        { slug: "claude-sonnet-4.5", descriptors: 0 },
-      ]);
-    }),
+  it.effect.each(["auto", "claude-opus-5.5"])(
+    "offers static reasoning fallback with default %s",
+    (defaultId) =>
+      Effect.gen(function* () {
+        const { snapshot } = yield* check({
+          "--version": { stdout: "kiro-cli 2.27.0\n", code: 0 },
+          "whoami --format json": { stdout: '{"accountType":"SocialGitHub"}\n', code: 0 },
+          "chat --list-models --format json": {
+            stdout: KIRO_EFFORT_MODEL_LIST.replace(
+              '"default_model":"auto"',
+              JSON.stringify("default_model") + ":" + JSON.stringify(defaultId),
+            ),
+            code: 0,
+          },
+        });
+        const reasoning = snapshot.models.map((model) => {
+          const descriptors = model.capabilities?.optionDescriptors ?? [];
+          const select = descriptors.find((descriptor) => descriptor.id === "reasoningEffort");
+          return select?.type === "select"
+            ? {
+                slug: model.slug,
+                label: select.label,
+                levels: select.options.map((choice) => choice.id),
+                defaults: select.options.filter((choice) => choice.isDefault).map((c) => c.id),
+                currentValue: select.currentValue,
+              }
+            : { slug: model.slug, descriptors: descriptors.length };
+        });
+        const expected = [
+          // Auto and models without effort get no Reasoning select.
+          { slug: "default", descriptors: 0 },
+          {
+            slug: "claude-fable-5.1",
+            label: "Reasoning",
+            levels: ["low", "medium", "high", "xhigh", "max"],
+            defaults: ["high"],
+            currentValue: "high",
+          },
+          {
+            slug: "claude-opus-5.5",
+            label: "Reasoning",
+            levels: ["low", "medium", "high", "xhigh", "max"],
+            defaults: ["medium"],
+            currentValue: "medium",
+          },
+          {
+            slug: "claude-haiku-5.5",
+            label: "Reasoning",
+            levels: ["low", "medium", "high", "xhigh", "max"],
+            defaults: ["medium"],
+            currentValue: "medium",
+          },
+          // Opus 4.6 has no xhigh, and Kiro runs it at high by default.
+          {
+            slug: "claude-opus-4.6",
+            label: "Reasoning",
+            levels: ["low", "medium", "high", "max"],
+            defaults: ["high"],
+            currentValue: "high",
+          },
+          // Kimi K3 skips medium and runs at max by default.
+          {
+            slug: "kimi-k3",
+            label: "Reasoning",
+            levels: ["low", "high", "max"],
+            defaults: ["max"],
+            currentValue: "max",
+          },
+          { slug: "claude-sonnet-4.5", descriptors: 0 },
+        ];
+        assert.deepEqual(
+          reasoning,
+          expected.map((model) => ({
+            ...model,
+            slug:
+              model.slug === "default"
+                ? defaultId === "auto"
+                  ? "default"
+                  : "auto"
+                : model.slug === defaultId
+                  ? "default"
+                  : model.slug,
+          })),
+        );
+      }),
+  );
+
+  it.effect.each(["claude-sonnet-5.5", "future-model"])(
+    "uses session-free model metadata before the first chat with default %s",
+    (defaultId) =>
+      Effect.gen(function* () {
+        const choices = [
+          { value: "default", name: "Internal default" },
+          { value: "auto", name: "Auto", _meta: { kiro: { hasEffort: false } } },
+          { value: "claude-sonnet-5.5", name: "claude-sonnet-5.5" },
+          { value: "claude-haiku-5.5", name: "claude-haiku-5.5" },
+          {
+            value: "future-model",
+            name: "Future model",
+            _meta: {
+              kiro: {
+                hasEffort: true,
+                effortLevels: ["medium", "extreme", "medium", "default"],
+                defaultEffortLevel: "extreme",
+              },
+            },
+          },
+          {
+            value: "gpt-6.1-sol",
+            name: "gpt-6.1-sol",
+            _meta: {
+              kiro: {
+                hasEffort: true,
+                effortLevels: ["low", "high"],
+                defaultEffortLevel: "high",
+              },
+            },
+          },
+          { value: "kimi-k3", name: "Kimi K3 Premium", _meta: { kiro: { hasEffort: false } } },
+          { value: "unknown-custom", name: "My custom model" },
+          {
+            value: "claude-opus-4.6",
+            name: "claude-opus-4.6",
+            _meta: {
+              kiro: { hasEffort: true, effortLevels: ["default"], defaultEffortLevel: "default" },
+            },
+          },
+          { value: "deepseek-3.2", name: "deepseek-3.2" },
+          { value: "minimax-m2.5", name: "minimax-m2.5" },
+
+          {
+            value: "claude-opus-5.5",
+            name: "claude-opus-5.5",
+            _meta: {
+              kiro: {
+                hasEffort: true,
+                effortLevels: [],
+                defaultEffortLevel: "broken",
+              },
+            },
+          },
+        ];
+        const { snapshot, requests } = yield* check(
+          {
+            "--version": { stdout: "kiro-cli 3.1.0\n", code: 0 },
+            "whoami --format json": { stdout: '{"accountType":"ApiKey"}', code: 0 },
+            "chat --list-models --format json": {
+              stdout: JSON.stringify({
+                models: choices
+                  .filter((choice) => choice.value !== "default")
+                  .map((choice) => ({
+                    model_id: choice.value,
+                    model_name: choice.value === "future-model" ? choice.value : choice.name,
+                  })),
+                default_model: defaultId,
+              }),
+              code: 0,
+            },
+          },
+          {
+            template: {
+              configOptions: [
+                {
+                  id: "model",
+                  type: "select",
+                  category: "model",
+                  currentValue: "auto",
+                  options: choices,
+                },
+              ],
+            },
+          },
+        );
+        const resolve = (id: string) =>
+          snapshot.models.find((model) => model.slug === id || model.aliases?.includes(id));
+        const levels = (id: string) => {
+          const option = resolve(id)?.capabilities?.optionDescriptors?.find(
+            (option) => option.id === "reasoningEffort",
+          );
+          return option?.type === "select" ? option.options.map((choice) => choice.id) : [];
+        };
+        assert.deepEqual(levels("claude-sonnet-5.5"), ["low", "medium", "high", "xhigh", "max"]);
+        assert.deepEqual(levels("future-model"), ["medium", "extreme"]);
+        assert.deepEqual(levels("gpt-6.1-sol"), ["low", "high"]);
+        assert.deepEqual(levels("claude-opus-5.5"), ["low", "medium", "high", "xhigh", "max"]);
+        assert.deepEqual(levels("kimi-k3"), []);
+        assert.deepEqual(levels("unknown-custom"), []);
+        assert.deepEqual(levels("claude-opus-4.6"), []);
+        assert.equal(resolve("deepseek-3.2")?.name, "DeepSeek 3.2");
+        assert.equal(resolve("minimax-m2.5")?.name, "MiniMax M2.5");
+        assert.deepEqual(levels("auto"), []);
+        assert.equal(resolve("claude-sonnet-5.5")?.name, "Claude Sonnet 5.5");
+        assert.equal(resolve("claude-haiku-5.5")?.name, "Claude Haiku 5.5");
+        assert.equal(resolve("gpt-6.1-sol")?.name, "GPT-6.1-Sol");
+        assert.equal(resolve("future-model")?.name, "Future model");
+        assert.equal(resolve("kimi-k3")?.name, "Kimi K3 Premium");
+        assert.equal(resolve("unknown-custom")?.name, "My custom model");
+        assert.deepEqual(resolve(defaultId)?.aliases, [defaultId]);
+        assert.equal(snapshot.models.filter((model) => model.slug === "default").length, 1);
+        assert.deepEqual(requests, ["initialize", "_kiro/config/template"]);
+      }),
   );
 
   it.effect("gives every model, custom ones too, the agent picker Kiro's template lists", () =>

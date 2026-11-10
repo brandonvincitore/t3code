@@ -1,14 +1,13 @@
 import type { ProviderOptionDescriptor, ServerProvider } from "@t3tools/contracts";
 import { createModelCapabilities } from "@t3tools/shared/model";
-import {
-  acpProviderOptionDescriptors,
-  flattenSelectChoices,
-} from "@t3tools/provider-acp/server/sessionConfig";
+import { acpProviderOptionDescriptors } from "@t3tools/provider-acp/server/sessionConfig";
 import type { AcpSessionModeState } from "@t3tools/provider-acp/server/runtimeModel";
 import * as Effect from "effect/Effect";
+import { kiroConfigModels, mergeKiroConfigModels, type KiroConfigModel } from "./models.ts";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import type * as Acp from "effect-acp/compat";
 import {
+  KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
   KIRO_EFFORT_CONFIG_ID,
   KIRO_MODEL_CONFIG_ID,
@@ -16,7 +15,8 @@ import {
 
 interface KiroConfiguration {
   readonly options: ReadonlyArray<ProviderOptionDescriptor>;
-  readonly models: ReadonlyArray<{ readonly value: string; readonly name: string }>;
+  readonly models: ReadonlyArray<KiroConfigModel>;
+  readonly agent: string | undefined;
   readonly effortByModel: ReadonlyMap<string, ProviderOptionDescriptor | null>;
 }
 
@@ -44,30 +44,62 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
     (option) => option.id === KIRO_MODEL_CONFIG_ID || option.category === "model",
   );
   const currentModel = model?.type === "select" ? model.currentValue : modelState?.currentModelId;
-  const models =
+  const models = kiroConfigModels(
     model?.type === "select"
-      ? flattenSelectChoices(model.options).slice(0, 256)
-      : (modelState?.availableModels ?? [])
-          .slice(0, 256)
-          .map((entry) => ({ value: entry.modelId, name: entry.name }));
+      ? configOptions
+      : [
+          {
+            id: KIRO_MODEL_CONFIG_ID,
+            type: "select",
+            options: (modelState?.availableModels ?? [])
+              .slice(0, 256)
+              .map((entry) => ({ value: entry.modelId, name: entry.name, _meta: entry._meta })),
+          },
+        ],
+  );
+  const agentOption = configOptions.find((option) => option.id === KIRO_AGENT_CONFIG_ID);
+  const agent =
+    agentOption?.type === "select" ? agentOption.currentValue : modeState?.currentModeId;
   const effort = descriptors.find((option) => option.id === KIRO_EFFORT_CONFIG_ID);
   yield* SubscriptionRef.update(configurations, (current) => {
     const key = cwd;
-    const effortByModel = new Map(current.get(key)?.effortByModel);
+    const previous = current.get(key);
+    const sameAgent =
+      agent === undefined || previous?.agent === undefined || agent === previous.agent;
+    const effortByModel = new Map(sameAgent ? previous?.effortByModel : undefined);
     if (currentModel !== undefined) {
-      if (effort === undefined) effortByModel.set(currentModel, null);
-      else
+      const advertised = models.find((model) => model.value === currentModel)?.effort;
+      if (effort !== undefined) {
+        const choices =
+          effort.type === "select"
+            ? effort.options.filter((choice) => choice.id !== "default")
+            : [];
+        const { currentValue, ...descriptor } = effort;
         effortByModel.set(
           currentModel,
-          effort.type === "select" ? { ...effort, id: "reasoningEffort", role: "reasoning" } : null,
+          effort.type === "select" && choices.length > 0
+            ? {
+                ...descriptor,
+                type: "select",
+                id: "reasoningEffort",
+                role: "reasoning",
+                options: choices,
+                ...(typeof currentValue === "string" &&
+                choices.some((choice) => choice.id === currentValue)
+                  ? { currentValue }
+                  : {}),
+              }
+            : null,
         );
+      } else if (advertised === null) effortByModel.delete(currentModel);
+      // Kiro can advertise the model before its effort; absence is not a capability denial.
     }
     const incoming = {
-      models,
+      models: models.length === 0 && sameAgent ? (previous?.models ?? models) : models,
+      agent: agent ?? previous?.agent,
       options: descriptors.filter((option) => option.id !== KIRO_EFFORT_CONFIG_ID),
       effortByModel,
     };
-    const previous = current.get(key);
     const comparable = (configuration: KiroConfiguration) => ({
       ...configuration,
       effortByModel: [...configuration.effortByModel],
@@ -95,23 +127,7 @@ export const applyKiroConfiguration = Effect.fn("KiroConfiguration.apply")(funct
 ) {
   const configuration = (yield* SubscriptionRef.get(configurations)).get(cwd);
   if (configuration === undefined) return snapshot;
-  const known = new Set(snapshot.models.flatMap((model) => [model.slug, ...(model.aliases ?? [])]));
-  const models = [
-    ...snapshot.models,
-    ...configuration.models.flatMap((model) =>
-      !model.value.trim() || model.value.length > 256 || known.has(model.value)
-        ? []
-        : [
-            {
-              slug: model.value,
-              name: model.name.trim().slice(0, 256) || model.value,
-              isCustom: false,
-              capabilities: null,
-              aliases: undefined,
-            },
-          ],
-    ),
-  ].map((model) => {
+  const models = mergeKiroConfigModels(snapshot.models, configuration.models).map((model) => {
     const modelId = model.slug === "default" ? model.aliases?.[0] : model.slug;
     const effort = modelId === undefined ? undefined : configuration.effortByModel.get(modelId);
     const incoming = [...configuration.options, ...(effort == null ? [] : [effort])];
