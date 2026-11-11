@@ -23,6 +23,7 @@ export const writeFileStringAtomically = (input: {
   readonly contents: string;
   /** Created with this mode, so the renamed file is never more open than it. */
   readonly mode?: number;
+  readonly logCleanupErrors?: boolean;
 }) =>
   Effect.scoped(
     Effect.gen(function* () {
@@ -39,7 +40,10 @@ export const writeFileStringAtomically = (input: {
           directory: targetDirectory,
           prefix: `${path.basename(targetPath)}.`,
         }),
-        (directory) => fs.remove(directory, { recursive: true }).pipe(Effect.ignore({ log: true })),
+        (directory) =>
+          fs
+            .remove(directory, { recursive: true })
+            .pipe(Effect.ignore({ log: input.logCleanupErrors ?? true })),
       );
       const tempPath = path.join(tempDirectory, "contents.tmp");
 

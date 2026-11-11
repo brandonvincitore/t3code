@@ -73,6 +73,7 @@ export const makeKiroSecretStorage = Effect.fn("makeKiroSecretStorage")(function
       filePath: secretsPath,
       contents: encodeSecrets(next),
       mode: 0o600,
+      logCleanupErrors: false,
     }).pipe(
       Effect.mapError(() => secretStorageError("write")),
       Effect.provideService(FileSystem.FileSystem, fileSystem),

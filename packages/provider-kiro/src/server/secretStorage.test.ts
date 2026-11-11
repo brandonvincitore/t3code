@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Logger from "effect/Logger";
@@ -75,6 +76,110 @@ describe("makeKiroSecretStorage", () => {
       assert.strictEqual(yield* fileSystem.readFileString(secretsPath), original);
       assert.deepStrictEqual(yield* fileSystem.readDirectory(root), ["secrets.json"]);
       assert.deepStrictEqual(yield* storage.get("kiro.mcp.a.tokens"), { value: "A" });
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("keeps cleanup failures non-fatal and private after successful and failed writes", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-kiro-secrets-" });
+      const secretsPath = path.join(root, "secrets.json");
+      const key = "synthetic-secret-key";
+      const value = "synthetic-secret-value";
+      const cleanupCause = "synthetic-cleanup-cause";
+      const logs: Array<unknown> = [];
+      const spans: Array<Tracer.NativeSpan> = [];
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          spans.push(span);
+          return span;
+        },
+      });
+      let failWrite = false;
+      let cleanupAttempts = 0;
+      const failingCleanup = FileSystem.FileSystem.of({
+        ...fileSystem,
+        writeFileString: (target, text, options) =>
+          fileSystem.writeFileString(target, text, options).pipe(
+            Effect.andThen(() =>
+              failWrite
+                ? Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "Unknown",
+                      module: "FileSystem",
+                      method: "writeFileString",
+                      pathOrDescriptor: target,
+                      cause: new Error(`${key}:${value}`),
+                    }),
+                  )
+                : Effect.void,
+            ),
+          ),
+        remove: (target) =>
+          Effect.sync(() => {
+            cleanupAttempts += 1;
+          }).pipe(
+            Effect.andThen(
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: "PermissionDenied",
+                  module: "FileSystem",
+                  method: "remove",
+                  pathOrDescriptor: target,
+                  cause: new Error(`${cleanupCause}:${key}:${value}`),
+                }),
+              ),
+            ),
+          ),
+      });
+      const storage = yield* makeKiroSecretStorage({ KIRO_HOME: root }).pipe(
+        Effect.provideService(FileSystem.FileSystem, failingCleanup),
+      );
+      yield* Effect.gen(function* () {
+        assert.deepStrictEqual(yield* storage.store(key, value), { success: true });
+        const stored = yield* fileSystem.readFileString(secretsPath);
+        assert.deepStrictEqual(JSON.parse(stored), { [key]: value });
+        failWrite = true;
+        const failure = yield* storage.store("synthetic-other-key", value).pipe(Effect.flip);
+        assert.strictEqual(failure.message, "Kiro secret storage write failed");
+        assert.isUndefined(failure.cause);
+        assert.isUndefined(failure.data);
+        assert.strictEqual(yield* fileSystem.readFileString(secretsPath), stored);
+      }).pipe(
+        Effect.withTracer(tracer),
+        Effect.provide(
+          Logger.layer(
+            [
+              Logger.make(({ logLevel, message, cause }) => {
+                logs.push({ logLevel, message, cause: Cause.squash(cause) });
+              }),
+            ],
+            { mergeWithExisting: false },
+          ),
+        ),
+      );
+      assert.strictEqual(cleanupAttempts, 2);
+      const recorded = NodeUtil.inspect(
+        [
+          logs,
+          spans.map(({ name, attributes, events, status }) => ({
+            name,
+            attributes,
+            events,
+            failure:
+              status._tag === "Ended" && Exit.isFailure(status.exit)
+                ? status.exit.cause
+                : undefined,
+          })),
+        ],
+        { depth: null },
+      );
+      for (const sentinel of [root, key, value, cleanupCause]) {
+        assert.isFalse(recorded.includes(sentinel));
+      }
+      assert.strictEqual(logs.length, 0);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
