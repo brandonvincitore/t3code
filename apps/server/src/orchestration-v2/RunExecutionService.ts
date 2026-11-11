@@ -635,21 +635,44 @@ interface StartOwner {
   readonly input: RunExecutionServiceV2StartRootRunInput;
   readonly accepted: Deferred.Deferred<OrchestrationV2ProviderTurn>;
   readonly terminal: Deferred.Deferred<void>;
+  readonly nativeTerminal: Deferred.Deferred<void>;
   startPending: boolean;
   revoked: boolean;
   turn?: OrchestrationV2ProviderTurn;
   fiber?: Fiber.Fiber<void, RunExecutionServiceV2Error>;
   unsubscribeClosed?: Effect.Effect<void>;
+  cleanup?: Effect.Effect<void>;
+  cleanupState?: "pending" | "unresponsive" | "superseded";
+  stopConsumer?: Effect.Effect<void>;
+}
+
+function sameNativeStartBinding(
+  a: RunExecutionServiceV2StartRootRunInput,
+  b: RunExecutionServiceV2StartRootRunInput,
+) {
+  return (
+    a.providerSessionId === b.providerSessionId &&
+    a.session.instanceId === b.session.instanceId &&
+    a.session.driver === b.session.driver &&
+    (a.providerThread.nativeThreadRef !== null && b.providerThread.nativeThreadRef !== null
+      ? a.providerThread.nativeThreadRef.driver === b.providerThread.nativeThreadRef.driver &&
+        a.providerThread.nativeThreadRef.nativeId === b.providerThread.nativeThreadRef.nativeId
+      : a.providerThread.id === b.providerThread.id)
+  );
 }
 
 export interface RunExecutionServiceV2Shape {
-  readonly getStartOwnership: (
-    key: StartOwnerKey,
-  ) => Effect.Effect<Option.Option<{ readonly startPending: boolean }>>;
+  readonly getStartOwnership: (key: StartOwnerKey) => Effect.Effect<
+    Option.Option<{
+      readonly startPending: boolean;
+      readonly revoked: boolean;
+      readonly cleanup?: StartOwner["cleanupState"];
+    }>
+  >;
   readonly interruptOwnedStart: (
     key: StartOwnerKey,
   ) => Effect.Effect<StartInterruptTarget | undefined, RunExecutionInterruptError>;
-  readonly revokeOwnedStart: (key: StartOwnerKey) => Effect.Effect<void>;
+  readonly revokeOwnedStart: (key: StartOwnerKey) => Effect.Effect<Effect.Effect<void> | undefined>;
   readonly startRootRun: (
     input: RunExecutionServiceV2StartRootRunInput,
   ) => Effect.Effect<void, RunExecutionServiceV2Error>;
@@ -976,16 +999,134 @@ export const layer: Layer.Layer<
           const owner = owners.get(ownerId(key));
           return owner === undefined
             ? Option.none()
-            : Option.some({ startPending: owner.startPending });
+            : Option.some({
+                startPending: owner.startPending,
+                revoked: owner.revoked,
+                ...(owner.cleanupState === undefined ? {} : { cleanup: owner.cleanupState }),
+              });
         }),
       ),
       revokeOwnedStart: Effect.fn("RunExecutionService.revokeOwnedStart")(function* (key) {
         const owner = owners.get(ownerId(key));
         if (owner === undefined) return;
         owner.revoked = true;
-        // Request only: provider I/O must never be awaited under the thread lock.
-        owner.fiber?.interruptUnsafe();
-        yield* releaseOwner(owner);
+        if (owner.cleanup !== undefined) return owner.cleanup;
+        owner.cleanupState = "pending";
+        const cleanup = Effect.gen(function* () {
+          const turn = yield* Deferred.await(owner.accepted).pipe(
+            Effect.raceFirst(Deferred.await(owner.terminal).pipe(Effect.as(undefined))),
+          );
+          if (turn === undefined) return;
+          if (!(yield* Deferred.isDone(owner.nativeTerminal))) {
+            const target = owner.turn ?? turn;
+            const matches = yield* threadDispatch
+              .withLock(
+                key.threadId,
+                Effect.gen(function* () {
+                  const { providerThreads, providerTurns } =
+                    yield* projectionStore.getThreadRecords(key.threadId, [
+                      "providerThreads",
+                      "providerTurns",
+                    ]);
+                  const binding = providerThreads.find(
+                    (thread) => thread.id === owner.input.providerThread.id,
+                  );
+                  const replacement = [...owners.values()].some(
+                    (other) => other !== owner && sameNativeStartBinding(other.input, owner.input),
+                  );
+                  return (
+                    !replacement &&
+                    binding?.providerSessionId === owner.input.providerSessionId &&
+                    binding.providerInstanceId === owner.input.session.instanceId &&
+                    binding.driver === owner.input.providerThread.driver &&
+                    binding.nativeThreadRef?.driver ===
+                      owner.input.providerThread.nativeThreadRef?.driver &&
+                    binding.nativeThreadRef?.nativeId ===
+                      owner.input.providerThread.nativeThreadRef?.nativeId &&
+                    !providerTurns.some(
+                      (candidate) =>
+                        candidate.id === target.id && candidate.runAttemptId !== key.attemptId,
+                    )
+                  );
+                }),
+              )
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Cause.hasInterruptsOnly(cause)
+                    ? Effect.interrupt
+                    : Effect.gen(function* () {
+                        owner.cleanupState = "unresponsive";
+                        yield* Effect.logWarning(
+                          "orchestration-v2.revoked-start-binding-unavailable",
+                          {
+                            ...key,
+                            cause,
+                          },
+                        );
+                        return false;
+                      }),
+                ),
+              );
+            if (matches) {
+              yield* owner.input.session
+                .interruptTurn({
+                  providerThread: owner.input.providerThread,
+                  providerTurnId: target.id,
+                  requestRuntimeRestart: true,
+                })
+                .pipe(
+                  Effect.raceFirst(Deferred.await(owner.terminal)),
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterruptsOnly(cause)
+                      ? Effect.interrupt
+                      : Effect.gen(function* () {
+                          owner.cleanupState = "unresponsive";
+                          yield* Effect.logWarning(
+                            "orchestration-v2.revoked-start-interrupt-failed",
+                            {
+                              ...key,
+                              cause,
+                            },
+                          );
+                        }),
+                  ),
+                );
+            } else {
+              if (owner.cleanupState !== "unresponsive") owner.cleanupState = "superseded";
+              yield* Effect.logWarning("orchestration-v2.revoked-start-binding-superseded", key);
+            }
+          }
+          yield* Deferred.await(owner.nativeTerminal).pipe(
+            Effect.raceFirst(Deferred.await(owner.terminal)),
+          );
+          owner.fiber?.interruptUnsafe();
+          yield* owner.stopConsumer ?? Effect.void;
+          yield* releaseOwner(owner);
+        });
+        // The caller runs this receipt after releasing the command lock; cancellation cannot discard it.
+        const startCleanup = yield* Effect.cached(
+          Effect.uninterruptibleMask((restore) =>
+            Effect.gen(function* () {
+              const fiber = yield* restore(cleanup).pipe(Effect.forkIn(scope));
+              yield* restore(
+                Fiber.await(fiber).pipe(
+                  Effect.timeoutOption("15 seconds"),
+                  Effect.tap((result) => {
+                    if (Option.isSome(result)) return Effect.void;
+                    if (owner.cleanupState === "pending") owner.cleanupState = "unresponsive";
+                    return Effect.logWarning(
+                      "orchestration-v2.revoked-start-cleanup-unresponsive",
+                      key,
+                    );
+                  }),
+                ),
+              ).pipe(Effect.forkIn(scope));
+              return fiber;
+            }),
+          ),
+        );
+        owner.cleanup = startCleanup.pipe(Effect.flatMap(Fiber.join));
+        return owner.cleanup;
       }),
       interruptOwnedStart: Effect.fn("RunExecutionService.interruptOwnedStart")(function* (key) {
         const wait = Effect.gen(function* () {
@@ -1012,6 +1153,10 @@ export const layer: Layer.Layer<
             Effect.raceFirst(Deferred.await(owner.terminal).pipe(Effect.as(undefined))),
           );
           if (accepted === undefined) return;
+          if (owner.cleanupState !== undefined) {
+            yield* Deferred.await(owner.terminal);
+            return;
+          }
           const current = yield* projectionStore.getThreadRecords(key.threadId, [
             "runs",
             "providerThreads",
@@ -1076,6 +1221,7 @@ export const layer: Layer.Layer<
             attemptId: input.attemptId,
           }),
         );
+        if (existingOwner?.revoked) return;
         if (existingOwner?.fiber !== undefined) return yield* Fiber.join(existingOwner.fiber);
         const rootTurnOrigin: ProviderUsageAnalytics.ProviderTurnOrigin = {
           createdBy: input.message.createdBy,
@@ -1237,6 +1383,7 @@ export const layer: Layer.Layer<
           input,
           accepted: yield* Deferred.make<OrchestrationV2ProviderTurn>(),
           terminal: yield* Deferred.make<void>(),
+          nativeTerminal: yield* Deferred.make<void>(),
           startPending: true,
           revoked: false,
         };
@@ -1519,6 +1666,7 @@ export const layer: Layer.Layer<
           return childSubagents.size === 0;
         });
         const shouldStopProviderEventIngestion = Effect.gen(function* () {
+          if (owner.cleanupState !== undefined) return yield* Deferred.isDone(owner.nativeTerminal);
           if (!(yield* agentTurnsSettled)) {
             return false;
           }
@@ -1759,6 +1907,47 @@ export const layer: Layer.Layer<
         const rawProviderEvents = eventSubscription.events.pipe(
           Stream.tap((event) =>
             Effect.gen(function* () {
+              if (event.driver !== input.session.driver) return;
+              if (
+                event.type === "provider_turn.updated" &&
+                event.providerTurn.providerThreadId === input.providerThread.id &&
+                event.providerTurn.runAttemptId === input.attemptId &&
+                event.providerTurn.nodeId === input.rootNode.id &&
+                (event.providerTurn.nativeTurnRef === null ||
+                  event.providerTurn.nativeTurnRef.driver === input.session.driver)
+              ) {
+                owner.turn = event.providerTurn;
+                yield* Deferred.succeed(owner.accepted, event.providerTurn);
+              }
+              if (
+                event.type === "turn.terminal" &&
+                event.providerThreadId === input.providerThread.id &&
+                event.providerTurnId === owner.turn?.id
+              ) {
+                const reused =
+                  owner.cleanupState === undefined
+                    ? false
+                    : yield* projectionStore
+                        .getThreadRecords(input.run.threadId, ["providerTurns"])
+                        .pipe(
+                          Effect.map(({ providerTurns }) =>
+                            providerTurns.some(
+                              (turn) =>
+                                turn.id === event.providerTurnId &&
+                                turn.runAttemptId !== input.attemptId,
+                            ),
+                          ),
+                          Effect.catchCause((cause) =>
+                            Cause.hasInterruptsOnly(cause)
+                              ? Effect.interrupt
+                              : Effect.logWarning(
+                                  "orchestration-v2.revoked-start-terminal-unverified",
+                                  { runId: input.run.id, attemptId: input.attemptId, cause },
+                                ).pipe(Effect.as(true)),
+                          ),
+                        );
+                if (!reused) yield* Deferred.succeed(owner.nativeTerminal, undefined);
+              }
               if (
                 event.type === "provider_session.updated" &&
                 event.providerSession.id === input.providerSessionId &&
@@ -1776,6 +1965,7 @@ export const layer: Layer.Layer<
             rawProviderEvents,
             (event) =>
               Effect.gen(function* () {
+                if (owner.cleanupState !== undefined) return;
                 yield* ingestEvent(yield* routeEvent(event));
               }),
             Effect.gen(function* () {
@@ -1788,6 +1978,7 @@ export const layer: Layer.Layer<
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
             Effect.flatMap(() =>
               Effect.gen(function* () {
+                if (owner.cleanupState !== undefined) return;
                 const terminal = yield* Ref.get(terminalEvent);
                 if (terminal === null) {
                   // A session release interrupts or fails the stream; a clean
@@ -1810,6 +2001,7 @@ export const layer: Layer.Layer<
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) =>
                 Effect.gen(function* () {
+                  if (owner.cleanupState !== undefined) return;
                   const completedAt = yield* DateTime.now;
                   yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
                     runId: input.run.id,
@@ -1925,6 +2117,7 @@ export const layer: Layer.Layer<
             Effect.ensuring(eventSubscription.close),
             Effect.forkIn(scope),
           );
+        owner.stopConsumer = Fiber.interrupt(providerEventFiber).pipe(Effect.asVoid);
 
         // A provider turn is a sign that the session is still alive. Keep
         // its already-issued MCP credential valid even when the agent goes
@@ -2009,7 +2202,11 @@ export const layer: Layer.Layer<
             yield* releaseOwner(owner);
           },
         );
-        const nativeStart = Effect.suspend(() => (owner.revoked ? Effect.void : startTurn)).pipe(
+        const nativeStart = Effect.suspend(() =>
+          owner.revoked
+            ? Fiber.interrupt(providerEventFiber).pipe(Effect.andThen(releaseOwner(owner)))
+            : startTurn,
+        ).pipe(
           // Wait for acceptance so abandoned startup cannot leave a refresher
           // on the already-detached ingestion fiber.
           Effect.tap(() =>
@@ -2021,7 +2218,6 @@ export const layer: Layer.Layer<
           Effect.catchCause((cause) =>
             Effect.gen(function* () {
               if (
-                !owner.revoked &&
                 !(yield* Deferred.isDone(owner.accepted)) &&
                 refusedBeforePrompt(Cause.squash(cause))
               )
@@ -2055,45 +2251,58 @@ export const layer: Layer.Layer<
                 }),
               );
             }
-            const fiber = yield* restore(
-              threadDispatch.withLock(
-                input.run.threadId,
-                Effect.gen(function* () {
-                  const existing = owners.get(
-                    ownerId({
-                      threadId: input.run.threadId,
-                      runId: input.run.id,
-                      attemptId: input.attemptId,
-                    }),
-                  );
-                  if (existing !== undefined) {
-                    reused = true;
-                    return existing.fiber;
-                  }
-                  if (
-                    owner.revoked ||
-                    (input.shouldStartProviderTurn !== undefined &&
-                      !(yield* input.shouldStartProviderTurn()))
-                  )
-                    return undefined;
-                  return yield* Effect.uninterruptibleMask((restoreStart) =>
-                    Effect.gen(function* () {
-                      owners.set(
-                        ownerId({
-                          threadId: input.run.threadId,
-                          runId: input.run.id,
-                          attemptId: input.attemptId,
-                        }),
-                        owner,
-                      );
-                      claimed = true;
-                      owner.fiber = yield* restoreStart(nativeStart).pipe(Effect.forkIn(scope));
-                      return owner.fiber;
-                    }),
-                  );
-                }),
-              ),
-            );
+            let fiber: StartOwner["fiber"];
+            while (true) {
+              const claim = yield* restore(
+                threadDispatch.withLock(
+                  input.run.threadId,
+                  Effect.gen(function* () {
+                    const existing = owners.get(
+                      ownerId({
+                        threadId: input.run.threadId,
+                        runId: input.run.id,
+                        attemptId: input.attemptId,
+                      }),
+                    );
+                    if (existing !== undefined) {
+                      reused = true;
+                      return { fiber: existing.revoked ? undefined : existing.fiber };
+                    }
+                    const blocking = [...owners.values()].find(
+                      (other) => other.revoked && sameNativeStartBinding(other.input, input),
+                    );
+                    if (blocking !== undefined) return { wait: blocking.terminal };
+                    if (
+                      owner.revoked ||
+                      (input.shouldStartProviderTurn !== undefined &&
+                        !(yield* input.shouldStartProviderTurn()))
+                    )
+                      return { fiber: undefined };
+                    return yield* Effect.uninterruptibleMask((restoreStart) =>
+                      Effect.gen(function* () {
+                        owners.set(
+                          ownerId({
+                            threadId: input.run.threadId,
+                            runId: input.run.id,
+                            attemptId: input.attemptId,
+                          }),
+                          owner,
+                        );
+                        claimed = true;
+                        owner.fiber = yield* restoreStart(nativeStart).pipe(Effect.forkIn(scope));
+                        return { fiber: owner.fiber };
+                      }),
+                    );
+                  }),
+                ),
+              );
+              if ("wait" in claim) {
+                yield* restore(Deferred.await(claim.wait));
+                continue;
+              }
+              fiber = claim.fiber;
+              break;
+            }
             if (fiber !== undefined) yield* restore(Fiber.join(fiber));
           }),
         ).pipe(

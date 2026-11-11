@@ -1191,7 +1191,7 @@ const make = Effect.gen(function* () {
     function* (input) {
       // Under the thread lock no new run can be created between the check and the kill. The
       // settlement below dispatches, which takes that lock itself, so it runs after release.
-      const { records, target, killed } = yield* threadDispatch.withLock(
+      const { records, target, killed, cleanup } = yield* threadDispatch.withLock(
         input.threadId,
         Effect.gen(function* () {
           const records = yield* orchestrator.getThreadRecords(input.threadId, [
@@ -1216,17 +1216,21 @@ const make = Effect.gen(function* () {
               reason: "superseded",
             });
           }
-          if (target?.activeAttemptId != null)
-            yield* runExecution.revokeOwnedStart({
-              threadId: input.threadId,
-              runId: target.id,
-              attemptId: target.activeAttemptId,
-            });
+          const cleanup =
+            target?.activeAttemptId == null
+              ? undefined
+              : yield* runExecution.revokeOwnedStart({
+                  threadId: input.threadId,
+                  runId: target.id,
+                  attemptId: target.activeAttemptId,
+                });
           // Shared scopes are never tracked per thread, so this only kills the thread's own agent.
           const killed = yield* agentScope.kill(input.threadId);
-          return { records, target, killed };
+          return { records, target, killed, cleanup };
         }),
       );
+      const cleanupFiber =
+        cleanup === undefined ? undefined : yield* cleanup.pipe(Effect.forkIn(layerScope));
       const sessionIds = new Set(
         records.providerThreads.flatMap((providerThread) =>
           providerThread.appThreadId === input.threadId && providerThread.providerSessionId !== null
@@ -1306,7 +1310,8 @@ const make = Effect.gen(function* () {
         for (const threadId of others) sharedWith.add(threadId);
         if (others.length > 0) {
           shared = true;
-          yield* detach(providerSessionId);
+          // Pending native cleanup retains its attachment; normal idle unloading follows termination.
+          if (cleanupFiber === undefined) yield* detach(providerSessionId);
           continue;
         }
         // The session manager re-checks atomically with turn starts and keeps a session a
@@ -1331,7 +1336,7 @@ const make = Effect.gen(function* () {
           releasing = true;
         } else if (!released.value) {
           shared = true;
-          yield* detach(release.providerSessionId);
+          if (cleanupFiber === undefined) yield* detach(release.providerSessionId);
         }
       }
       return {

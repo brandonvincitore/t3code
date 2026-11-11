@@ -47,6 +47,10 @@ it.effect.each([
   "succeeded",
   "pending-ingestion",
   "accepted-start-error",
+  "goal-activation-error",
+  "identity-force-shared",
+  "identity-force-shared-replaced",
+  "identity-force-shared-unsent",
   "queued-promotion",
   "before-ownership",
   "superseded-native",
@@ -81,6 +85,7 @@ it.effect.each([
       const releaseSnapshot = yield* Deferred.make<void>();
       const ingestionHeld = yield* Deferred.make<void>();
       const releaseIngestion = yield* Deferred.make<void>();
+      const cleanupGuardRead = yield* Deferred.make<void>();
       const interruptCalled = yield* Deferred.make<void>();
       const interruptCancelled = yield* Deferred.make<void>();
       const releaseTerminal = yield* Deferred.make<void>();
@@ -97,17 +102,26 @@ it.effect.each([
       const modelSelection = { instanceId, model: "synthetic" };
       const threadId = ThreadId.make(`thread:start-stop:${scenario}`);
       const interrupts: ProviderTurnId[] = [];
+      const siblingId = ThreadId.make(`${threadId}:sibling`);
+      let sibling: OrchestrationV2ProviderTurn | undefined;
+      let closed = false;
+      let opens = 0;
+      const shared = scenario.startsWith("identity-force-shared");
+      const unsent = scenario === "identity-force-shared-unsent";
+      const replaced = scenario === "identity-force-shared-replaced";
       const milestones: string[] = [];
       let active: OrchestrationV2ProviderTurn | undefined;
       let starts = 0;
+      let refused = false;
       let enterCommandLock: (operation: string) => Effect.Effect<void> = () => Effect.void;
       const startPending =
         scenario !== "succeeded" &&
         scenario !== "queued-promotion" &&
         scenario !== "accepted-start-error" &&
+        scenario !== "goal-activation-error" &&
         scenario !== "superseded-native";
       const identityDelayed =
-        scenario === "identity-timeout" || scenario === "identity-timeout-force";
+        scenario === "identity-timeout" || scenario === "identity-timeout-force" || shared;
       const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
         instanceId,
         driver,
@@ -115,11 +129,14 @@ it.effect.each([
         planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
         openSession: (input) =>
           Effect.gen(function* () {
+            opens++;
             yield* Effect.addFinalizer(() =>
               scenario === "failed-scope-close"
                 ? Effect.die(new Error("synthetic scope close failure"))
                 : Effect.sync(() => {
                     active = undefined;
+                    sibling = undefined;
+                    closed = true;
                   }),
             );
             if (scenario === "released-during-subscribe")
@@ -133,6 +150,29 @@ it.effect.each([
               turn,
             ) =>
               Effect.gen(function* () {
+                if (turn.threadId === siblingId) {
+                  sibling = {
+                    id: ProviderTurnId.make(`native-turn:${turn.attemptId}`),
+                    providerThreadId: turn.providerThread.id,
+                    nodeId: turn.rootNodeId,
+                    runAttemptId: turn.attemptId,
+                    nativeTurnRef: {
+                      driver,
+                      nativeId: `native:${turn.attemptId}`,
+                      strength: "strong",
+                    },
+                    ordinal: turn.providerTurnOrdinal,
+                    status: "running",
+                    startedAt: now,
+                    completedAt: null,
+                  };
+                  yield* Queue.offer(events, {
+                    type: "provider_turn.updated",
+                    driver,
+                    providerTurn: sibling,
+                  });
+                  return;
+                }
                 if (
                   scenario === "prompt-refusal" ||
                   scenario === "attachment-refusal" ||
@@ -164,6 +204,19 @@ it.effect.each([
                 yield* enterCommandLock(`start-${starts}`);
                 yield* Deferred.succeed(entered, undefined);
                 yield* Deferred.await(accept);
+                if (unsent && !refused) {
+                  refused = true;
+                  return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver,
+                    threadId: turn.threadId,
+                    providerThreadId: turn.providerThread.id,
+                    runId: turn.runId,
+                    cause: new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                      driver,
+                      cause: "synthetic pre-prompt refusal after revocation",
+                    }),
+                  });
+                }
                 assert.isUndefined(active, "native turns must never overlap");
                 starts++;
                 active = {
@@ -183,7 +236,7 @@ it.effect.each([
                 };
                 milestones.push(`accepted:${active.id}`);
                 yield* Deferred.succeed(nativeAccepted, undefined);
-                if (identityDelayed) yield* Deferred.await(releaseIdentity);
+                if (identityDelayed && starts === 1) yield* Deferred.await(releaseIdentity);
                 // Another attempt and a sibling on this same session cannot supply our identity.
                 if (starts === 1) {
                   yield* Queue.offer(events, {
@@ -211,6 +264,21 @@ it.effect.each([
                   driver,
                   providerTurn: active,
                 });
+                if (scenario === "goal-activation-error" && starts === 1) {
+                  yield* Deferred.await(ingestionHeld);
+                  return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver,
+                    threadId: turn.threadId,
+                    providerThreadId: turn.providerThread.id,
+                    runId: turn.runId,
+                    cause: {
+                      _tag: "CodexAppServerRequestError",
+                      method: "thread/goal/set",
+                      code: -32600,
+                      errorMessage: "synthetic post-start activation rejection",
+                    },
+                  });
+                }
                 if (scenario === "accepted-start-error" && starts === 1)
                   return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
                     driver,
@@ -246,7 +314,11 @@ it.effect.each([
                   providerSessionId: input.providerSessionId,
                   appThreadId: threadId,
                   ownerNodeId: null,
-                  nativeThreadRef: { driver, nativeId: "synthetic-thread", strength: "strong" },
+                  nativeThreadRef: {
+                    driver,
+                    nativeId: shared ? `synthetic:${threadId}` : "synthetic-thread",
+                    strength: "strong",
+                  },
                   nativeConversationHeadRef: null,
                   status: "idle",
                   firstRunOrdinal: null,
@@ -340,6 +412,24 @@ it.effect.each([
         const execution = yield* RunExecutionService.RunExecutionServiceV2;
         const threads = yield* ThreadManagementService.ThreadManagementService;
         const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const originalRecords = store.getThreadRecords;
+        using _cleanupGuard = replaced
+          ? vi
+              .spyOn(store, "getThreadRecords")
+              .mockImplementation((...args) =>
+                originalRecords(...args).pipe(
+                  Effect.tap(() =>
+                    replaced &&
+                    args[0] === threadId &&
+                    args[1].length === 2 &&
+                    args[1].includes("providerThreads") &&
+                    args[1].includes("providerTurns")
+                      ? Deferred.succeed(cleanupGuardRead, undefined)
+                      : Effect.void,
+                  ),
+                ),
+              )
+          : undefined;
         yield* orchestrator.dispatch({
           type: "thread.create",
           commandId: CommandId.make("create"),
@@ -407,9 +497,33 @@ it.effect.each([
           }
           if (scenario !== "before-ownership") {
             staleInput = input;
-            return originalStart(input).pipe(
-              Effect.onInterrupt(() => Deferred.succeed(callerCancelled, undefined)),
-            );
+            return originalStart(
+              scenario === "goal-activation-error"
+                ? {
+                    ...input,
+                    session: {
+                      ...input.session,
+                      subscribeEvents: input.session.subscribeEvents!.pipe(
+                        Effect.map((subscription) => ({
+                          ...subscription,
+                          events: subscription.events.pipe(
+                            Stream.tap((event) =>
+                              event.type === "provider_turn.updated" &&
+                              event.providerTurn.runAttemptId === input.attemptId &&
+                              event.providerTurn.status === "running" &&
+                              starts === 1
+                                ? Deferred.succeed(ingestionHeld, undefined).pipe(
+                                    Effect.andThen(Deferred.await(releaseIngestion)),
+                                  )
+                                : Effect.void,
+                            ),
+                          ),
+                        })),
+                      ),
+                    },
+                  }
+                : input,
+            ).pipe(Effect.onInterrupt(() => Deferred.succeed(callerCancelled, undefined)));
           }
           staleInput = input;
           return Deferred.succeed(beforeOwnership, undefined).pipe(Effect.andThen(Effect.never));
@@ -494,6 +608,194 @@ it.effect.each([
         if (scenario === "queued-promotion") yield* send("promoted", true);
         const initial = yield* orchestrator.getThreadProjection(threadId);
         const run = initial.runs.find((run) => run.status === "running")!;
+        if (scenario === "goal-activation-error") {
+          yield* Deferred.succeed(accept, undefined);
+          yield* Deferred.await(nativeAccepted);
+          yield* Deferred.await(ingestionHeld);
+          yield* Fiber.join(startup);
+          assert.isTrue(
+            Option.isSome(
+              yield* execution.getStartOwnership({
+                threadId,
+                runId: run.id,
+                attemptId: run.activeAttemptId!,
+              }),
+            ),
+            "post-start goal rejection must retain exact native ownership",
+          );
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).runs[0]?.status,
+            "running",
+          );
+          yield* Deferred.succeed(releaseIngestion, undefined);
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("goal-stop"),
+            threadId,
+          });
+          yield* Deferred.succeed(releaseTerminal, undefined);
+          yield* worker.drain();
+          assert.deepEqual(interrupts, [ProviderTurnId.make(`native-turn:${run.activeAttemptId}`)]);
+          assert.isUndefined(active);
+          yield* send("goal-next");
+          yield* worker.drain();
+          assert.equal(starts, 2);
+          assert.isDefined(active);
+          return;
+        }
+        if (shared) {
+          const originalInput = staleInput!;
+          if (!unsent) {
+            yield* Deferred.succeed(accept, undefined);
+            yield* Deferred.await(nativeAccepted);
+          }
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("create-sibling"),
+            threadId: siblingId,
+            projectId: ProjectId.make("project:start-stop"),
+            title: "working sibling",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("sibling-start"),
+            threadId: siblingId,
+            messageId: MessageId.make("sibling-start"),
+            text: "sibling",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain(1);
+          const b = (yield* orchestrator.getThreadProjection(siblingId)).runs[0]!;
+          assert.isDefined(sibling);
+          assert.equal(opens, 1, "both owned starts use the actual shared runtime");
+          const outcome = yield* threads.forceStopThread({ threadId, runId: run.id });
+          assert.equal(outcome.outcome, "shared");
+          assert.deepEqual(outcome.sharedWithThreadIds, [siblingId]);
+          assert.isFalse(closed);
+          assert.deepEqual(interrupts, []);
+          assert.isTrue(
+            Option.isSome(
+              yield* execution.getStartOwnership({
+                threadId,
+                runId: run.id,
+                attemptId: run.activeAttemptId!,
+              }),
+            ),
+            "revocation must retain pending native cleanup",
+          );
+          yield* threads.forceStopThread({ threadId, runId: run.id });
+          const cleanup = yield* execution.revokeOwnedStart({
+            threadId,
+            runId: run.id,
+            attemptId: run.activeAttemptId!,
+          });
+          assert.isDefined(cleanup);
+          yield* originalStart(originalInput);
+          assert.equal(
+            starts,
+            unsent ? 0 : 1,
+            "revocation removes the old attempt's start authority",
+          );
+          yield* TestClock.adjust("15 seconds");
+          const outstanding = Option.getOrThrow(
+            yield* execution.getStartOwnership({
+              threadId,
+              runId: run.id,
+              attemptId: run.activeAttemptId!,
+            }),
+          );
+          assert.isTrue(outstanding.revoked);
+          assert.equal(outstanding.cleanup, "unresponsive");
+          if (replaced) {
+            const binding = initial.providerThreads.find(
+              (thread) => thread.id === run.providerThreadId,
+            )!;
+            yield* sink.write({
+              events: [
+                {
+                  id: EventId.make("replace-revoked-binding"),
+                  type: "provider-thread.updated",
+                  threadId,
+                  occurredAt: yield* DateTime.now,
+                  payload: {
+                    ...binding,
+                    nativeThreadRef: { driver, nativeId: "replacement-native", strength: "strong" },
+                  },
+                },
+              ],
+            });
+          }
+          yield* Deferred.succeed(accept, undefined);
+          yield* Deferred.succeed(releaseTerminal, undefined);
+          yield* Deferred.succeed(releaseStart, undefined);
+          yield* Deferred.succeed(releaseIdentity, undefined);
+          if (replaced) {
+            yield* Deferred.await(cleanupGuardRead);
+            const old = active!;
+            active = undefined;
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: old.providerThreadId,
+              providerTurnId: old.id,
+              runOrdinal: 1,
+              status: "completed",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+          } else if (!unsent) yield* Deferred.await(interruptCalled);
+          yield* cleanup!;
+          yield* Fiber.join(startup);
+          const expectedInterrupts =
+            unsent || replaced ? [] : [ProviderTurnId.make(`native-turn:${run.activeAttemptId}`)];
+          assert.deepEqual(interrupts, expectedInterrupts);
+          assert.isUndefined(active);
+          assert.isDefined(sibling);
+          assert.isFalse(closed);
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(siblingId)).runs[0]?.status,
+            "running",
+          );
+          const siblingDone = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === b.id &&
+                event.payload.status === "waiting",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* Queue.offer(events, {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: sibling!.providerThreadId,
+            providerTurnId: sibling!.id,
+            runOrdinal: 1,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          sibling = undefined;
+          yield* Fiber.join(siblingDone);
+          yield* send("shared-next");
+          yield* worker.drain();
+          assert.equal(starts, unsent ? 1 : 2);
+          assert.isDefined(active);
+          assert.deepEqual(interrupts, expectedInterrupts);
+          return;
+        }
         if (scenario === "superseded-native") {
           const ingested = yield* orchestrator.streamDomainEvents.pipe(
             Stream.filter(
@@ -599,21 +901,31 @@ it.effect.each([
               ),
             );
             assert.isFalse(yield* Deferred.isDone(callerCancelled));
-            yield* execution.revokeOwnedStart({
+            const cleanup = yield* execution.revokeOwnedStart({
               threadId,
               runId: run.id,
               attemptId: run.activeAttemptId!,
             });
-            yield* Fiber.join(waiter);
-            yield* Fiber.join(startup);
+            yield* cleanup!.pipe(Effect.forkScoped);
+            yield* TestClock.adjust("15 seconds");
             assert.isTrue(
-              Option.isNone(
+              Option.isSome(
                 yield* execution.getStartOwnership({
                   threadId,
                   runId: run.id,
                   attemptId: run.activeAttemptId!,
                 }),
               ),
+            );
+            assert.equal(
+              Option.getOrThrow(
+                yield* execution.getStartOwnership({
+                  threadId,
+                  runId: run.id,
+                  attemptId: run.activeAttemptId!,
+                }),
+              ).cleanup,
+              "unresponsive",
             );
             assert.equal(starts, 0);
             return;

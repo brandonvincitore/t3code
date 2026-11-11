@@ -42,7 +42,9 @@ import * as RunExecutionService from "./RunExecutionService.ts";
 
 const layerThreadManagement = ThreadManagementService.layer.pipe(
   Layer.provide(
-    Layer.mock(RunExecutionService.RunExecutionServiceV2)({ revokeOwnedStart: () => Effect.void }),
+    Layer.mock(RunExecutionService.RunExecutionServiceV2)({
+      revokeOwnedStart: () => Effect.undefined,
+    }),
   ),
 );
 
