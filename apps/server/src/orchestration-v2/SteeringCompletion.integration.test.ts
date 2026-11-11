@@ -10,6 +10,7 @@ import {
   ProviderInstanceId,
   ProviderThreadId,
   ProviderTurnId,
+  ScheduledTaskId,
   ThreadId,
   TurnItemId,
   type ModelSelection,
@@ -1602,16 +1603,31 @@ it.effect.each([
     ),
 );
 
-it.effect.each([
-  { source: "web", delivery: "auto", held: true },
-  { source: "web", delivery: "restart", held: true },
-  { source: "mobile", delivery: "restart", held: true },
-  { source: "mcp", delivery: "restart", held: true },
-  { source: "server", delivery: "restart", held: true },
-  { source: "mcp", delivery: "restart", held: false },
-] as const)(
-  "queues a $source $delivery after Stop (held queue: $held)",
-  ({ source, delivery, held }) =>
+it.effect.each(
+  (
+    [
+      { source: "web", delivery: "auto", held: true },
+      { source: "web", delivery: "restart", held: true },
+      { source: "mobile", delivery: "restart", held: true },
+      { source: "mcp", delivery: "restart", held: true },
+      { source: "server", delivery: "restart", held: true },
+      { source: "mcp", delivery: "restart", held: false },
+      { source: "provider", delivery: "notification", held: true },
+      { source: "mcp", delivery: "restart", held: true, settled: true },
+      { source: "server", delivery: "restart", held: true, settled: true },
+      { source: "mcp", delivery: "auto", held: true, settled: true },
+      { source: "server", delivery: "auto", held: true, settled: true },
+      { source: "provider", delivery: "auto", held: true, settled: true },
+      { source: "provider", delivery: "notification", held: true, settled: true },
+      { source: "server", delivery: "notification", held: true, settled: true },
+      { source: "web", delivery: "auto", held: true, settled: true, scheduled: true },
+      { source: "web", delivery: "restart", held: true, settled: true },
+      { source: "mobile", delivery: "restart", held: true, settled: true },
+    ] as const
+  ).map((scenario) => ({ settled: false, scheduled: false, ...scenario })),
+)(
+  "dispatches $source $delivery after Stop (held queue: $held, settled: $settled, scheduled: $scheduled)",
+  ({ source, delivery, held, settled, scheduled }) =>
     Effect.scoped(
       Effect.gen(function* () {
         const interruptReached = yield* Deferred.make<void>();
@@ -1628,7 +1644,7 @@ it.effect.each([
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
           const threadId = yield* startFirstTurn;
-          const send = (id: string, mode: "queue" | "auto" | "restart") =>
+          const send = (id: string, mode: "queue" | "auto" | "restart" | "notification") =>
             orchestrator.dispatch({
               type: "message.dispatch",
               commandId: CommandId.make(id),
@@ -1637,7 +1653,7 @@ it.effect.each([
               text: id,
               attachments: [],
               modelSelection: runSelection,
-              ...(mode === "queue"
+              ...(mode === "queue" || mode === "notification"
                 ? { dispatchMode: { type: "queue_after_active" } }
                 : mode === "restart"
                   ? { dispatchMode: { type: "restart_active", targetRunId: started[0]!.runId } }
@@ -1645,6 +1661,18 @@ it.effect.each([
               createdBy:
                 mode === "queue" || source === "web" || source === "mobile" ? "user" : "agent",
               creationSource: mode === "queue" ? "web" : source,
+              ...(mode === "notification"
+                ? {
+                    notification: {
+                      source: { kind: "background_task" },
+                      outcome: "updated",
+                      summary: "Background activity updated",
+                    },
+                  }
+                : {}),
+              ...(scheduled && mode !== "queue"
+                ? { scheduledTaskId: ScheduledTaskId.make("scheduled") }
+                : {}),
             });
           if (held) yield* send("queued", "queue");
           yield* orchestrator.dispatch({
@@ -1668,6 +1696,151 @@ it.effect.each([
             })
             .pipe(Effect.flip);
           assert.include(String(steerError.cause), "is stopping and cannot be steered");
+          if (settled) {
+            const stopped = yield* orchestrator.streamDomainEvents.pipe(
+              Stream.filter(
+                (event) =>
+                  event.type === "run.updated" &&
+                  event.payload.id === started[0]!.runId &&
+                  event.payload.status === "interrupted" &&
+                  event.payload.checkpointId !== null,
+              ),
+              Stream.take(1),
+              Stream.runDrain,
+              Effect.forkScoped,
+            );
+            const draining = yield* worker.drain().pipe(Effect.forkScoped);
+            yield* Deferred.await(interruptReached);
+            yield* Deferred.succeed(releaseInterrupt, undefined);
+            yield* Fiber.join(draining);
+            yield* Fiber.join(stopped);
+            const before = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(before.runs[0]?.status, "interrupted");
+            assert.equal(before.attempts[0]?.status, "interrupted");
+            assert.equal(before.providerTurns[0]?.status, "interrupted");
+            const turn = before.providerTurns[0]!;
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: turn.providerThreadId,
+              providerTurnId: turn.id,
+              runOrdinal: started[0]!.runOrdinal,
+              status: "interrupted",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            yield* send("sent", delivery);
+            yield* send("sent", delivery);
+            yield* worker.drain();
+            yield* orchestrator.resumeQueuedRuns;
+            yield* worker.drain();
+            const after = yield* orchestrator.getThreadProjection(threadId);
+            const sent = after.runs.find((run) => run.userMessageId === "message:sent")!;
+            const queued = after.runs.find((run) => run.userMessageId === "message:queued")!;
+            const client = (source === "web" || source === "mobile") && !scheduled;
+            const buffered = source === "provider" && delivery === "notification";
+            assert.equal(sent.status, client || buffered ? "running" : "queued");
+            assert.equal(queued.queueHeld === true, !client);
+            assert.equal(sent.queueHeld === true, !client && !buffered);
+            assert.deepEqual(
+              started.map((turn) => turn.message.text),
+              client || buffered ? ["first", "sent"] : ["first"],
+            );
+            if (!client && !buffered) {
+              assert.deepEqual(
+                after.runs
+                  .filter((run) => run.status === "queued")
+                  .toSorted((left, right) => left.queuePosition! - right.queuePosition!)
+                  .map((run) => run.userMessageId),
+                ["message:queued", "message:sent"],
+              );
+              const next = (runId: typeof queued.id) =>
+                orchestrator.dispatch({
+                  type: "queued-run.start",
+                  commandId: CommandId.make(`next:${runId}`),
+                  threadId,
+                  runId,
+                });
+              const running = yield* orchestrator.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.type === "provider-turn.updated" &&
+                    event.payload.runAttemptId === queued.activeAttemptId &&
+                    event.payload.status === "running",
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+              yield* next(queued.id);
+              yield* next(queued.id);
+              yield* worker.drain();
+              yield* Fiber.join(running);
+              const sentStarting = yield* orchestrator.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.type === "run.updated" &&
+                    event.payload.id === sent.id &&
+                    event.payload.status === "starting",
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+              const waiting = yield* orchestrator.streamDomainEvents.pipe(
+                Stream.filter(
+                  (event) =>
+                    event.type === "run.updated" &&
+                    event.payload.id === queued.id &&
+                    event.payload.status === "waiting",
+                ),
+                Stream.take(1),
+                Stream.runDrain,
+                Effect.forkScoped,
+              );
+              const queuedTurn = (yield* orchestrator.getThreadProjection(
+                threadId,
+              )).providerTurns.find((turn) => turn.runAttemptId === queued.activeAttemptId)!;
+              yield* Queue.offer(events, {
+                type: "provider_turn.updated",
+                driver,
+                providerTurn: {
+                  ...queuedTurn,
+                  status: "completed",
+                  completedAt: yield* DateTime.now,
+                },
+              });
+              yield* Queue.offer(events, {
+                type: "turn.terminal",
+                driver,
+                providerThreadId: queuedTurn.providerThreadId,
+                providerTurnId: queuedTurn.id,
+                runOrdinal: started[1]!.runOrdinal,
+                status: "completed",
+                failure: null,
+                threadDisposition: "reusable",
+              });
+              yield* Fiber.join(waiting);
+              yield* worker.drain();
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(threadId)).runs.find(
+                  (run) => run.id === queued.id,
+                )?.status,
+                "completed",
+              );
+              yield* Fiber.join(sentStarting);
+              yield* worker.drain();
+              yield* send("sent", delivery);
+              yield* orchestrator.resumeQueuedRuns;
+              yield* worker.drain();
+              assert.deepEqual(
+                started.map((turn) => turn.message.text),
+                ["first", "queued", "sent"],
+              );
+            }
+            assert.deepEqual(steered, []);
+            return;
+          }
           yield* send("sent", delivery);
           // Once the stop settles, the run-update reactor promotes the queue on
           // its own fiber, so read the queue while the provider is still stopping.
