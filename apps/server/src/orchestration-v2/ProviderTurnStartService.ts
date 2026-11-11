@@ -1727,7 +1727,6 @@ export const layer: Layer.Layer<
                 ),
             }),
           );
-          if (!(yield* isCurrentAttemptInStatus("running"))) return;
           const start = compact ? session.compactThread! : session.startTurn;
           // Like history, the side chat context waits for a turn that sends a prompt.
           const sideChatContext =
@@ -1738,12 +1737,19 @@ export const layer: Layer.Layer<
             .filter((part) => part !== "")
             .join("\n\n");
           const { restartContinuationOfRunId: _resumedRunId, ...promptedInput } = turnInput;
-          yield* start({
-            ...(noteContinuation ? promptedInput : turnInput),
-            message: {
-              ...turnInput.message,
-              text: goalCommand ? userText : withInlineContext(context, userText),
-            },
+          yield* Effect.gen(function* () {
+            if (!(yield* isCurrentAttemptInStatus("running")))
+              return yield* new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                driver: session.driver,
+                cause: "Run attempt is no longer current before native start.",
+              });
+            yield* start({
+              ...(noteContinuation ? promptedInput : turnInput),
+              message: {
+                ...turnInput.message,
+                text: goalCommand ? userText : withInlineContext(context, userText),
+              },
+            });
           }).pipe(
             // Clear pending handoff markers for refused prompts so the next turn retains the native session.
             Effect.tapError((error) =>

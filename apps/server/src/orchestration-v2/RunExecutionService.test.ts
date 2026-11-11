@@ -62,11 +62,17 @@ const layerRunExecution = RunExecutionService.layer.pipe(
     Layer.merge(ThreadCommandExecutor.layer, Layer.mock(ProjectionStore.ProjectionStoreV2)({})),
   ),
 );
-const mockEventSink = (implementation: Partial<EventSink.EventSinkV2["Service"]>) =>
+const mockEventSink = (
+  implementation: Partial<EventSink.EventSinkV2["Service"]>,
+  afterEvent: (event: ProviderAdapter.ProviderAdapterV2Event) => Effect.Effect<void> = () =>
+    Effect.void,
+) =>
   Layer.mock(EventSink.EventSinkV2)({
     consumeProviderEvents: (source, process, after) =>
       source.pipe(
-        Stream.mapEffect((event) => process(event).pipe(Effect.andThen(after))),
+        Stream.mapEffect((event) =>
+          process(event).pipe(Effect.andThen(afterEvent(event)), Effect.andThen(after)),
+        ),
         Stream.takeUntil(Boolean),
         Stream.runDrain,
       ),
@@ -3718,6 +3724,11 @@ function runBackgroundItemScenario(
 ) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(key);
+    const events = makeEvents(ids);
+    const consumedMarker =
+      options?.onEventsConsumed === undefined && options?.afterEvents === undefined
+        ? undefined
+        : { ...events.at(-1)! };
     const providerInstanceId = ProviderInstanceId.make("codex");
     const observed = yield* Ref.make<ReadonlyArray<string>>([]);
     const ingestionDone = yield* Deferred.make<void>();
@@ -3731,22 +3742,31 @@ function runBackgroundItemScenario(
           Layer.succeed(PreviewAgentActivity.PreviewAgentActivity, previewActivity),
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           layerTurnItemPositionsTest,
-          mockEventSink({
-            write: () => Effect.succeed([]),
-            writeWithEffects: (input) =>
-              Effect.gen(function* () {
-                if (
-                  input.events.some(
-                    (event) => event.type === "run.updated" && event.runId === ids.runId,
+          mockEventSink(
+            {
+              write: () => Effect.succeed([]),
+              writeWithEffects: (input) =>
+                Effect.gen(function* () {
+                  if (
+                    input.events.some(
+                      (event) => event.type === "run.updated" && event.runId === ids.runId,
+                    )
+                  ) {
+                    yield* Ref.update(observed, (current) => [...current, "root-finalized"]);
+                    yield* options?.onFinalized?.(input.events) ?? Effect.void;
+                  }
+                  return [];
+                }),
+              writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
+            },
+            (event) =>
+              event === consumedMarker
+                ? Effect.andThen(
+                    options?.onEventsConsumed ?? Effect.void,
+                    options?.afterEvents?.(previewActivity) ?? Effect.void,
                   )
-                ) {
-                  yield* Ref.update(observed, (current) => [...current, "root-finalized"]);
-                  yield* options?.onFinalized?.(input.events) ?? Effect.void;
-                }
-                return [];
-              }),
-            writeIfRunCurrent: () => Effect.succeed({ committed: true, storedEvents: [] }),
-          }),
+                : Effect.void,
+          ),
           IdAllocator.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
             ingestNormalized: (input) =>
@@ -3785,21 +3805,14 @@ function runBackgroundItemScenario(
             : { hasPendingBackgroundWorkForThread: options.hasPendingBackgroundWorkForThread }),
           subscribeEvents: Effect.gen(function* () {
             yield* options?.onSubscribe ?? Effect.void;
-            const events = Stream.fromIterable(makeEvents(ids)).pipe(
-              Stream.concat(
-                Stream.fromEffect(
-                  Effect.andThen(
-                    options?.onEventsConsumed ?? Effect.void,
-                    options?.afterEvents?.(previewActivity) ?? Effect.void,
-                  ),
-                ).pipe(Stream.drain),
-              ),
+            const sourceEvents = Stream.fromIterable(
+              consumedMarker === undefined ? events : [...events, consumedMarker],
             );
             return {
               events:
                 options?.keepEventStreamOpen === true
-                  ? events.pipe(Stream.concat(Stream.never))
-                  : events,
+                  ? sourceEvents.pipe(Stream.concat(Stream.never))
+                  : sourceEvents,
               close: Deferred.succeed(ingestionDone, undefined),
             };
           }),

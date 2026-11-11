@@ -32,6 +32,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Option from "effect/Option";
+import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -638,12 +639,14 @@ interface StartOwner {
   readonly nativeTerminal: Deferred.Deferred<void>;
   startPending: boolean;
   revoked: boolean;
+  releasing: boolean;
   turn?: OrchestrationV2ProviderTurn;
   fiber?: Fiber.Fiber<void, RunExecutionServiceV2Error>;
   unsubscribeClosed?: Effect.Effect<void>;
   cleanup?: Effect.Effect<void>;
   cleanupState?: "pending" | "unresponsive" | "superseded";
   stopConsumer?: Effect.Effect<void>;
+  stopForwarding?: Effect.Effect<void>;
 }
 
 function sameNativeStartBinding(
@@ -708,6 +711,8 @@ export const layer: Layer.Layer<
     const releaseOwner = Effect.fn("RunExecutionService.releaseOwner")(function* (
       owner: StartOwner,
     ) {
+      if (owner.releasing) return yield* Deferred.await(owner.terminal);
+      owner.releasing = true;
       const key = {
         threadId: owner.input.run.threadId,
         runId: owner.input.run.id,
@@ -716,7 +721,7 @@ export const layer: Layer.Layer<
       if (owners.get(ownerId(key)) === owner) owners.delete(ownerId(key));
       yield* owner.unsubscribeClosed ?? Effect.void;
       yield* Deferred.succeed(owner.terminal, undefined);
-    });
+    }, Effect.uninterruptible);
     const checkpointService = yield* CheckpointService.CheckpointServiceV2;
     const eventSink = yield* EventSink.EventSinkV2;
     const idAllocator = yield* IdAllocator.IdAllocatorV2;
@@ -1012,6 +1017,7 @@ export const layer: Layer.Layer<
         owner.revoked = true;
         if (owner.cleanup !== undefined) return owner.cleanup;
         owner.cleanupState = "pending";
+        yield* owner.stopForwarding ?? Effect.void;
         const cleanup = Effect.gen(function* () {
           const turn = yield* Deferred.await(owner.accepted).pipe(
             Effect.raceFirst(Deferred.await(owner.terminal).pipe(Effect.as(undefined))),
@@ -1386,6 +1392,7 @@ export const layer: Layer.Layer<
           nativeTerminal: yield* Deferred.make<void>(),
           startPending: true,
           revoked: false,
+          releasing: false,
         };
         const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
         const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
@@ -1903,7 +1910,17 @@ export const layer: Layer.Layer<
           }
           yield* trackChildLifecycle(event, deliveredEvent !== null);
         });
-        // Observe closure before guarded ingestion can block on the thread command lock.
+        const ingestionQueue = yield* Queue.bounded<
+          ProviderAdapter.ProviderAdapterV2Event,
+          ProviderAdapter.ProviderAdapterV2Error | Cause.Done
+        >(64);
+        const ingestionEnded = yield* Deferred.make<void>();
+        let forwarding = true;
+        let ingestionFailed = false;
+        owner.stopForwarding = Effect.sync(() => {
+          forwarding = false;
+        }).pipe(Effect.andThen(Queue.shutdown(ingestionQueue)), Effect.asVoid);
+        // One source observes native ownership independently of fallible durable ingestion.
         const rawProviderEvents = eventSubscription.events.pipe(
           Stream.tap((event) =>
             Effect.gen(function* () {
@@ -1960,9 +1977,28 @@ export const layer: Layer.Layer<
             }),
           ),
         );
+        const nativeSourceFiber = yield* rawProviderEvents.pipe(
+          Stream.runForEach((event) =>
+            Effect.suspend(() =>
+              forwarding ? Queue.offer(ingestionQueue, event).pipe(Effect.asVoid) : Effect.void,
+            ),
+          ),
+          Effect.matchCauseEffect({
+            onFailure: (cause) =>
+              Queue.failCause(ingestionQueue, cause).pipe(
+                Effect.andThen(
+                  Cause.hasInterruptsOnly(cause) ? Effect.void : Deferred.await(ingestionEnded),
+                ),
+              ),
+            onSuccess: () =>
+              Queue.end(ingestionQueue).pipe(Effect.andThen(Deferred.await(ingestionEnded))),
+          }),
+          Effect.ensuring(eventSubscription.close),
+          Effect.forkIn(scope),
+        );
         const providerEventFiber = yield* eventSink
           .consumeProviderEvents(
-            rawProviderEvents,
+            Stream.fromQueue(ingestionQueue),
             (event) =>
               Effect.gen(function* () {
                 if (owner.cleanupState !== undefined) return;
@@ -1975,6 +2011,7 @@ export const layer: Layer.Layer<
             Ref.get(rootTerminalSeen).pipe(Effect.map((seen) => !seen)),
           )
           .pipe(
+            Effect.onExit(() => owner.stopForwarding ?? Effect.void),
             Effect.mapError((cause) => new RunExecutionIngestError({ runId: input.run.id, cause })),
             Effect.flatMap(() =>
               Effect.gen(function* () {
@@ -2001,6 +2038,7 @@ export const layer: Layer.Layer<
               (cause) => !Cause.hasInterruptsOnly(cause),
               (cause) =>
                 Effect.gen(function* () {
+                  ingestionFailed = true;
                   if (owner.cleanupState !== undefined) return;
                   const completedAt = yield* DateTime.now;
                   yield* Effect.logWarning("orchestration V2 provider event ingestion failed", {
@@ -2114,10 +2152,26 @@ export const layer: Layer.Layer<
                 }),
             ),
             Effect.ensuring(endPreviewActivity),
-            Effect.ensuring(eventSubscription.close),
+            Effect.ensuring(Deferred.succeed(ingestionEnded, undefined)),
             Effect.forkIn(scope),
           );
         owner.stopConsumer = Fiber.interrupt(providerEventFiber).pipe(Effect.asVoid);
+        yield* Fiber.await(providerEventFiber).pipe(
+          Effect.andThen(
+            Deferred.await(owner.terminal).pipe(
+              Effect.raceFirst(Deferred.await(owner.nativeTerminal)),
+            ),
+          ),
+          Effect.tap(() =>
+            Effect.sync(() => {
+              if (ingestionFailed) owner.fiber?.interruptUnsafe();
+            }),
+          ),
+          Effect.andThen(releaseOwner(owner)),
+          Effect.andThen(Fiber.interrupt(nativeSourceFiber)),
+          Effect.forkIn(scope),
+        );
+        const stopUnclaimed = owner.stopConsumer.pipe(Effect.andThen(releaseOwner(owner)));
 
         // A provider turn is a sign that the session is still alive. Keep
         // its already-issued MCP credential valid even when the agent goes
@@ -2128,16 +2182,14 @@ export const layer: Layer.Layer<
             message: "Failed to refresh MCP credential liveness.",
           }),
         );
-        yield* touchMcpCredential.pipe(
-          Effect.onInterrupt(() => Fiber.interrupt(providerEventFiber)),
-        );
+        yield* touchMcpCredential.pipe(Effect.onInterrupt(() => stopUnclaimed));
         const appContext = (yield* mcpAppModelContext.forThread(input.run.threadId).pipe(
           Effect.catch((cause) =>
             Effect.logWarning("Failed to read MCP app model context.", { cause }).pipe(
               Effect.as([]),
             ),
           ),
-          Effect.onInterrupt(() => Fiber.interrupt(providerEventFiber)),
+          Effect.onInterrupt(() => stopUnclaimed),
         )).map((entry) => ({
           // The item id alone is unique and needs no escaping; server and
           // tool names are free text that would break the tag Codex wraps
@@ -2199,8 +2251,8 @@ export const layer: Layer.Layer<
                   }),
               ),
             );
-            yield* releaseOwner(owner);
           },
+          Effect.ensuring(releaseOwner(owner)),
         );
         const nativeStart = Effect.suspend(() =>
           owner.revoked
@@ -2274,6 +2326,7 @@ export const layer: Layer.Layer<
                     if (blocking !== undefined) return { wait: blocking.terminal };
                     if (
                       owner.revoked ||
+                      owner.releasing ||
                       (input.shouldStartProviderTurn !== undefined &&
                         !(yield* input.shouldStartProviderTurn()))
                     )
@@ -2319,16 +2372,7 @@ export const layer: Layer.Layer<
                   cause,
                 }),
           ),
-          Effect.ensuring(
-            Effect.suspend(() =>
-              claimed
-                ? Effect.void
-                : Fiber.interrupt(providerEventFiber).pipe(
-                    Effect.andThen(owner.unsubscribeClosed ?? Effect.void),
-                    Effect.asVoid,
-                  ),
-            ),
-          ),
+          Effect.ensuring(Effect.suspend(() => (claimed ? Effect.void : stopUnclaimed))),
         );
       }),
     } satisfies RunExecutionServiceV2Shape);

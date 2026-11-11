@@ -1,6 +1,7 @@
 import { assert, it, vi } from "@effect/vitest";
 import {
   CommandId,
+  ContextHandoffId,
   EventId,
   MessageId,
   ProjectId,
@@ -51,6 +52,10 @@ it.effect.each([
   "identity-force-shared",
   "identity-force-shared-replaced",
   "identity-force-shared-unsent",
+  "handoff-force-shared-inline",
+  "handoff-force-shared-injected",
+  "ingestion-force-shared",
+  "ingestion-force-shared-racing",
   "queued-promotion",
   "before-ownership",
   "superseded-native",
@@ -86,6 +91,20 @@ it.effect.each([
       const ingestionHeld = yield* Deferred.make<void>();
       const releaseIngestion = yield* Deferred.make<void>();
       const cleanupGuardRead = yield* Deferred.make<void>();
+      const handoffHeld = yield* Deferred.make<void>();
+      const releaseHandoff = yield* Deferred.make<void>();
+      const wrapperSettled =
+        yield* Deferred.make<Exit.Exit<void, ProviderAdapter.ProviderAdapterV2Error>>();
+      const releaseIngestFailure = yield* Deferred.make<void>();
+      const firstInterruptFailure = yield* Deferred.make<void>();
+      const releaseFirstInterrupt = yield* Deferred.make<void>();
+      const secondInterruptAck = yield* Deferred.make<void>();
+      const ingestionExited = yield* Deferred.make<void>();
+      const failureFinalized = yield* Deferred.make<void>();
+      const nativeSourceClosed = yield* Deferred.make<void>();
+      const exactTerminalSeen = yield* Deferred.make<void>();
+      const discardedTailSeen = yield* Deferred.make<void>();
+      const lateOldTerminalSeen = yield* Deferred.make<void>();
       const interruptCalled = yield* Deferred.make<void>();
       const interruptCancelled = yield* Deferred.make<void>();
       const releaseTerminal = yield* Deferred.make<void>();
@@ -107,11 +126,17 @@ it.effect.each([
       let closed = false;
       let opens = 0;
       const shared = scenario.startsWith("identity-force-shared");
+      const handoff = scenario.startsWith("handoff-force-shared");
+      const ingestionFailure = scenario.startsWith("ingestion-force-shared");
+      const liveness = handoff || ingestionFailure;
+      const racing = scenario === "ingestion-force-shared-racing";
       const unsent = scenario === "identity-force-shared-unsent";
       const replaced = scenario === "identity-force-shared-replaced";
       const milestones: string[] = [];
       let active: OrchestrationV2ProviderTurn | undefined;
       let starts = 0;
+      const nativeTexts: string[] = [];
+      let previousNativeTurn: OrchestrationV2ProviderTurn | undefined;
       let refused = false;
       let enterCommandLock: (operation: string) => Effect.Effect<void> = () => Effect.void;
       const startPending =
@@ -119,6 +144,7 @@ it.effect.each([
         scenario !== "queued-promotion" &&
         scenario !== "accepted-start-error" &&
         scenario !== "goal-activation-error" &&
+        !ingestionFailure &&
         scenario !== "superseded-native";
       const identityDelayed =
         scenario === "identity-timeout" || scenario === "identity-timeout-force" || shared;
@@ -219,6 +245,7 @@ it.effect.each([
                 }
                 assert.isUndefined(active, "native turns must never overlap");
                 starts++;
+                nativeTexts.push(turn.message.text);
                 active = {
                   id: ProviderTurnId.make(`native-turn:${turn.attemptId}`),
                   providerThreadId: turn.providerThread.id,
@@ -306,6 +333,15 @@ it.effect.each([
                 lastError: null,
               },
               events: Stream.fromQueue(events),
+              ...(handoff
+                ? {
+                    injectHistory: () =>
+                      Deferred.succeed(handoffHeld, undefined).pipe(
+                        Effect.andThen(Deferred.await(releaseHandoff)),
+                        Effect.as(scenario.endsWith("injected")),
+                      ),
+                  }
+                : {}),
               ensureThread: ({ threadId }) =>
                 Effect.succeed({
                   id: ProviderThreadId.make(`provider:${threadId}`),
@@ -316,7 +352,7 @@ it.effect.each([
                   ownerNodeId: null,
                   nativeThreadRef: {
                     driver,
-                    nativeId: shared ? `synthetic:${threadId}` : "synthetic-thread",
+                    nativeId: shared || liveness ? `synthetic:${threadId}` : "synthetic-thread",
                     strength: "strong",
                   },
                   nativeConversationHeadRef: null,
@@ -343,6 +379,20 @@ it.effect.each([
                   assert.isTrue(target.requestRuntimeRestart);
                   milestones.push(`interrupt:${target.providerTurnId}`);
                   yield* Deferred.succeed(interruptCalled, undefined);
+                  if (ingestionFailure) {
+                    if (interrupts.length === 1) {
+                      yield* Deferred.succeed(firstInterruptFailure, undefined);
+                      yield* Deferred.await(releaseFirstInterrupt);
+                      return yield* new ProviderAdapter.ProviderAdapterInterruptError({
+                        driver,
+                        providerThreadId: target.providerThread.id,
+                        providerTurnId: target.providerTurnId,
+                        cause: "synthetic failed automatic interrupt",
+                      });
+                    }
+                    yield* Deferred.succeed(secondInterruptAck, undefined);
+                    return;
+                  }
                   if (scenario === "interrupt-error")
                     return yield* new ProviderAdapter.ProviderAdapterInterruptError({
                       driver,
@@ -412,6 +462,26 @@ it.effect.each([
         const execution = yield* RunExecutionService.RunExecutionServiceV2;
         const threads = yield* ThreadManagementService.ThreadManagementService;
         const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        let rejectIngestion = ingestionFailure;
+        const originalFinalWrite = sink.writeIfRunCurrent;
+        using _failedWrite = ingestionFailure
+          ? vi
+              .spyOn(sink, "writeIfRunCurrent")
+              .mockImplementation((input) =>
+                originalFinalWrite(input).pipe(
+                  Effect.tap(() =>
+                    input.events.some(
+                      (event) =>
+                        event.type === "run.updated" &&
+                        event.threadId === threadId &&
+                        event.payload.status === "failed",
+                    )
+                      ? Deferred.succeed(failureFinalized, undefined)
+                      : Effect.void,
+                  ),
+                ),
+              )
+          : undefined;
         const originalRecords = store.getThreadRecords;
         using _cleanupGuard = replaced
           ? vi
@@ -497,6 +567,48 @@ it.effect.each([
           }
           if (scenario !== "before-ownership") {
             staleInput = input;
+            if (liveness && input.run.threadId === threadId)
+              return originalStart({
+                ...input,
+                session: {
+                  ...input.session,
+                  startTurn: (turn) =>
+                    input.session
+                      .startTurn(turn)
+                      .pipe(Effect.onExit((exit) => Deferred.succeed(wrapperSettled, exit))),
+                  subscribeEvents: input.session.subscribeEvents!.pipe(
+                    Effect.map((subscription) => ({
+                      ...subscription,
+                      close: subscription.close.pipe(
+                        Effect.tap(() => Deferred.succeed(nativeSourceClosed, undefined)),
+                      ),
+                      events: subscription.events.pipe(
+                        Stream.tap((event) =>
+                          Effect.gen(function* () {
+                            if (
+                              event.type !== "turn.terminal" ||
+                              event.providerThreadId !== input.providerThread.id
+                            )
+                              return;
+                            if (event.providerTurnId === ProviderTurnId.make("stale:discard:127"))
+                              yield* Deferred.succeed(discardedTailSeen, undefined);
+                            if (
+                              event.providerTurnId ===
+                              ProviderTurnId.make(`native-turn:${input.attemptId}`)
+                            )
+                              yield* Deferred.succeed(exactTerminalSeen, undefined);
+                            if (
+                              input.run.ordinal === 2 &&
+                              event.providerTurnId === previousNativeTurn?.id
+                            )
+                              yield* Deferred.succeed(lateOldTerminalSeen, undefined);
+                          }),
+                        ),
+                      ),
+                    })),
+                  ),
+                },
+              }).pipe(Effect.onInterrupt(() => Deferred.succeed(callerCancelled, undefined)));
             return originalStart(
               scenario === "goal-activation-error"
                 ? {
@@ -530,6 +642,30 @@ it.effect.each([
         });
         const originalWrite = sink.write;
         using _ingestion = vi.spyOn(sink, "write").mockImplementation((input) => {
+          if (
+            rejectIngestion &&
+            input.events.some(
+              (event) =>
+                event.type === "provider-turn.updated" &&
+                event.threadId === threadId &&
+                event.payload.status === "running" &&
+                event.payload.runAttemptId === active?.runAttemptId,
+            )
+          ) {
+            rejectIngestion = false;
+            return Deferred.succeed(ingestionHeld, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseIngestFailure)),
+              Effect.andThen(
+                Effect.fail(
+                  new EventSink.EventSinkWriteError({
+                    eventCount: input.events.length,
+                    cause: new Error("synthetic consumer-local persistence failure"),
+                  }),
+                ),
+              ),
+              Effect.ensuring(Deferred.succeed(ingestionExited, undefined)),
+            );
+          }
           const hold =
             scenario === "pending-ingestion" &&
             input.events.some(
@@ -545,6 +681,37 @@ it.effect.each([
           ).pipe(Effect.andThen(originalWrite(input)));
         });
         yield* send("first");
+        if (handoff) {
+          const pending = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+          assert.isNotNull(pending.providerThreadId);
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make("manual-handoff"),
+                type: "context-handoff.updated",
+                threadId,
+                runId: pending.id,
+                occurredAt: now,
+                payload: {
+                  id: ContextHandoffId.make("manual-handoff"),
+                  threadId,
+                  targetRunId: pending.id,
+                  fromProviderThreadIds: [],
+                  toProviderThreadId: pending.providerThreadId!,
+                  coveredRunOrdinals: { from: 1, to: 1 },
+                  strategy: "manual_context",
+                  status: "ready",
+                  summaryMessageId: null,
+                  summaryText: "SYNTHETIC MANUAL CONTEXT",
+                  createdByProviderInstanceId: null,
+                  createdAt: now,
+                  updatedAt: now,
+                },
+              },
+            ],
+          });
+        }
         const startup = yield* worker.drain(1).pipe(Effect.forkScoped);
         if (
           scenario === "unsupported-compact" ||
@@ -603,11 +770,283 @@ it.effect.each([
           assert.equal(starts, 0);
           return;
         }
-        yield* Deferred.await(entered);
+        yield* handoff ? Deferred.await(handoffHeld) : Deferred.await(entered);
         milestones.push("entered");
         if (scenario === "queued-promotion") yield* send("promoted", true);
         const initial = yield* orchestrator.getThreadProjection(threadId);
         const run = initial.runs.find((run) => run.status === "running")!;
+        if (liveness) {
+          if (ingestionFailure) {
+            yield* Deferred.succeed(accept, undefined);
+            yield* Deferred.await(nativeAccepted);
+            previousNativeTurn = active!;
+            yield* Deferred.await(ingestionHeld);
+            yield* Fiber.join(startup);
+          }
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("create-sibling"),
+            threadId: siblingId,
+            projectId: ProjectId.make("project:start-stop"),
+            title: "working sibling",
+            modelSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("sibling-start"),
+            threadId: siblingId,
+            messageId: MessageId.make("sibling-start"),
+            text: "sibling",
+            attachments: [],
+            dispatchMode: { type: "start_immediately" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          yield* worker.drain(1);
+          assert.isDefined(sibling);
+          assert.equal(opens, 1);
+          if (ingestionFailure) {
+            for (let ordinal = 0; ordinal < 128; ordinal++)
+              yield* Queue.offer(events, {
+                type: "turn.terminal",
+                driver,
+                providerThreadId: active!.providerThreadId,
+                providerTurnId: ProviderTurnId.make(`stale:discard:${ordinal}`),
+                runOrdinal: 1,
+                status: "completed",
+                failure: null,
+                threadDisposition: "reusable",
+              });
+            yield* Deferred.succeed(releaseIngestFailure, undefined);
+            yield* Deferred.await(ingestionExited);
+            yield* Deferred.await(firstInterruptFailure);
+            yield* Deferred.await(discardedTailSeen);
+            if (!racing) {
+              yield* Deferred.succeed(releaseFirstInterrupt, undefined);
+              yield* Deferred.await(failureFinalized);
+              assert.equal(
+                (yield* orchestrator.getThreadProjection(threadId)).runs[0]?.status,
+                "failed",
+              );
+            }
+          }
+          const forced = yield* threads.forceStopThread({ threadId, runId: run.id });
+          assert.equal(forced.outcome, "shared");
+          assert.isFalse(closed);
+          const cleanup = yield* execution.revokeOwnedStart({
+            threadId,
+            runId: run.id,
+            attemptId: run.activeAttemptId!,
+          });
+          assert.isDefined(cleanup);
+          if (handoff) {
+            assert.equal(starts, 0);
+            yield* Deferred.succeed(releaseHandoff, undefined);
+            const response = yield* Deferred.await(wrapperSettled);
+            assert.isTrue(
+              Exit.isFailure(response),
+              "the actual handoff guard must propagate known-unsent rather than successful void",
+            );
+            yield* cleanup!;
+            assert.equal(starts, 0);
+            assert.deepEqual(interrupts, []);
+            const stopped = yield* orchestrator.getThreadProjection(threadId);
+            assert.equal(stopped.runs[0]?.status, "interrupted");
+            assert.isNull(stopped.attempts[0]?.providerTurnId);
+            assert.isFalse(
+              stopped.turnItems.some((item) => item.runId === run.id && item.type === "error"),
+            );
+            assert.equal(
+              stopped.contextHandoffs[0]?.delivery?.status,
+              scenario.endsWith("injected") ? "injected" : undefined,
+            );
+          } else {
+            yield* Deferred.await(secondInterruptAck);
+            yield* Deferred.succeed(releaseFirstInterrupt, undefined);
+            yield* TestClock.adjust("15 seconds");
+            assert.isFalse(
+              yield* Deferred.isDone(nativeSourceClosed),
+              "a consumer-local ingestion failure must not close native observation",
+            );
+            yield* threads.forceStopThread({ threadId, runId: run.id });
+            const old = active!;
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: old.providerThreadId,
+              providerTurnId: ProviderTurnId.make("stale:unrelated"),
+              runOrdinal: 1,
+              status: "completed",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            active = undefined;
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: old.providerThreadId,
+              providerTurnId: old.id,
+              runOrdinal: 1,
+              status: "interrupted",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            yield* Deferred.await(exactTerminalSeen);
+            yield* cleanup!;
+            assert.deepEqual(interrupts, [old.id, old.id]);
+            assert.equal(
+              (yield* orchestrator.getThreadProjection(threadId)).runs[0]?.status,
+              racing ? "interrupted" : "failed",
+            );
+          }
+          assert.isTrue(
+            Option.isNone(
+              yield* execution.getStartOwnership({
+                threadId,
+                runId: run.id,
+                attemptId: run.activeAttemptId!,
+              }),
+            ),
+          );
+          assert.isDefined(sibling);
+          assert.isFalse(closed);
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(siblingId)).runs[0]?.status,
+            "running",
+          );
+          yield* Deferred.succeed(accept, undefined);
+          yield* Deferred.succeed(releaseStart, undefined);
+          yield* Deferred.succeed(releaseIdentity, undefined);
+          const nextWaiting = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.threadId === threadId &&
+                event.payload.ordinal === 2 &&
+                event.payload.status === "waiting",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* send("liveness-next");
+          yield* worker.drain(1);
+          const next = active!;
+          if (ingestionFailure) {
+            yield* Queue.offer(events, {
+              type: "turn.terminal",
+              driver,
+              providerThreadId: previousNativeTurn!.providerThreadId,
+              providerTurnId: previousNativeTurn!.id,
+              runOrdinal: 1,
+              status: "interrupted",
+              failure: null,
+              threadDisposition: "reusable",
+            });
+            yield* Deferred.await(lateOldTerminalSeen);
+            const current = (yield* orchestrator.getThreadProjection(threadId)).runs[1]!;
+            assert.equal(current.status, "running");
+            assert.isTrue(
+              Option.isSome(
+                yield* execution.getStartOwnership({
+                  threadId,
+                  runId: current.id,
+                  attemptId: current.activeAttemptId!,
+                }),
+              ),
+            );
+          }
+          active = undefined;
+          yield* Queue.offer(events, {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: next.providerThreadId,
+            providerTurnId: next.id,
+            runOrdinal: 2,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          yield* Fiber.join(nextWaiting);
+          yield* worker.drain();
+          assert.equal(starts, handoff ? 1 : 2);
+          if (handoff)
+            assert.equal(
+              nativeTexts.at(-1)!.split("SYNTHETIC MANUAL CONTEXT").length - 1,
+              scenario.endsWith("injected") ? 0 : 1,
+            );
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(threadId)).runs[1]?.status,
+            "completed",
+          );
+          assert.isDefined(sibling);
+          yield* Deferred.await(nativeSourceClosed);
+          const siblingRun = (yield* orchestrator.getThreadProjection(siblingId)).runs[0]!;
+          const siblingWaiting = yield* orchestrator.streamDomainEvents.pipe(
+            Stream.filter(
+              (event) =>
+                event.type === "run.updated" &&
+                event.payload.id === siblingRun.id &&
+                event.payload.status === "waiting",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          const siblingTurn = sibling!;
+          sibling = undefined;
+          yield* Queue.offer(events, {
+            type: "turn.terminal",
+            driver,
+            providerThreadId: siblingTurn.providerThreadId,
+            providerTurnId: siblingTurn.id,
+            runOrdinal: 1,
+            status: "completed",
+            failure: null,
+            threadDisposition: "reusable",
+          });
+          yield* Fiber.join(siblingWaiting);
+          yield* worker.drain();
+          assert.equal(
+            (yield* orchestrator.getThreadProjection(siblingId)).runs[0]?.status,
+            "completed",
+          );
+          assert.isFalse(closed);
+          if (yield* Config.Boolean("T3_START_STOP_TRANSCRIPT").pipe(Config.withDefault(false)))
+            yield* Effect.logInfo({
+              synthetic: true,
+              scenario,
+              milestones,
+              nativeStarts: starts,
+              interruptCalls: interrupts.length,
+              successfulInterrupts: ingestionFailure ? interrupts.length - 1 : 0,
+              nativeSourceClosed: yield* Deferred.isDone(nativeSourceClosed),
+              oldOwnerReleased: Option.isNone(
+                yield* execution.getStartOwnership({
+                  threadId,
+                  runId: run.id,
+                  attemptId: run.activeAttemptId!,
+                }),
+              ),
+              nextA: "completed",
+              siblingB: "completed",
+              runtimeClosed: closed,
+              sharedRuntimeOpens: opens,
+              discardedNativeFrames: ingestionFailure ? 128 : 0,
+              nextInlineContextCopies:
+                nativeTexts.at(-1)!.split("SYNTHETIC MANUAL CONTEXT").length - 1,
+            }).pipe(
+              Effect.provide(Logger.layer([Logger.consoleJson])),
+              Effect.provideService(References.MinimumLogLevel, "Info"),
+            );
+          return;
+        }
         if (scenario === "goal-activation-error") {
           yield* Deferred.succeed(accept, undefined);
           yield* Deferred.await(nativeAccepted);
