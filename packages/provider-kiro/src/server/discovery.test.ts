@@ -65,7 +65,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line);
-  appendFileSync(process.env.KIRO_TEST_LOG, JSON.stringify({ method: request.method, cwd: process.cwd(), home: process.env.KIRO_HOME }) + '\\n');
+  appendFileSync(process.env.KIRO_TEST_LOG, JSON.stringify({ method: request.method, cwd: process.cwd(), home: process.env.KIRO_HOME, offline: process.env.MISE_OFFLINE }) + '\\n');
   if (request.id === undefined) return;
   const result = request.method === 'initialize'
     ? { protocolVersion: 1, agentCapabilities: { _meta: { kiro: { extensionMethods: ['_kiro/configuration/getState'] } } } }
@@ -75,14 +75,17 @@ createInterface({ input: process.stdin }).on('line', line => {
 `,
         );
         yield* fs.chmod(binaryPath, 0o700);
+        const environment = Object.freeze({
+          PATH: (yield* HostProcess.Environment).PATH,
+          HOME: customHome,
+          KIRO_HOME: customHome,
+          KIRO_TEST_STATE: state,
+          KIRO_TEST_LOG: log,
+          MISE_OFFLINE: "0",
+        });
         const discovery = yield* makeKiroDiscovery(
           yield* decodeSettings({ enabled: true, binaryPath }),
-          {
-            PATH: (yield* HostProcess.Environment).PATH,
-            KIRO_HOME: customHome,
-            KIRO_TEST_STATE: state,
-            KIRO_TEST_LOG: log,
-          },
+          environment,
         );
         const first = yield* discovery.get(a);
         assert.deepEqual(
@@ -101,10 +104,11 @@ createInterface({ input: process.stdin }).on('line', line => {
         );
         yield* discovery.invalidate;
         assert.deepEqual((yield* discovery.get(a))?.skills, []);
-        const requests: Array<{ method: string; home: string }> = (yield* fs.readFileString(log))
-          .trim()
-          .split("\n")
-          .map((line) => JSON.parse(line));
+        const requests: Array<{ method: string; home: string; cwd: string; offline: string }> =
+          (yield* fs.readFileString(log))
+            .trim()
+            .split("\n")
+            .map((line) => JSON.parse(line));
         assert.deepEqual(
           requests.map((request) => request.method),
           [
@@ -117,6 +121,12 @@ createInterface({ input: process.stdin }).on('line', line => {
           ],
         );
         assert.isTrue(requests.every((request) => request.home === customHome));
+        assert.deepEqual(
+          requests.map((request) => request.cwd),
+          [a, a, b, b, a, a],
+        );
+        assert.isTrue(requests.every((request) => request.offline === "1"));
+        assert.strictEqual(environment.MISE_OFFLINE, "0");
       }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
   );
 });

@@ -1,3 +1,4 @@
+import { providerProbeEnvironment } from "@t3tools/provider-core/server/snapshotProbe";
 import type { ProviderOptionDescriptor, ServerProviderSkill } from "@t3tools/contracts";
 import type { KiroSettings } from "../settings.ts";
 import * as Clock from "effect/Clock";
@@ -91,6 +92,7 @@ export const makeKiroDiscovery = Effect.fn("KiroDiscovery.make")(function* (
   settings: KiroSettings,
   environment: NodeJS.ProcessEnv,
 ) {
+  const probeEnvironment = providerProbeEnvironment(environment);
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const crypto = yield* SecureRandom.SecureRandom;
@@ -106,7 +108,7 @@ export const makeKiroDiscovery = Effect.fn("KiroDiscovery.make")(function* (
     function* (cwd: string) {
       const runtime = yield* makeKiroAcpRuntime({
         settings,
-        environment,
+        environment: probeEnvironment,
         cwd,
         authenticateOnAuthRequired: false,
         clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
