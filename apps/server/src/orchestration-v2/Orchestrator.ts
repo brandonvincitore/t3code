@@ -8355,6 +8355,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       (command.notification === undefined &&
         command.createdBy !== "user" &&
         command.usageLimitContinuationOfRunId === undefined &&
+        command.senderThreadId !== undefined &&
         command.senderThreadId !== parentThreadId)
     )
       return;

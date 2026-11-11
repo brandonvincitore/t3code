@@ -2169,24 +2169,29 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
       "stopped",
       "overlapping",
     ] as const;
-    it.effect.each(outcomes)(
-      "delivers a %s follow-up independently of the original task",
-      (outcome) =>
+    it.effect.each([
+      ...outcomes.map((outcome) => ({ outcome, sender: "parent" as const })),
+      { outcome: "completed", sender: "unscoped" },
+      { outcome: "completed", sender: "foreign" },
+    ] as const)(
+      "delivers a $outcome follow-up from $sender independently of the original task",
+      ({ outcome, sender }) =>
         Effect.gen(function* () {
+          const key = `${outcome}-${sender}`;
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const eventSink = yield* EventSink.EventSinkV2;
           const requests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
           const now = yield* DateTime.now;
-          const parentThreadId = ThreadId.make(`thread:followup-${outcome}`);
-          const projectId = ProjectId.make(`project:followup-${outcome}`);
-          const parentRunId = RunId.make(`run:followup-${outcome}`);
-          const rootNodeId = NodeId.make(`node:followup-${outcome}`);
+          const parentThreadId = ThreadId.make(`thread:followup-${key}`);
+          const projectId = ProjectId.make(`project:followup-${key}`);
+          const parentRunId = RunId.make(`run:followup-${key}`);
+          const rootNodeId = NodeId.make(`node:followup-${key}`);
           yield* seedParentWithTerminalTask({
             threadId: parentThreadId,
             projectId,
             runId: parentRunId,
             rootNodeId,
-            taskId: NodeId.make(`node:seed-${outcome}`),
+            taskId: NodeId.make(`node:seed-${key}`),
             deliveryState: "acknowledged",
             now,
           });
@@ -2195,7 +2200,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             projectId,
             parentRunId,
             rootNodeId,
-            name: `followup-child-${outcome}`,
+            name: `followup-child-${key}`,
             completionWake: "always",
             continuationPending: false,
             runStatus: "completed",
@@ -2207,7 +2212,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           assert.equal(firstWake.delegatedCompletion?.parentRunId, parentRunId);
           yield* orchestrator.dispatch({
             type: "delegated_task.completion-delivery.acknowledge",
-            commandId: CommandId.make(`command:followup-ack-${outcome}`),
+            commandId: CommandId.make(`command:followup-ack-${key}`),
             parentThreadId,
             taskId: child.taskId,
             observedByRunId: parentRunId,
@@ -2219,10 +2224,10 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             (run) => run.id === parentRunId,
           )!;
           yield* eventSink.write({
-            commandId: reconcileCommandId(`followup-parent-finished-${outcome}`),
+            commandId: reconcileCommandId(`followup-parent-finished-${key}`),
             events: [
               {
-                id: EventId.make(`event:followup-parent-finished-${outcome}`),
+                id: EventId.make(`event:followup-parent-finished-${key}`),
                 type: "run.updated",
                 threadId: parentThreadId,
                 runId: parentRunId,
@@ -2231,14 +2236,19 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
               },
             ],
           });
-          const messageId = MessageId.make(`message:followup-${outcome}`);
+          const messageId = MessageId.make(`message:followup-${key}`);
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             createdBy: outcome === "failed" ? "user" : "agent",
             creationSource: outcome === "failed" ? "web" : "mcp",
-            commandId: CommandId.make(`command:followup-send-${outcome}`),
+            commandId: CommandId.make(`command:followup-send-${key}`),
             threadId: child.childThreadId,
-            senderThreadId: parentThreadId,
+            ...(sender === "unscoped"
+              ? {}
+              : {
+                  senderThreadId:
+                    sender === "foreign" ? ThreadId.make("thread:foreign") : parentThreadId,
+                }),
             messageId,
             text: "Check the same work again.",
             attachments: [],
@@ -2246,6 +2256,39 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           });
           const childProjection = yield* orchestrator.getThreadProjection(child.childThreadId);
           let run = childProjection.runs.find((row) => row.userMessageId === messageId)!;
+          if (sender === "foreign") {
+            assert.isUndefined(run.delegatedTaskId);
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(`event:foreign-finished`),
+                  type: "run.updated",
+                  threadId: child.childThreadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+                },
+              ],
+            });
+            yield* orchestrator.recoverDelegatedTasks;
+            const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+            assert.deepEqual(
+              parent.subagents.find((task) => task.id === child.taskId),
+              original,
+            );
+            assert.isFalse(
+              parent.subagents.some(
+                (task) => task.childThreadId === child.childThreadId && task.id !== child.taskId,
+              ),
+            );
+            assert.lengthOf(
+              parent.contextTransfers.filter(
+                (transfer) => transfer.sourceThreadId === child.childThreadId,
+              ),
+              1,
+            );
+            return;
+          }
           assert.isDefined(run.delegatedTaskId);
           const workingParent = yield* orchestrator.getShellSnapshot();
           const backgroundTask = workingParent.threads
@@ -2318,14 +2361,14 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
             yield* orchestrator.dispatch({
               type: "thread.stop",
               threadId: parentThreadId,
-              commandId: CommandId.make(`command:followup-stop-${outcome}`),
+              commandId: CommandId.make(`command:followup-stop-${key}`),
             });
           }
           yield* eventSink.write({
-            commandId: reconcileCommandId(`followup-finish-${outcome}`),
+            commandId: reconcileCommandId(`followup-finish-${key}`),
             events: [
               {
-                id: EventId.make(`event:followup-finish-${outcome}`),
+                id: EventId.make(`event:followup-finish-${key}`),
                 type: "run.updated",
                 threadId: child.childThreadId,
                 runId: run.id,
@@ -2398,7 +2441,7 @@ it.layer(Layer.merge(layerTest, ProviderContinuationRequests.layer))(
           yield* orchestrator.recoverDelegatedTasks;
           const recovered = yield* orchestrator.getThreadProjection(parentThreadId);
           assert.equal(recovered.contextTransfers.length, finished.contextTransfers.length);
-          if (outcome === "completed") {
+          if (outcome === "completed" && sender === "parent") {
             const automaticMessageId = MessageId.make("message:followup-automatic-wake");
             yield* orchestrator.dispatch({
               type: "message.dispatch",
