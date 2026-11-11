@@ -1,5 +1,6 @@
 import {
   DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
+  ProjectId,
   ProviderDriverKind,
   type ModelSelection,
   type ServerProvider,
@@ -542,6 +543,8 @@ const PREFLIGHT_PRIMARY_STATES = [
   "pending",
   "exhausted",
   "not installed",
+  "not installed, fallback disabled for project",
+  "not installed, fallback disabled for another project",
   "signed out",
   "signed out, fallback failed",
   "kiro ready",
@@ -556,6 +559,7 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
     const state = primaryState.replace(/^kiro /, "");
     const primary = ProviderInstanceId.make(kiro ? "kiro_account" : "codex");
     const fallback = ProviderInstanceId.make("claude_work");
+    const projectId = ProjectId.make("project-a");
     const selection = {
       instanceId: primary,
       model: "chat-model",
@@ -583,7 +587,7 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
         ...(state === "pending" && instanceId === primary
           ? { installed: false, status: "warning", auth: { status: "unknown" } }
           : {}),
-        ...(state === "not installed" && instanceId === primary
+        ...(state.startsWith("not installed") && instanceId === primary
           ? { installed: false, status: "error", auth: { status: "unknown" } }
           : {}),
         ...(state.startsWith("signed out") && instanceId === primary
@@ -635,6 +639,13 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
             providerInstances: {
               [fallback]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
             },
+            projectSettingsOverrides: {
+              [state === "not installed, fallback disabled for another project"
+                ? ProjectId.make("project-b")
+                : projectId]: {
+                providerInstances: { [fallback]: { enabled: !state.includes("disabled for") } },
+              },
+            },
           }),
           Layer.mock(TextGenerators.TextGenerators)({ runner: () => Effect.undefined }),
           Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
@@ -649,10 +660,15 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
         message: "hello",
         linkedContext: "",
         modelSelection: selection,
+        projectId,
       }),
     ).toEqual({ title: "Generated title" });
     expect(calls).toEqual([
-      kiro || state === "ready" || state === "pending" || state === "signed out, fallback failed"
+      kiro ||
+      state === "ready" ||
+      state === "pending" ||
+      state === "not installed, fallback disabled for project" ||
+      state === "signed out, fallback failed"
         ? selection
         : {
             instanceId: fallback,
