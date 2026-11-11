@@ -532,8 +532,10 @@ it.effect(
                         providerThread,
                         providerTurns: [],
                         runtimeRequests: [],
+                        reasoningMessageIds: [MessageId.make("replayed:Check the build log")],
                         messages: [
                           replayed("user", "Fix the build"),
+                          replayed("assistant", "Check the build log"),
                           replayed("assistant", "Fixed it"),
                           replayed("assistant", " "),
                         ],
@@ -567,7 +569,7 @@ it.effect(
       ).toBeUndefined();
 
       failRead = false;
-      expect(yield* importHistory).toBe(2);
+      expect(yield* importHistory).toBe(3);
       expect(resolved).toEqual([
         CODEX_MODEL_SELECTION.instanceId,
         CODEX_MODEL_SELECTION.instanceId,
@@ -583,7 +585,17 @@ it.effect(
       );
       expect(yield* importHistory).toBe(0);
       expect(opened).toHaveLength(2);
-      const page = yield* projections.getTimelinePage(threadId, { view: "messages", limit: 10 });
+      const records = yield* projections.getThreadRecords(threadId, ["messages"]);
+      expect(records.messages.map((message) => message.text)).toEqual([
+        "Fix the build",
+        "Fixed it",
+      ]);
+      expect(
+        importer.published.filter(
+          (stored) => "event" in stored && stored.event.type === "message.updated",
+        ),
+      ).toHaveLength(2);
+      const page = yield* projections.getTimelinePage(threadId, { view: "activity", limit: 10 });
       expect(
         page.items.map(({ item }) => [
           item.type,
@@ -592,6 +604,7 @@ it.effect(
         ]),
       ).toEqual([
         ["user_message", null, "Fix the build"],
+        ["reasoning", null, "Check the build log"],
         ["assistant_message", null, "Fixed it"],
       ]);
     }).pipe(Effect.scoped, Effect.provide(persistence)),
