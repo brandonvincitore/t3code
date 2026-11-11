@@ -2247,6 +2247,35 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const providerTurns = yield* Ref.make(new Map<string, OrchestrationV2ProviderTurn>());
         const snapshot = yield* Ref.make(emptySnapshotState());
 
+        // Native load spans cover this serialized snapshot transaction.
+        const withSnapshotReplay = Effect.fnUntraced(function* <A, E, R>(
+          load: Effect.Effect<A, E, R>,
+        ) {
+          return yield* Effect.acquireUseRelease(
+            runtimeCallbackPermit.withPermit(
+              Effect.all({
+                state: Ref.getAndSet(snapshot, emptySnapshotState()),
+                generation: Ref.get(runtimeCallbackGeneration),
+                sessionId: Ref.get(activeSessionId),
+              }),
+            ),
+            () => load,
+            (previous, exit) =>
+              Exit.isSuccess(exit)
+                ? Effect.void
+                : runtimeCallbackPermit.withPermit(
+                    Effect.gen(function* () {
+                      if (
+                        (yield* Ref.get(runtimeCallbackGeneration)) === previous.generation &&
+                        (yield* Ref.get(activeSessionId)) === previous.sessionId
+                      ) {
+                        yield* Ref.set(snapshot, previous.state);
+                      }
+                    }),
+                  ),
+          );
+        });
+
         const awaitRuntimeTeardown = Effect.fnUntraced(function* () {
           const state = yield* Ref.get(runtimeTeardownState);
           if (state._tag === "InProgress") {
@@ -8129,7 +8158,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         );
 
         const initialStart = yield* Effect.result(
-          startAcpRuntime(input.threadId, input.initialNativeThreadId),
+          withSnapshotReplay(startAcpRuntime(input.threadId, input.initialNativeThreadId)),
         );
         const started = Result.isSuccess(initialStart)
           ? initialStart.success
@@ -9147,13 +9176,22 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const needsSessionActivation =
               (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
             if (needsSessionActivation) {
-              const activated = yield* activateSession(requestedSessionId, turnInput.threadId).pipe(
-                Effect.onError(() => restorePreviousRuntimePolicy),
+              yield* withSnapshotReplay(
+                Effect.gen(function* () {
+                  const activated = yield* activateSession(
+                    requestedSessionId,
+                    turnInput.threadId,
+                  ).pipe(Effect.onError(() => restorePreviousRuntimePolicy));
+                  yield* Effect.uninterruptible(adoptLoadedSession(activated));
+                  yield* configureSession(
+                    activated,
+                    turnInput.modelSelection,
+                    turnInput.runtimePolicy,
+                  );
+                  yield* Ref.set(activeSelection, turnInput.modelSelection);
+                  yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
+                }),
               );
-              yield* adoptLoadedSession(activated);
-              yield* configureSession(activated, turnInput.modelSelection, turnInput.runtimePolicy);
-              yield* Ref.set(activeSelection, turnInput.modelSelection);
-              yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
             } else {
               const configuredSelection = yield* Ref.get(activeSelection);
               const configuredInteractionMode = yield* Ref.get(activeInteractionMode);
@@ -9925,16 +9963,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     latestRuntimePolicySessionId = sessionId;
                   }
                   if (needsSessionActivation) {
-                    yield* Ref.set(snapshot, emptySnapshotState());
-                    const activated = yield* activateSession(
-                      sessionId,
-                      threadInput.providerThread.appThreadId,
-                    ).pipe(Effect.onError(() => restorePreviousSessionState));
-                    yield* adoptLoadedSession(activated);
-                    const nextRuntimePolicy = threadInput.runtimePolicy ?? input.runtimePolicy;
-                    yield* configureSession(activated, nextSelection, nextRuntimePolicy);
-                    yield* Ref.set(activeSelection, nextSelection);
-                    yield* Ref.set(activeInteractionMode, nextRuntimePolicy.interactionMode);
+                    yield* withSnapshotReplay(
+                      Effect.gen(function* () {
+                        const activated = yield* activateSession(
+                          sessionId,
+                          threadInput.providerThread.appThreadId,
+                        ).pipe(Effect.onError(() => restorePreviousSessionState));
+                        yield* Effect.uninterruptible(adoptLoadedSession(activated));
+                        const nextRuntimePolicy = threadInput.runtimePolicy ?? input.runtimePolicy;
+                        yield* configureSession(activated, nextSelection, nextRuntimePolicy);
+                        yield* Ref.set(activeSelection, nextSelection);
+                        yield* Ref.set(activeInteractionMode, nextRuntimePolicy.interactionMode);
+                      }),
+                    );
                   }
                   const settledContextUsage = yield* runtimeCallbackPermit.withPermit(
                     settleContextUsage(
@@ -10483,21 +10524,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         detail: "ACP driver does not support session/load snapshots",
                       });
                     }
-                    yield* Ref.set(snapshot, emptySnapshotState());
-                    const mcpContext = yield* readMcpContext(
-                      snapshotInput.providerThread.appThreadId,
+                    yield* withSnapshotReplay(
+                      Effect.gen(function* () {
+                        const mcpContext = yield* readMcpContext(
+                          snapshotInput.providerThread.appThreadId,
+                        );
+                        prepareTerminalEnvironment(mcpContext, sessionId);
+                        const activated = yield* withLoadingSession(
+                          sessionId,
+                          runtime.loadSession(sessionId, acpMcpActivation(mcpContext)),
+                        );
+                        rememberTerminalEnvironment(
+                          activated.sessionId,
+                          yield* readMcpContext(snapshotInput.providerThread.appThreadId),
+                        );
+                        yield* Effect.uninterruptible(adoptLoadedSession(activated));
+                        yield* Ref.set(activeInteractionMode, null);
+                      }),
                     );
-                    prepareTerminalEnvironment(mcpContext, sessionId);
-                    const activated = yield* withLoadingSession(
-                      sessionId,
-                      runtime.loadSession(sessionId, acpMcpActivation(mcpContext)),
-                    );
-                    rememberTerminalEnvironment(
-                      activated.sessionId,
-                      yield* readMcpContext(snapshotInput.providerThread.appThreadId),
-                    );
-                    yield* adoptLoadedSession(activated);
-                    yield* Ref.set(activeInteractionMode, null);
                   }
                   const state = yield* Ref.get(snapshot);
                   const now = yield* DateTime.now;

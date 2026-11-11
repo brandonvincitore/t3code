@@ -455,6 +455,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   /** Holds the script's inbound frames at labels the test releases. */
   readonly replayGate?: ProviderReplayGate;
   readonly testHooks?: Parameters<typeof makeKiroAdapterV2>[0]["testHooks"];
+  readonly onSessionUpdate?: (
+    notification: EffectAcpSchema.SessionNotification,
+  ) => Effect.Effect<void>;
   /** Wraps the runtime's `session/cancel` send. */
   readonly wrapCancel?: (
     send: AcpSessionRuntime.AcpSessionRuntime["Service"]["cancel"],
@@ -566,6 +569,12 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       })(runtimeInput).pipe(
         Effect.map((runtime) => ({
           ...runtime,
+          handleSessionUpdate: (handler) =>
+            runtime.handleSessionUpdate((notification) =>
+              handler(notification).pipe(
+                Effect.andThen(input.onSessionUpdate?.(notification) ?? Effect.void),
+              ),
+            ),
           ...(input.wrapCancel === undefined ? {} : { cancel: input.wrapCancel(runtime.cancel) }),
           ...(input.wrapPrompt === undefined ? {} : { prompt: input.wrapPrompt(runtime.prompt) }),
         })),
@@ -794,6 +803,127 @@ it.live.each(["startup", "switch"] as const)(
             const repeated = yield* readSnapshot(loadedId);
             assert.deepEqual(repeated.messages, snapshot.messages);
           }),
+      });
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each(["fails", "is interrupted"] as const)(
+  "retains active Kiro history when another load %s",
+  (ending) =>
+    Effect.gen(function* () {
+      const b = "other-native-session";
+      const milestones = new Map<string, Deferred.Deferred<void>>();
+      for (const text of ["B partial thought", "B late reply", "A continued"])
+        milestones.set(text, yield* Deferred.make<void>());
+      const replayGate = makeProviderReplayGate(["b-result", "late-b", "continue-a"]);
+      const chunk = (
+        sessionId: string,
+        sessionUpdate: string,
+        text: string,
+        label = text,
+      ): Frame => ({
+        type: "emit_inbound",
+        label,
+        frame: {
+          kind: "notification",
+          method: "session/update",
+          params: { sessionId, update: { sessionUpdate, content: { type: "text", text } } },
+        },
+      });
+      const history = (sessionId: string, prefix: string) => [
+        chunk(sessionId, "user_message_chunk", `${prefix} user`),
+        chunk(sessionId, "agent_message_chunk", `${prefix} reply`),
+        chunk(sessionId, "agent_thought_chunk", `${prefix} thought`),
+      ];
+      const load = (sessionId: string) =>
+        outbound("session/load", { sessionId, cwd: "<workspace>", mcpServers: "<any>" });
+      const loaded = answer("session/load", { configOptions: [autopilotOption("off")] });
+      yield* runKiroScript({
+        scenario: `retained-history-${ending.replaceAll(" ", "-")}`,
+        initialNativeThreadId: SESSION_ID,
+        replayGate,
+        onSessionUpdate: ({ update }) => {
+          const text =
+            (update.sessionUpdate === "agent_message_chunk" ||
+              update.sessionUpdate === "agent_thought_chunk") &&
+            update.content.type === "text"
+              ? update.content.text
+              : undefined;
+          const milestone = text === undefined ? undefined : milestones.get(text);
+          return milestone === undefined
+            ? Effect.void
+            : Deferred.succeed(milestone, undefined).pipe(Effect.asVoid);
+        },
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          load(SESSION_ID),
+          ...history(SESSION_ID, "A"),
+          loaded,
+          load(b),
+          ...history(b, "B partial").slice(1),
+          {
+            type: "emit_inbound",
+            label: "b-result",
+            frame: {
+              kind: "response",
+              method: "session/load",
+              error: { code: -32603, message: "Synthetic load failure" },
+            },
+          },
+          chunk(b, "agent_thought_chunk", "B late thought", "late-b"),
+          chunk(b, "agent_message_chunk", "B late reply"),
+          chunk(SESSION_ID, "agent_thought_chunk", "A continued", "continue-a"),
+          load(b),
+          ...history(b, "B committed"),
+          loaded,
+          outbound("session/close", { sessionId: b }),
+          answer("session/close", {}),
+        ],
+        drive: ({ readSnapshot }) =>
+          Effect.gen(function* () {
+            const a = yield* readSnapshot();
+            assert.deepEqual(
+              a.messages.map((message) => message.text),
+              ["A user", "A reply", "A thought"],
+            );
+            assert.deepEqual(a.reasoningMessageIds, [a.messages[2]!.id]);
+            const pending = yield* readSnapshot(b).pipe(Effect.forkScoped);
+            yield* Deferred.await(milestones.get("B partial thought")!);
+            if (ending === "is interrupted") yield* Fiber.interrupt(pending);
+            replayGate.release("b-result");
+            const failed = yield* Fiber.await(pending);
+            assert.isTrue(Exit.isFailure(failed));
+            assert.equal(Exit.hasInterrupts(failed), ending === "is interrupted");
+            const assertRetained = (retained: ProviderAdapterV2ThreadSnapshot) => {
+              assert.deepEqual(retained.messages, a.messages);
+              assert.deepEqual(retained.reasoningMessageIds, a.reasoningMessageIds);
+              assert.deepEqual(retained.providerPayload, a.providerPayload);
+            };
+            assertRetained(yield* readSnapshot());
+            replayGate.release("late-b");
+            yield* Deferred.await(milestones.get("B late reply")!);
+            assertRetained(yield* readSnapshot());
+            replayGate.release("continue-a");
+            yield* Deferred.await(milestones.get("A continued")!);
+            const continued = yield* readSnapshot();
+            assert.deepEqual(
+              continued.messages.map((message) => message.text),
+              ["A user", "A reply", "A thoughtA continued"],
+            );
+            assert.deepEqual(
+              continued.messages.map((message) => message.id),
+              a.messages.map((message) => message.id),
+            );
+            assert.deepEqual(continued.reasoningMessageIds, a.reasoningMessageIds);
+            const committed = yield* readSnapshot(b);
+            assert.deepEqual(
+              committed.messages.map((message) => message.text),
+              ["B committed user", "B committed reply", "B committed thought"],
+            );
+            assert.deepEqual(committed.reasoningMessageIds, [committed.messages[2]!.id]);
+            assert.deepEqual((yield* readSnapshot(b)).messages, committed.messages);
+          }).pipe(Effect.scoped),
       });
     }).pipe(Effect.provide(testLayer), Effect.scoped),
 );
