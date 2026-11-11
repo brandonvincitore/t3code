@@ -1,5 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
-import { DESKTOP_UPDATE_RESTART_MARKER_FILE, DesktopUpdateStateSchema } from "@t3tools/contracts";
+import {
+  DESKTOP_UPDATE_RESTART_MARKER_FILE,
+  DesktopUpdateStateSchema,
+  DesktopUpdateStatusReport,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -24,6 +28,9 @@ import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 const encodeUpdateState = Schema.encodeEffect(DesktopUpdateStateSchema);
+const decodeUpdateState = Schema.decodeUnknownEffect(DesktopUpdateStateSchema);
+const encodeUpdateReport = Schema.encodeEffect(DesktopUpdateStatusReport);
+const decodeUpdateReport = Schema.decodeUnknownEffect(DesktopUpdateStatusReport);
 
 describe("DesktopUpdates", () => {
   it.effect("updates Linux .deb installs and leaves other non-AppImage installs off", () =>
@@ -1067,7 +1074,28 @@ describe("DesktopUpdates under a managed policy", () => {
         assert.equal(held.status, "disabled");
         assert.include(held.message ?? "", message);
         assert.isTrue(held.channelBlockedByPolicy);
-        assert.isTrue((yield* encodeUpdateState(held)).channelBlockedByPolicy);
+        const encoded = yield* encodeUpdateState(held);
+        const report = { version: 1 as const, type: "desktopUpdateStatus" as const, state: held };
+        const encodedReport = yield* encodeUpdateReport(report);
+        assert.deepEqual(
+          {
+            ipcEncode: encoded,
+            ipcDecode: yield* decodeUpdateState(held),
+            ipcRoundtrip: yield* decodeUpdateState(JSON.parse(JSON.stringify(encoded))),
+            reportEncode: encodedReport.state,
+            reportDecode: (yield* decodeUpdateReport(report)).state,
+            reportRoundtrip: (yield* decodeUpdateReport(JSON.parse(JSON.stringify(encodedReport))))
+              .state,
+          },
+          {
+            ipcEncode: held,
+            ipcDecode: held,
+            ipcRoundtrip: held,
+            reportEncode: held,
+            reportDecode: held,
+            reportRoundtrip: held,
+          },
+        );
         assert.isFalse((yield* updates.check("menu")).checked);
         assert.equal(harness.checkCount(), 0);
 
