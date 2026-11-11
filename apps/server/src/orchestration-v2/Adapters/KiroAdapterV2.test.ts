@@ -2545,7 +2545,7 @@ describe("KiroAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.effect("advertises secret storage and answers Kiro's secret reads from its secrets file", () =>
+  it.effect("advertises secret storage without importing native credentials", () =>
     Effect.gen(function* () {
       const kiroHome = yield* makeKiroHome({ [MCP_TOKENS_KEY]: MCP_TOKENS });
       yield* runKiroScript({
@@ -2576,7 +2576,7 @@ describe("KiroAdapterV2", () => {
           answer("initialize", KIRO_V3_INITIALIZE),
           outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
           kiroSecretRequest("_kiro/secret/get", { key: MCP_TOKENS_KEY }),
-          kiroSecretResponse("_kiro/secret/get", { value: MCP_TOKENS }),
+          kiroSecretResponse("_kiro/secret/get", { value: null }),
           kiroSecretRequest("_kiro/secret/get", { key: "kiro.mcp.missing.tokens" }),
           kiroSecretResponse("_kiro/secret/get", { value: null }),
           answer("session/new", sessionSetup([modeOption])),
@@ -2604,7 +2604,7 @@ describe("KiroAdapterV2", () => {
         replacementFrames: [
           ...openFrames,
           kiroSecretRequest("_kiro/secret/get", { key: MCP_TOKENS_KEY }),
-          kiroSecretResponse("_kiro/secret/get", { value: MCP_TOKENS }),
+          kiroSecretResponse("_kiro/secret/get", { value: null }),
           answer("session/new", sessionSetup([modeOption])),
           ...closeSession,
         ],
@@ -2613,7 +2613,7 @@ describe("KiroAdapterV2", () => {
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
-  it.effect("stores and deletes Kiro's secrets in its secrets file", () =>
+  it.effect("stores and deletes Kiro secrets without mutating native credentials", () =>
     Effect.gen(function* () {
       const kiroHome = yield* makeKiroHome({ [MCP_TOKENS_KEY]: MCP_TOKENS });
       const refreshed = JSON.stringify({ access_token: "refreshed", token_type: "Bearer" });
@@ -2627,8 +2627,12 @@ describe("KiroAdapterV2", () => {
           outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
           kiroSecretRequest("_kiro/secret/store", { key: otherKey, value: refreshed }),
           kiroSecretResponse("_kiro/secret/store", { success: true }),
+          kiroSecretRequest("_kiro/secret/get", { key: otherKey }),
+          kiroSecretResponse("_kiro/secret/get", { value: refreshed }),
           kiroSecretRequest("_kiro/secret/delete", { key: MCP_TOKENS_KEY }),
           kiroSecretResponse("_kiro/secret/delete", { success: true }),
+          kiroSecretRequest("_kiro/secret/get", { key: MCP_TOKENS_KEY }),
+          kiroSecretResponse("_kiro/secret/get", { value: null }),
           answer("session/new", sessionSetup([modeOption])),
           ...closeSession,
         ],
@@ -2637,8 +2641,8 @@ describe("KiroAdapterV2", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       assert.deepStrictEqual(
         JSON.parse(yield* fileSystem.readFileString(kiroHome.secretsPath)),
-        { [otherKey]: refreshed },
-        "Kiro's stored and deleted secrets must land in <KIRO_HOME>/secrets.json",
+        { [MCP_TOKENS_KEY]: MCP_TOKENS },
+        "Native credentials must remain unchanged",
       );
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );

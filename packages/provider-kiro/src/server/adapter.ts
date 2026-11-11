@@ -790,7 +790,7 @@ function makeKiroAcpAdapterFlavor(
 export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
   options: KiroAdapterV2Options,
 ) {
-  const secretStorage = yield* makeKiroSecretStorage(options.environment);
+  const secretStorage = yield* makeKiroSecretStorage(options.environment, options.instanceId);
   return yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: makeKiroAcpAdapterFlavor(

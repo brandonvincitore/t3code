@@ -45,8 +45,16 @@ leaves the thread on Kiro's current agent.
 Kiro threads load the MCP servers in your Kiro configuration. Open **MCP servers** in a
 conversation's Servers panel to refresh connection and authentication status. When the installed
 CLI supports reconnect and a local browser can receive its callback, use **Sign in** there.
-For remote connections or CLIs without that capability, sign in through `kiro-cli` on the
-server (`/mcp`, then re-authenticate) and reconnect the conversation. Existing sign-ins are reused.
+T3 stores these MCP sign-ins in this environment, separately for each Kiro provider instance
+and Kiro home. It does not import or reuse MCP credentials from `kiro-cli`; existing CLI-only
+sign-ins need one sign-in inside T3. Native CLI MCP sign-out does not delete T3-held credentials.
+Kiro can invalidate or delete its T3-held credentials; local deletion does not revoke the grant
+at the MCP provider. Dismissing a sign-in URL only cancels the local sign-in prompt.
+
+In-app sign-in requires a supported CLI and a local callback. Remote connections without that
+callback cannot complete this flow; signing in through the CLI does not populate T3's storage.
+Kiro's model-account login remains managed by the native CLI, and logging out of that account
+may prevent Kiro access.
 
 ## Skills
 
