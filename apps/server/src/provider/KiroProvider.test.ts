@@ -176,7 +176,7 @@ function kiroCli(
   extensionMethods: ReadonlyArray<string> = KIRO_EXTENSION_METHODS,
 ) {
   const invoked: Array<string> = [];
-  const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+  const environments: Array<ChildProcess.CommandOptions["env"]> = [];
   const templateParams: Array<unknown> = [];
   const requests: Array<string> = [];
   const spawner = ChildProcessSpawner.make((command) => {

@@ -1,5 +1,4 @@
-import { describe, expect, it } from "@effect/vitest";
-import { vi } from "vitest";
+import { describe, expect, it, vi } from "@effect/vitest";
 import type { ModelCapabilities } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";

@@ -98,11 +98,11 @@ describe("makeKiroSecretStorage", () => {
           return span;
         },
       });
-      const failures = yield* Effect.all(
-        [storage.get(sentinel), storage.store(sentinel, sentinel), storage.remove(sentinel)].map(
-          (operation) => operation.pipe(Effect.flip),
-        ),
-      ).pipe(
+      const failures = yield* Effect.all([
+        storage.get(sentinel).pipe(Effect.flip),
+        storage.store(sentinel, sentinel).pipe(Effect.flip),
+        storage.remove(sentinel).pipe(Effect.flip),
+      ]).pipe(
         Effect.withTracer(tracer),
         Effect.provide(
           Logger.layer([
