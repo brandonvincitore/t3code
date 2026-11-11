@@ -15,6 +15,8 @@ import * as ServerConfig from "../config.ts";
 import * as DesktopTelemetryReceiver from "../resourceTelemetry/DesktopTelemetryReceiver.ts";
 import * as DesktopAppUpdate from "./DesktopAppUpdate.ts";
 
+const decodeReport = Schema.decodeUnknownSync(DesktopUpdateStatusReport);
+
 function makeState(overrides: Partial<DesktopUpdateState> = {}): DesktopUpdateState {
   return {
     enabled: true,
@@ -46,7 +48,7 @@ function report(
     readonly preparedRequestId?: string;
   },
 ): DesktopUpdateStatusReport {
-  return Schema.decodeUnknownSync(DesktopUpdateStatusReport)({
+  return decodeReport({
     version: 1,
     type: "desktopUpdateStatus",
     requestId,

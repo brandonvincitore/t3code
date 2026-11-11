@@ -167,8 +167,9 @@ describe("DesktopRemoteUpdates", () => {
         assert.equal(harness.quitAndInstalls(), 0);
         assert.equal(harness.downloadCount(), 1);
 
-        yield* Effect.all(
-          ["req-concurrent-a", "req-concurrent-b"].map((id) => Queue.offer(requests, request(id))),
+        yield* Effect.forEach(
+          ["req-concurrent-a", "req-concurrent-b"],
+          (id) => Queue.offer(requests, request(id)),
           { concurrency: "unbounded" },
         );
         for (const id of ["req-concurrent-a", "req-concurrent-b"]) {
@@ -1177,6 +1178,7 @@ describe("DesktopRemoteUpdates", () => {
             .map((report) => report.outcome),
           ["ready-to-install", "failed", "failed"],
         );
+        assert.equal(harness.quitAndInstalls(), 1);
       }),
     );
   });
