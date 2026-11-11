@@ -3,6 +3,9 @@ import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Logger from "effect/Logger";
+import * as Tracer from "effect/Tracer";
+import * as NodeUtil from "node:util";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -20,6 +23,7 @@ describe("makeKiroSecretStorage", () => {
         yield* makeKiroSecretStorage(environment),
         yield* makeKiroSecretStorage(environment),
       ];
+      assert.deepStrictEqual(yield* sessions[0]!.get("missing"), { value: null });
       const keys = Array.from({ length: 20 }, (_, index) => `kiro.mcp.${index}.tokens`);
       yield* Effect.forEach(
         keys,
@@ -80,13 +84,110 @@ describe("makeKiroSecretStorage", () => {
       const path = yield* Path.Path;
       const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-kiro-secrets-" });
       const secretsPath = path.join(root, "secrets.json");
-      const original = '{"kiro.mcp.a.tokens":"A","kiro.other":{"nested":true}}';
+      const sentinel = "sensitive-sentinel";
+      const original = JSON.stringify({ [sentinel]: sentinel, other: { nested: sentinel } });
       yield* fileSystem.writeFileString(secretsPath, original);
       const storage = yield* makeKiroSecretStorage({ KIRO_HOME: root });
 
-      assert.deepStrictEqual(yield* storage.get("kiro.mcp.a.tokens"), { value: null });
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(storage.store("kiro.mcp.b.tokens", "B"))));
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(storage.remove("kiro.mcp.a.tokens"))));
+      const spans: Array<Tracer.NativeSpan> = [];
+      const logs: Array<unknown> = [];
+      const tracer = Tracer.make({
+        span: (options) => {
+          const span = new Tracer.NativeSpan(options);
+          spans.push(span);
+          return span;
+        },
+      });
+      const failures = yield* Effect.all(
+        [storage.get(sentinel), storage.store(sentinel, sentinel), storage.remove(sentinel)].map(
+          (operation) => operation.pipe(Effect.flip),
+        ),
+      ).pipe(
+        Effect.withTracer(tracer),
+        Effect.provide(
+          Logger.layer([
+            Logger.make((entry) => {
+              logs.push(entry.message);
+            }),
+          ]),
+        ),
+      );
+      for (const failure of failures) {
+        assert.strictEqual(failure._tag, "AcpRequestError");
+        assert.strictEqual(failure.message, "Kiro secret storage decode failed");
+        assert.isUndefined(failure.cause);
+        assert.isUndefined(failure.data);
+      }
+      const recorded = NodeUtil.inspect(
+        [
+          failures,
+          logs,
+          spans.map(({ name, attributes, events, status }) => ({
+            name,
+            attributes,
+            events,
+            status,
+          })),
+        ],
+        { depth: null },
+      );
+      assert.notInclude(recorded, sentinel);
+      assert.notInclude(recorded, secretsPath);
+      assert.deepStrictEqual(logs, []);
+      assert.strictEqual(yield* fileSystem.readFileString(secretsPath), original);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+  it.effect("distinguishes missing secrets from sanitized filesystem failures", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-kiro-secrets-" });
+      const secretsPath = path.join(root, "secrets.json");
+      const original = JSON.stringify({ present: "unchanged" });
+      yield* fileSystem.writeFileString(secretsPath, original);
+      const logs: Array<unknown> = [];
+      yield* Effect.gen(function* () {
+        const storage = yield* makeKiroSecretStorage({ KIRO_HOME: root });
+        assert.deepStrictEqual(yield* storage.get("missing"), { value: null });
+        assert.deepStrictEqual(yield* storage.get("present"), { value: "unchanged" });
+        for (const tag of ["PermissionDenied", "Unknown", "NotFound"] as const) {
+          const failingReads = FileSystem.FileSystem.of({
+            ...fileSystem,
+            readFileString: () =>
+              Effect.fail(
+                PlatformError.systemError({
+                  _tag: tag,
+                  module: "FileSystem",
+                  method: "readFileString",
+                  pathOrDescriptor: secretsPath,
+                  cause: new Error("sensitive-sentinel"),
+                }),
+              ),
+          });
+          const failing = yield* makeKiroSecretStorage({ KIRO_HOME: root }).pipe(
+            Effect.provideService(FileSystem.FileSystem, failingReads),
+          );
+          if (tag === "NotFound") {
+            assert.deepStrictEqual(yield* failing.get("missing"), { value: null });
+          } else {
+            const failure = yield* failing.get("sensitive-sentinel").pipe(Effect.flip);
+            assert.strictEqual(failure.message, "Kiro secret storage read failed");
+            assert.isUndefined(failure.cause);
+            assert.isUndefined(failure.data);
+            assert.notInclude(NodeUtil.inspect(failure, { depth: null }), "sensitive-sentinel");
+            assert.notInclude(NodeUtil.inspect(failure, { depth: null }), secretsPath);
+          }
+        }
+      }).pipe(
+        Effect.provide(
+          Logger.layer([
+            Logger.make((entry) => {
+              logs.push(entry.message);
+            }),
+          ]),
+        ),
+      );
+      assert.deepStrictEqual(logs, []);
       assert.strictEqual(yield* fileSystem.readFileString(secretsPath), original);
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );

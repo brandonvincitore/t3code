@@ -21,8 +21,9 @@ const encodeSecrets = Schema.encodeSync(SecretsJson);
 // Read-modify-write is serialized across every Kiro session in this server.
 const secretsFileLock = Semaphore.makeUnsafe(1);
 
-const secretStorageError = (cause: unknown) =>
-  EffectAcpErrors.AcpRequestError.internalError("Kiro secret storage failed", undefined, { cause });
+// Storage diagnostics must never retain credential contents, keys, or filesystem paths.
+const secretStorageError = (category: "read" | "decode" | "write") =>
+  EffectAcpErrors.AcpRequestError.internalError(`Kiro secret storage ${category} failed`);
 
 /** kiro-cli's own secrets file, so sessions reuse the MCP sign-ins it stored. */
 const kiroSecretsPath = (
@@ -49,38 +50,37 @@ export const makeKiroSecretStorage = Effect.fn("makeKiroSecretStorage")(function
   const readUnlocked = fileSystem.readFileString(secretsPath).pipe(
     Effect.catchTags({
       PlatformError: (error) =>
-        error.reason._tag === "NotFound" ? Effect.succeed("{}") : Effect.fail(error),
+        error.reason._tag === "NotFound"
+          ? Effect.succeed("{}")
+          : Effect.fail(secretStorageError("read")),
     }),
-    Effect.flatMap(decodeSecrets),
+    Effect.flatMap((contents) =>
+      decodeSecrets(contents).pipe(Effect.mapError(() => secretStorageError("decode"))),
+    ),
   );
 
-  const get = Effect.fn("KiroSecretStorage.get")(
-    function* (key: string) {
-      const secrets = yield* readUnlocked;
-      return { value: Object.hasOwn(secrets, key) ? (secrets[key] ?? null) : null };
-    },
-    secretsFileLock.withPermits(1),
-    Effect.orElseSucceed(() => ({ value: null })),
-  );
+  const get = Effect.fn("KiroSecretStorage.get")(function* (key: string) {
+    const secrets = yield* readUnlocked;
+    return { value: Object.hasOwn(secrets, key) ? (secrets[key] ?? null) : null };
+  }, secretsFileLock.withPermits(1));
 
-  const update = Effect.fn("KiroSecretStorage.update")(
-    function* (change: (secrets: Secrets) => Secrets) {
-      const next = change(yield* readUnlocked);
-      // Atomic, so a failed write cannot truncate the sign-ins kiro-cli keeps in the same file.
-      yield* writeFileStringAtomically({
-        filePath: secretsPath,
-        contents: encodeSecrets(next),
-        mode: 0o600,
-      }).pipe(
-        Effect.provideService(FileSystem.FileSystem, fileSystem),
-        Effect.provideService(Path.Path, path),
-        Effect.provideService(HostProcess.Platform, platform),
-      );
-      return { success: true } as const;
-    },
-    secretsFileLock.withPermits(1),
-    Effect.mapError(secretStorageError),
-  );
+  const update = Effect.fn("KiroSecretStorage.update")(function* (
+    change: (secrets: Secrets) => Secrets,
+  ) {
+    const next = change(yield* readUnlocked);
+    // Atomic, so a failed write cannot truncate the sign-ins kiro-cli keeps in the same file.
+    yield* writeFileStringAtomically({
+      filePath: secretsPath,
+      contents: encodeSecrets(next),
+      mode: 0o600,
+    }).pipe(
+      Effect.mapError(() => secretStorageError("write")),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+      Effect.provideService(Path.Path, path),
+      Effect.provideService(HostProcess.Platform, platform),
+    );
+    return { success: true } as const;
+  }, secretsFileLock.withPermits(1));
 
   const store = (key: string, value: string) => update((secrets) => ({ ...secrets, [key]: value }));
   const remove = (key: string) => update(({ [key]: _removed, ...rest }) => rest);
