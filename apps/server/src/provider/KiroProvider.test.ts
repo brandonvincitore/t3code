@@ -176,34 +176,39 @@ function kiroCli(
   extensionMethods: ReadonlyArray<string> = KIRO_EXTENSION_METHODS,
 ) {
   const invoked: Array<string> = [];
+  const environments: Array<NodeJS.ProcessEnv | undefined> = [];
   const templateParams: Array<unknown> = [];
   const requests: Array<string> = [];
   const spawner = ChildProcessSpawner.make((command) => {
     const args = ChildProcess.isStandardCommand(command) ? command.args.join(" ") : "";
     invoked.push(args);
+    environments.push(ChildProcess.isStandardCommand(command) ? command.options.env : undefined);
     return args === KIRO_ACP_ARGS && (template !== undefined || afterSessionNew !== undefined)
       ? acpProcess(template, templateParams, extensionMethods, afterSessionNew, requests)
       : Effect.succeed(processHandle(outputs[args] ?? { stdout: "", code: 127 }));
   });
-  return { invoked, templateParams, requests, spawner };
+  return { invoked, environments, templateParams, requests, spawner };
 }
 
 const check = (
   outputs: Record<string, CliOutput>,
   options: {
     readonly template?: unknown;
+    readonly environment?: NodeJS.ProcessEnv;
     readonly settings?: KiroSettings;
     readonly extensionMethods?: ReadonlyArray<string>;
   } = {},
 ) =>
   Effect.gen(function* () {
     const cli = kiroCli(outputs, options.template, undefined, options.extensionMethods);
-    const snapshot = yield* checkKiroProviderStatus(options.settings ?? settings, {}).pipe(
-      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner),
-    );
+    const snapshot = yield* checkKiroProviderStatus(
+      options.settings ?? settings,
+      options.environment ?? {},
+    ).pipe(Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, cli.spawner));
     return {
       snapshot,
       invoked: cli.invoked,
+      environments: cli.environments,
       templateParams: cli.templateParams,
       requests: cli.requests,
     };
@@ -247,6 +252,7 @@ describe("KiroProvider", () => {
       assert.equal(snapshot.status, "error");
       assert.isTrue(snapshot.installed);
       assert.equal(snapshot.message, "Kiro CLI is installed but failed to run.");
+      assert.isNull(snapshot.version);
       // A broken CLI is not asked for its sign-in.
       assert.deepEqual(invoked, ["--version"]);
     }),
@@ -636,12 +642,14 @@ describe("KiroProvider", () => {
         { value: "large-tasks", name: "Large tasks only" },
         { value: "delegate-all", name: "Delegate all work" },
       ];
-      const { snapshot, templateParams } = yield* check(
+      const environment = Object.freeze({ MISE_OFFLINE: "0", KIRO_PROBE_FIXTURE: "kept" });
+      const { snapshot, templateParams, environments } = yield* check(
         {
           "--version": { stdout: "kiro-cli 2.32.0\n", code: 0 },
           "whoami --format json": { stdout: '{"accountType":"ApiKey"}\n', code: 0 },
         },
         {
+          environment,
           template: {
             configOptions: [
               {
@@ -655,6 +663,11 @@ describe("KiroProvider", () => {
           },
         },
       );
+      assert.isTrue(environments.length >= 3);
+      for (const probeEnvironment of environments) {
+        assert.deepEqual(probeEnvironment, { ...environment, MISE_OFFLINE: "1" });
+      }
+      assert.equal(environment.MISE_OFFLINE, "0");
       assert.deepEqual(templateParams, [
         { _meta: { kiro: { settings: { workflows: { enabled: true } } } } },
       ]);

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { vi } from "vitest";
 import type { ModelCapabilities } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { createModelCapabilities } from "@t3tools/shared/model";
@@ -12,6 +13,8 @@ import {
   isCommandMissingCause,
   resolveProviderProbeTimeoutMs,
   parseGenericCliVersion,
+  parseCliVersionResult,
+  providerProbeEnvironment,
   providerModelsFromSettings,
   spawnAndCollect,
 } from "./snapshotProbe.ts";
@@ -93,6 +96,30 @@ describe("providerModelsFromSettings", () => {
 
     expect(models.map((model) => model.slug)).toEqual(["claude-opus-4-8", "opus"]);
     expect(models[1]?.isCustom).toBe(true);
+  });
+});
+
+describe("background probe boundaries", () => {
+  it("clones the environment and keeps offline policy local to background probes", () => {
+    const environment = Object.freeze({ MISE_OFFLINE: "0", TOOL_SETTING: "retained" });
+    expect(providerProbeEnvironment(environment)).toEqual({
+      MISE_OFFLINE: "1",
+      TOOL_SETTING: "retained",
+    });
+    expect(environment).toEqual({ MISE_OFFLINE: "0", TOOL_SETTING: "retained" });
+  });
+
+  it("parses only successful version output, including a custom parser", () => {
+    const parse = vi.fn(parseGenericCliVersion);
+    const result = { code: 1, stdout: "", stderr: "mise ERROR Version: 2026.11.5" };
+    expect(parseCliVersionResult(result, parse)).toBeNull();
+    expect(parse).not.toHaveBeenCalled();
+    expect(parseCliVersionResult({ code: 0, stdout: "tool v2.1.0", stderr: "" }, parse)).toBe(
+      "2.1.0",
+    );
+    expect(parse).toHaveBeenCalledExactlyOnceWith("tool v2.1.0\n");
+    expect(parseCliVersionResult(result)).toBeNull();
+    expect(parseCliVersionResult({ code: 0, stdout: "", stderr: "tool 3.1.0" })).toBe("3.1.0");
   });
 });
 

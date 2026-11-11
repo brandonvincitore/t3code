@@ -10,7 +10,10 @@ import * as HttpClient from "effect/http/HttpClient";
 import * as HttpClientRequest from "effect/http/HttpClientRequest";
 
 import * as OpenCodeRuntime from "./OpenCodeRuntime.ts";
-import { parseGenericCliVersion } from "@t3tools/provider-core/server/snapshotProbe";
+import {
+  parseGenericCliVersion,
+  parseCliVersionResult,
+} from "@t3tools/provider-core/server/snapshotProbe";
 
 export interface ProbedOpenCode {
   readonly generation: "v1" | "v2";
@@ -61,7 +64,7 @@ const probeOpenCodeBinary = Effect.fn("probeOpenCodeBinary")(function* (
   environment: NodeJS.ProcessEnv | undefined,
 ) {
   const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
-  const { stdout } = yield* runtime
+  const output = yield* runtime
     .runOpenCodeCommand({
       binaryPath,
       args: ["--version"],
@@ -83,7 +86,7 @@ const probeOpenCodeBinary = Effect.fn("probeOpenCodeBinary")(function* (
           ),
       }),
     );
-  const result = classifyOpenCodeCliVersion(stdout);
+  const result = probed(parseCliVersionResult(output));
   if (result) return result;
   return yield* new OpenCodeRuntime.OpenCodeRuntimeError({
     operation: "probeOpenCodeBinary",
@@ -195,5 +198,6 @@ export const makeOpenCodeRuntimeProbe = <E>(probe: Effect.Effect<ProbedOpenCode,
       get: Cache.get(cache, undefined),
       refresh: Cache.refresh(cache, undefined),
       lastSuccess: Cache.getSuccess(cache, undefined),
+      record: (probed: ProbedOpenCode) => Cache.set(cache, undefined, probed),
     }),
   );

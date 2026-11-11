@@ -162,13 +162,19 @@ describe("OpenCode version probe", () => {
 
   it.effect("remembers a probed 2.x runtime but re-probes 1.x and failures", () =>
     Effect.gen(function* () {
-      const outputs = ["", "opencode v2.0.18\n", "1.18.32\n", "1.18.32\n"];
+      const outputs = [
+        "",
+        "mise ERROR Version: 2026.11.5\n",
+        "opencode v2.0.18\n",
+        "1.18.32\n",
+        "1.18.32\n",
+      ];
       let calls = 0;
       const runtime = {
         runOpenCodeCommand: () => {
           const stdout = outputs[calls++];
           return stdout
-            ? Effect.succeed({ stdout, stderr: "", code: 0 })
+            ? Effect.succeed({ stdout, stderr: "", code: calls === 2 ? 1 : 0 })
             : Effect.fail(
                 new OpenCodeRuntime.OpenCodeRuntimeError({ operation: "spawn", detail: "ENOENT" }),
               );
@@ -186,13 +192,15 @@ describe("OpenCode version probe", () => {
 
       yield* Effect.flip(probe.get);
       assert.isTrue((yield* probe.lastSuccess)._tag === "None");
+      yield* Effect.flip(probe.get);
+      assert.isTrue((yield* probe.lastSuccess)._tag === "None");
       assert.strictEqual((yield* probe.get).generation, "v2");
       assert.strictEqual((yield* probe.get).generation, "v2");
-      assert.strictEqual(calls, 2);
-      assert.strictEqual((yield* probe.refresh).generation, "v1");
       assert.strictEqual(calls, 3);
-      assert.strictEqual((yield* probe.get).generation, "v1");
+      assert.strictEqual((yield* probe.refresh).generation, "v1");
       assert.strictEqual(calls, 4);
+      assert.strictEqual((yield* probe.get).generation, "v1");
+      assert.strictEqual(calls, 5);
     }),
   );
 });
