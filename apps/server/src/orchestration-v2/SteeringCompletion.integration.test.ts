@@ -29,6 +29,7 @@ import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 
 const driver = ProviderDriverKind.make("codex");
 const instanceId = ProviderInstanceId.make("codex");
@@ -1531,8 +1532,16 @@ it.effect.each([
               providerThreadId: turn.providerThreadId,
               providerTurnId: turn.id,
               runOrdinal: first.runOrdinal,
-              status,
-              failure: null,
+              ...(status === "failed"
+                ? {
+                    status,
+                    failureItemOrdinal: first.runOrdinal * 100 + 1,
+                    failure: makeProviderFailure({
+                      class: "provider_error",
+                      message: "Fixture failure",
+                    }),
+                  }
+                : { status, failure: null }),
               threadDisposition: "reusable",
             });
             yield* Fiber.join(settled);

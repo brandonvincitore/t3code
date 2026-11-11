@@ -307,7 +307,7 @@ it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
         ]);
         assert.lengthOf(environments, 1);
         assert.equal(environments[0]?.T3CODE_OPENCODE_PROBE_TIMEOUT_MS, "120000");
-        assert.equal(environments[0]?.MISE_OFFLINE, process.env.MISE_OFFLINE);
+        assert.equal(environments[0]?.MISE_OFFLINE, (yield* HostProcess.Environment).MISE_OFFLINE);
       }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
   );
 
