@@ -1245,35 +1245,35 @@ const make = Effect.gen(function* () {
         const commandId = CommandId.make(
           `server:force-stop:${run.id}:${yield* Clock.currentTimeMillis}`,
         );
-        yield* providerTurn === undefined && !active
-          ? Effect.void
-          : active
-            ? orchestrator.dispatch(
-                run.activeAttemptId === null
-                  ? {
-                      type: "run.interrupt",
-                      commandId,
-                      threadId: input.threadId,
-                      runId: run.id,
-                      reason: FORCE_STOP_REASON,
-                    }
-                  : {
-                      type: "run.force-stop.settle",
-                      commandId,
-                      threadId: input.threadId,
-                      runId: run.id,
-                      attemptId: run.activeAttemptId,
-                      reason: FORCE_STOP_REASON,
-                    },
-              )
-            : orchestrator.dispatch({
-                type: "thread.background-work.settle",
-                commandId,
-                threadId: input.threadId,
-                providerThreadId: providerTurn.providerThreadId,
-                providerTurnId: providerTurn.id,
-                reason: FORCE_STOP_REASON,
-              });
+        if (active) {
+          yield* orchestrator.dispatch(
+            run.activeAttemptId === null
+              ? {
+                  type: "run.interrupt",
+                  commandId,
+                  threadId: input.threadId,
+                  runId: run.id,
+                  reason: FORCE_STOP_REASON,
+                }
+              : {
+                  type: "run.force-stop.settle",
+                  commandId,
+                  threadId: input.threadId,
+                  runId: run.id,
+                  attemptId: run.activeAttemptId,
+                  reason: FORCE_STOP_REASON,
+                },
+          );
+        } else if (providerTurn !== undefined) {
+          yield* orchestrator.dispatch({
+            type: "thread.background-work.settle",
+            commandId,
+            threadId: input.threadId,
+            providerThreadId: providerTurn.providerThreadId,
+            providerTurnId: providerTurn.id,
+            reason: FORCE_STOP_REASON,
+          });
+        }
       }
       const ownProviderThreadIds = records.providerThreads.flatMap((providerThread) =>
         providerThread.appThreadId === input.threadId ? [providerThread.id] : [],

@@ -564,11 +564,13 @@ it.effect.each([
             Effect.andThen(
               scenario === "failed-scope-close"
                 ? Effect.void
-                : execution.interruptOwnedStart({
-                    threadId,
-                    runId: run.id,
-                    attemptId: run.activeAttemptId!,
-                  }),
+                : execution
+                    .interruptOwnedStart({
+                      threadId,
+                      runId: run.id,
+                      attemptId: run.activeAttemptId!,
+                    })
+                    .pipe(Effect.asVoid),
             ),
             Effect.forkScoped,
           );
