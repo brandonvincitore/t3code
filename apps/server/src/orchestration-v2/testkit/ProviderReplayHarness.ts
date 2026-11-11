@@ -497,6 +497,16 @@ export function layerWithRegistry<Error>(
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       return Layer.mock(ThreadManagementService.ThreadManagementService)({
         dispatch: orchestrator.dispatch,
+        stopDelegatedTasks: ({ threadId }) =>
+          orchestrator
+            .getThreadRecords(threadId, ["subagents"])
+            .pipe(
+              Effect.flatMap(({ subagents }) =>
+                subagents.length === 0
+                  ? Effect.void
+                  : Effect.die("Replay harness does not implement delegated task stopping"),
+              ),
+            ),
         getThreadRecords: orchestrator.getThreadRecords,
         getThreadProjection: orchestrator.getThreadProjection,
         recoverDelegatedTask: orchestrator.recoverDelegatedTask,
