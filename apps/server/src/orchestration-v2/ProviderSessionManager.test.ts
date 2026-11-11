@@ -3137,158 +3137,195 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
   }),
 );
 
-it.effect("ProviderSessionManagerV2 marks pending runtime requests non-live on release", () =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyState);
-    const effect = Effect.gen(function* () {
-      const eventSink = yield* EventSink.EventSinkV2;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const now = yield* DateTime.now;
-      const projectId = yield* idAllocator.allocate.project({
-        fixtureName: "provider-session-manager-request-expire",
-      });
-      const threadId = yield* idAllocator.allocate.thread({
-        fixtureName: "provider-session-manager-request-expire",
-        projectId,
-      });
-      const providerSessionId = yield* idAllocator.allocate.providerSession({
-        providerInstanceId: modelSelection.instanceId,
-        threadId,
-      });
-      const providerThread = makeProviderThread({
-        idAllocator,
-        threadId,
-        providerSessionId,
-        now,
-      });
-
-      yield* eventSink.write({
-        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-      });
-      const pendingRequest = yield* makePendingRuntimeRequestEvents({
-        idAllocator,
-        threadId,
-        providerSessionId,
-        providerThread,
-        now,
-      });
-      yield* eventSink.write({ events: pendingRequest.events });
-      const historical = yield* makePendingRuntimeRequestEvents({
-        idAllocator,
-        threadId,
-        providerSessionId,
-        providerThread,
-        now,
-      });
-      yield* eventSink.write({
-        events: historical.events.map((event) =>
-          event.type === "runtime-request.updated"
-            ? { ...event, payload: { ...event.payload, status: "resolved", resolvedAt: now } }
-            : event,
-        ),
-      });
-      assert.deepEqual(
-        (yield* projectionStore.getThreadRecords(threadId, ["nodes", "turnItems"], {
-          nodeIds: [pendingRequest.nodeId],
-          turnItemRequestIds: [pendingRequest.requestId],
-        })).turnItems.map((item) => item.id),
-        [pendingRequest.events.find((event) => event.type === "turn-item.updated")!.payload.id],
-      );
-      yield* manager.open({
-        threadId,
-        providerSessionId,
-        modelSelection,
-        runtimePolicy,
-      });
-      yield* manager.release({
-        providerSessionId,
-        reason: "runtime_error",
-        detail: "process exited",
-      });
-
-      const projection = yield* projectionStore.getThreadProjection(threadId);
-      const request = projection.runtimeRequests.find(
-        (request) => request.id === pendingRequest.requestId,
-      );
-      assert.equal(
-        projection.runtimeRequests.find((request) => request.id === historical.requestId)?.status,
-        "resolved",
-      );
-      const requestNode = projection.nodes.find((node) => node.id === request?.nodeId);
-      const requestTurnItem = projection.turnItems.find(
-        (item) => item.type === "approval_request" && item.requestId === request?.id,
-      );
-
-      assert.equal(request?.status, "expired");
-      assert.equal(request?.responseCapability.type, "not_resumable");
-      assert.equal(requestNode?.status, "failed");
-      assert.equal(requestTurnItem?.status, "failed");
-    });
-
-    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 1000 })));
-  }),
-);
-it.effect("ProviderSessionManagerV2 retries release records that failed to persist", () =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyState);
-    const flaky: FlakyReleaseWrites = {
-      failing: yield* Ref.make<"none" | "session" | "session-and-requests">("session"),
-      failures: yield* Queue.unbounded<void>(),
-    };
-    const effect = Effect.gen(function* () {
-      const eventSink = yield* EventSink.EventSinkV2;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
-      const now = yield* DateTime.now;
-      const threadId = ThreadId.make("thread-provider-session-manager-release-retry");
-      const providerSessionId = yield* idAllocator.allocate.providerSession({
-        providerInstanceId: modelSelection.instanceId,
-        threadId,
-      });
-      const providerThread = makeProviderThread({ idAllocator, threadId, providerSessionId, now });
-      yield* eventSink.write({
-        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-      });
-      const pendingRequest = yield* makePendingRuntimeRequestEvents({
-        idAllocator,
-        threadId,
-        providerSessionId,
-        providerThread,
-        now,
-      });
-      yield* eventSink.write({ events: pendingRequest.events });
-      yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
-
-      assert.isTrue(Exit.isFailure(yield* Effect.exit(manager.close(providerSessionId))));
-      yield* Queue.take(flaky.failures);
-      const afterClose = yield* projectionStore.getThreadProjection(threadId);
-      assert.equal(afterClose.runtimeRequests.at(-1)?.responseCapability.type, "not_resumable");
-      assert.equal(afterClose.providerSessions.at(-1)?.status, "ready");
-
-      yield* TestClock.adjust("1 second");
-      yield* Queue.take(flaky.failures);
-      yield* Ref.set(flaky.failing, "none");
-      const stopped = yield* eventSink
-        .stream({
+it.effect.each(["runtime_error", "detach"] as const)(
+  "ProviderSessionManagerV2 marks pending runtime requests non-live on release (%s)",
+  (release) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const projectId = yield* idAllocator.allocate.project({
+          fixtureName: "provider-session-manager-request-expire",
+        });
+        const threadId = yield* idAllocator.allocate.thread({
+          fixtureName: "provider-session-manager-request-expire",
+          projectId,
+        });
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
           threadId,
-          afterSequence: yield* eventSink.latestSequence({ threadId }),
-          eventType: "provider-session.updated",
-        })
-        .pipe(Stream.runHead, Effect.forkScoped);
-      yield* TestClock.adjust("1 second");
-      yield* Fiber.join(stopped);
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
 
-      const afterRetry = yield* projectionStore.getThreadProjection(threadId);
-      assert.equal(afterRetry.providerSessions.at(-1)?.status, "stopped");
-    });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const pendingRequest = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+        });
+        yield* eventSink.write({ events: pendingRequest.events });
+        const historical = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+        });
+        yield* eventSink.write({
+          events: historical.events.map((event) =>
+            event.type === "runtime-request.updated"
+              ? { ...event, payload: { ...event.payload, status: "resolved", resolvedAt: now } }
+              : event,
+          ),
+        });
+        assert.deepEqual(
+          (yield* projectionStore.getThreadRecords(threadId, ["nodes", "turnItems"], {
+            nodeIds: [pendingRequest.nodeId],
+            turnItemRequestIds: [pendingRequest.requestId],
+          })).turnItems.map((item) => item.id),
+          [pendingRequest.events.find((event) => event.type === "turn-item.updated")!.payload.id],
+        );
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        if (release === "detach") yield* manager.detach({ providerSessionId, threadId });
+        else
+          yield* manager.release({
+            providerSessionId,
+            reason: "runtime_error",
+            detail: "process exited",
+          });
 
-    yield* effect.pipe(
-      Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, flakyReleaseWrites: flaky })),
-    );
-  }),
+        const projection = yield* projectionStore.getThreadProjection(threadId);
+        const request = projection.runtimeRequests.find(
+          (request) => request.id === pendingRequest.requestId,
+        );
+        assert.equal(
+          projection.runtimeRequests.find((request) => request.id === historical.requestId)?.status,
+          "resolved",
+        );
+        const requestNode = projection.nodes.find((node) => node.id === request?.nodeId);
+        const requestTurnItem = projection.turnItems.find(
+          (item) => item.type === "approval_request" && item.requestId === request?.id,
+        );
+
+        assert.equal(request?.status, release === "detach" ? "cancelled" : "expired");
+        assert.equal(request?.responseCapability.type, "not_resumable");
+        assert.equal(requestNode?.status, release === "detach" ? "cancelled" : "failed");
+        assert.equal(requestTurnItem?.status, release === "detach" ? "cancelled" : "failed");
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({ state, idleTimeoutMs: 1000, capabilities: ExclusiveCapabilities }),
+        ),
+      );
+    }),
+);
+it.effect.each(["close", "detach"] as const)(
+  "ProviderSessionManagerV2 retries release records that failed to persist (%s)",
+  (release) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const flaky: FlakyReleaseWrites = {
+        failing: yield* Ref.make<"none" | "session" | "session-and-requests">("none"),
+        failures: yield* Queue.unbounded<void>(),
+      };
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const projectionStore = yield* ProjectionStore.ProjectionStoreV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-release-retry");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        const providerThread = makeProviderThread({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          now,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const pendingRequest = yield* makePendingRuntimeRequestEvents({
+          idAllocator,
+          threadId,
+          providerSessionId,
+          providerThread,
+          now,
+        });
+        yield* eventSink.write({ events: pendingRequest.events });
+        yield* manager.open({ threadId, providerSessionId, modelSelection, runtimePolicy });
+        yield* Ref.set(flaky.failing, release === "detach" ? "session-and-requests" : "session");
+
+        assert.isTrue(
+          Exit.isFailure(
+            yield* Effect.exit(
+              release === "detach"
+                ? manager.detach({ providerSessionId, threadId })
+                : manager.close(providerSessionId),
+            ),
+          ),
+        );
+        yield* Queue.take(flaky.failures);
+        const afterClose = yield* projectionStore.getThreadProjection(threadId);
+        assert.equal(
+          afterClose.runtimeRequests.at(-1)?.responseCapability.type,
+          release === "detach" ? "live" : "not_resumable",
+        );
+        assert.equal(afterClose.providerSessions.at(-1)?.status, "ready");
+
+        yield* TestClock.adjust("1 second");
+        yield* Queue.take(flaky.failures);
+        yield* Ref.set(flaky.failing, "none");
+        const stopped = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+            eventType:
+              release === "detach" ? "runtime-request.updated" : "provider-session.updated",
+          })
+          .pipe(Stream.runHead, Effect.forkScoped);
+        yield* TestClock.adjust("1 second");
+        yield* Fiber.join(stopped);
+
+        const afterRetry = yield* projectionStore.getThreadProjection(threadId);
+        if (release === "detach")
+          assert.equal(afterRetry.runtimeRequests.at(-1)?.status, "cancelled");
+        else assert.equal(afterRetry.providerSessions.at(-1)?.status, "stopped");
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            capabilities: ExclusiveCapabilities,
+            flakyReleaseWrites: flaky,
+          }),
+        ),
+      );
+    }),
 );
 
 // regression: #15048 runs got stuck after a failed session release
