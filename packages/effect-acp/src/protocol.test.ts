@@ -1,4 +1,5 @@
 import * as Path from "effect/Path";
+import * as Cause from "effect/Cause";
 import * as AcpError from "./errors.ts";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
@@ -17,10 +18,13 @@ import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { it, assert, expect } from "@effect/vitest";
+import { it, live, assert, expect } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 
 import * as AcpSchema from "./schema.ts";
+import * as AcpRpcs from "./rpc.ts";
+import * as RpcClient from "effect/rpc/RpcClient";
+import * as RpcMessage from "effect/rpc/RpcMessage";
 import * as AcpProtocol from "./protocol.ts";
 import {
   encodeJsonl,
@@ -311,10 +315,20 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       for (let index = 0; index < 32; index++) {
         assert.equal(yield* deliver(index), index);
       }
-      // A failed write terminates the connection while the reader keeps running.
+      // A failed write gives only blocked input acquisition a finite grace period.
       yield* transport.notify("x/fail", {}).pipe(Effect.exit);
+      yield* TestClock.adjust("250 millis");
       yield* Deferred.await(terminated);
-      assert.equal(yield* deliver(32), 32);
+      yield* Queue.offer(
+        input,
+        encoder.encode(
+          encodeUnknownJsonString({
+            jsonrpc: "2.0",
+            method: "x/late",
+            params: { index: 32 },
+          }) + "\n",
+        ),
+      );
 
       const retained = yield* transport.incoming.pipe(
         Stream.map((notification) => decodeIndex(notification.params).index),
@@ -899,12 +913,247 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
+  it.effect("drains buffered notifications and their reply after the output writer fails", () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const callbackStarted = yield* Deferred.make<void>();
+      const releaseCallback = yield* Deferred.make<void>();
+      const failWriter = yield* Deferred.make<void>();
+      const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const notifications: Array<AcpProtocol.AcpIncomingNotification> = [];
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio: {
+          ...stdio,
+          stdout: () =>
+            Sink.forEach((chunk: string | Uint8Array) =>
+              Queue.offer(
+                output,
+                typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+              ).pipe(
+                Effect.andThen(Deferred.await(failWriter)),
+                Effect.andThen(Effect.die("closed")),
+              ),
+            ),
+        },
+        serverRequestMethods: new Set(),
+        onNotification: (notification) =>
+          Deferred.succeed(callbackStarted, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseCallback)),
+            Effect.andThen(
+              Effect.sync(() => {
+                notifications.push(notification);
+              }),
+            ),
+          ),
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+      });
+      const pending = yield* transport.request("session/prompt", {}).pipe(Effect.forkScoped);
+      yield* Queue.take(output);
+      const frames = Array.from({ length: 195 }, (_, index) => ({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: "session-1",
+          update: {
+            sessionUpdate: index % 2 === 0 ? "agent_thought_chunk" : "agent_message_chunk",
+            content: { type: "text", text: `tail-${index}` },
+          },
+        },
+      }));
+      yield* Queue.offer(
+        input,
+        encoder.encode(frames.map((frame) => encodeUnknownJsonString(frame)).join("\n") + "\n"),
+      );
+      yield* Queue.offer(
+        input,
+        encoder.encode(
+          encodeUnknownJsonString({ jsonrpc: "2.0", id: 1, result: { stopReason: "end_turn" } }) +
+            "\n",
+        ),
+      );
+      yield* Queue.end(input);
+      yield* Deferred.await(callbackStarted);
+      yield* Deferred.succeed(failWriter, undefined);
+      yield* TestClock.adjust("1 second");
+      assert.isFalse(yield* Deferred.isDone(terminated));
+      yield* Deferred.succeed(releaseCallback, undefined);
+      assert.deepEqual(yield* Fiber.join(pending), { stopReason: "end_turn" });
+      assert.deepEqual(
+        notifications.map(
+          (notification) =>
+            notification._tag === "SessionUpdate" &&
+            "content" in notification.params.update &&
+            notification.params.update.content,
+        ),
+        Array.from({ length: 195 }, (_, index) => ({ type: "text", text: `tail-${index}` })),
+      );
+      assert.instanceOf(yield* Deferred.await(terminated), AcpError.AcpInputStreamEndedError);
+      assert.instanceOf(
+        yield* transport.request("future", {}).pipe(Effect.flip, Effect.orDie),
+        AcpError.AcpTransportError,
+      );
+    }),
+  );
+
+  it.effect.each(["never", "exit0", "exit7", "SIGKILL"] as const)(
+    "fails an unanswered request when the writer fails but input never closes (%s)",
+    (diagnostic) =>
+      Effect.gen(function* () {
+        const { stdio, output } = yield* makeInMemoryStdio();
+        const failWriter = yield* Deferred.make<void>();
+        const terminated = yield* Deferred.make<AcpError.AcpError>();
+        const acquisitionStarted = yield* Deferred.make<void>();
+        const diagnosticStarted = yield* Deferred.make<void>();
+        const acquisitions = yield* Ref.make(0);
+        const interrupted = yield* Ref.make(0);
+        const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio: {
+            ...stdio,
+            stdin: Stream.fromEffect(
+              Ref.update(acquisitions, (count) => count + 1).pipe(
+                Effect.andThen(Deferred.succeed(acquisitionStarted, undefined)),
+                Effect.andThen(Effect.never),
+                Effect.ensuring(Ref.update(interrupted, (count) => count + 1)),
+              ),
+            ),
+            stdout: () =>
+              Sink.forEach((chunk: string | Uint8Array) =>
+                Queue.offer(
+                  output,
+                  typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk),
+                ).pipe(
+                  Effect.andThen(Deferred.await(failWriter)),
+                  Effect.andThen(Effect.die("closed")),
+                ),
+              ),
+          },
+          serverRequestMethods: new Set(),
+          terminationError:
+            diagnostic === "never"
+              ? Deferred.succeed(diagnosticStarted, undefined).pipe(Effect.andThen(Effect.never))
+              : Effect.succeed(
+                  diagnostic === "SIGKILL"
+                    ? new AcpError.AcpProcessExitedError({ signal: "SIGKILL" })
+                    : new AcpError.AcpProcessExitedError({ code: diagnostic === "exit0" ? 0 : 7 }),
+                ),
+          onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        });
+        const pending = yield* transport
+          .request("session/prompt", {})
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* Queue.take(output);
+        yield* Deferred.await(acquisitionStarted);
+        yield* Deferred.succeed(failWriter, undefined);
+        if (diagnostic === "never") {
+          yield* TestClock.adjust("250 millis");
+          yield* Deferred.await(diagnosticStarted);
+          const future = yield* transport.serverProtocol
+            .send(0, {
+              _tag: "Exit",
+              requestId: "during-diagnostics",
+              exit: { _tag: "Success", value: {} },
+            })
+            .pipe(Effect.exit, Effect.forkScoped);
+          yield* TestClock.adjust("1 milli");
+          assert.isDefined(future.pollUnsafe());
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(future)));
+          assert.isFalse(yield* Deferred.isDone(terminated));
+        }
+        yield* TestClock.adjust("1 second");
+        assert.isTrue(yield* Deferred.isDone(terminated));
+        assert.equal(yield* Ref.get(acquisitions), 1);
+        assert.equal(yield* Ref.get(interrupted), 1);
+        const result = yield* Fiber.join(pending);
+        assert.isTrue(Exit.isFailure(result));
+        const error = yield* Deferred.await(terminated);
+        if (diagnostic === "never") assert.instanceOf(error, AcpError.AcpTransportError);
+        else assert.instanceOf(error, AcpError.AcpProcessExitedError);
+        if (Exit.isFailure(result))
+          assert.strictEqual(Option.getOrUndefined(Cause.findErrorOption(result.cause)), error);
+      }),
+  );
+
+  it.effect.each(["deliver", "consumer-exit", "scope-close"] as const)(
+    "settles a queued typed reply before termination closes its consumer (%s)",
+    (delivery) =>
+      Effect.gen(function* () {
+        const { stdio, input, output } = yield* makeInMemoryStdio();
+        const protocolScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(protocolScope, Exit.void));
+        const consumerScope = yield* Scope.make();
+        yield* Effect.addFinalizer(() => Scope.close(consumerScope, Exit.void));
+        const consuming = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const terminated = yield* Deferred.make<void>();
+        const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio,
+          serverRequestMethods: new Set(),
+          onTermination: () =>
+            Deferred.succeed(terminated, undefined).pipe(
+              Effect.andThen(Scope.close(consumerScope, Exit.void)),
+            ),
+        }).pipe(Effect.provideService(Scope.Scope, protocolScope));
+        const rpc = yield* RpcClient.make(AcpRpcs.CompatAgentRpcs, {
+          generateRequestId: () => RpcMessage.RequestId(AcpProtocol.RPC_REQUEST_ID_START),
+        }).pipe(
+          Effect.provideService(RpcClient.Protocol, {
+            ...transport.clientProtocol,
+            run: (id, f) =>
+              transport.clientProtocol.run(id, (message) =>
+                (message._tag === "Exit"
+                  ? Deferred.succeed(consuming, undefined).pipe(
+                      Effect.andThen(Deferred.await(release)),
+                    )
+                  : Effect.void
+                ).pipe(Effect.andThen(f(message))),
+              ),
+          }),
+          Effect.provideService(Scope.Scope, consumerScope),
+        );
+        const pending = yield* rpc["session/prompt"]({ sessionId: "session-1", prompt: [] }).pipe(
+          Effect.exit,
+          Effect.forkScoped,
+        );
+        yield* Queue.take(output);
+        yield* Queue.offer(
+          input,
+          encoder.encode(
+            encodeUnknownJsonString({
+              jsonrpc: "2.0",
+              id: AcpProtocol.RPC_REQUEST_ID_START,
+              result: { stopReason: "end_turn" },
+            }) + "\n",
+          ),
+        );
+        yield* Deferred.await(consuming);
+        yield* Queue.end(input);
+        yield* TestClock.adjust("1 second");
+        assert.isFalse(yield* Deferred.isDone(terminated));
+        if (delivery === "deliver") {
+          yield* Deferred.succeed(release, undefined);
+          assert.deepEqual(
+            yield* Fiber.join(pending),
+            Exit.succeed({ stopReason: "end_turn" as const }),
+          );
+        } else {
+          if (delivery === "consumer-exit") yield* Scope.close(consumerScope, Exit.void);
+          else {
+            yield* Scope.close(protocolScope, Exit.void);
+            yield* Scope.close(consumerScope, Exit.void);
+          }
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(pending)));
+        }
+        if (delivery !== "scope-close") yield* Deferred.await(terminated);
+      }),
+  );
+
   it.effect("fails current, queued, and future responses when the stdout writer fails", () =>
     Effect.gen(function* () {
       const writeStarted = yield* Deferred.make<void>();
       const releaseFailure = yield* Deferred.make<void>();
       const failures = yield* Queue.unbounded<string>();
       const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const admissions = yield* Queue.unbounded<void>();
       const stdio = Stdio.make({
         args: Effect.succeed([]),
         stdin: Stream.never,
@@ -922,6 +1171,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         serverRequestMethods: new Set(),
         onOutgoingResponseFailure: (requestId) => Queue.offer(failures, requestId),
         onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+        testHooks: { onOutgoingWriteAdmitted: () => Queue.offer(admissions, undefined) },
       });
       const send = (requestId: string) =>
         transport.serverProtocol
@@ -934,14 +1184,16 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       const current = yield* send("current").pipe(Effect.forkScoped);
       yield* Deferred.await(writeStarted);
       const queued = yield* send("queued").pipe(Effect.forkScoped);
-      yield* Effect.yieldNow;
+      yield* Queue.takeN(admissions, 2);
       assert.isUndefined(current.pollUnsafe());
       assert.isUndefined(queued.pollUnsafe());
       yield* Deferred.succeed(releaseFailure, undefined);
-      assert.instanceOf(yield* Deferred.await(terminated), AcpError.AcpTransportError);
       yield* Fiber.join(current);
       yield* Fiber.join(queued);
       yield* send("future");
+      assert.isFalse(yield* Deferred.isDone(terminated));
+      yield* TestClock.adjust("250 millis");
+      assert.instanceOf(yield* Deferred.await(terminated), AcpError.AcpTransportError);
 
       assert.deepEqual(
         new Set(yield* Queue.takeN(failures, 3)),
@@ -950,18 +1202,29 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect(
-    "atomically rejects an admitted response when the writer closes before queue offer",
-    () =>
+  it.effect.each(["scope-close", "writer-failure"] as const)(
+    "atomically rejects an admitted response before queue offer (%s)",
+    (closing) =>
       Effect.gen(function* () {
         const admitted = yield* Deferred.make<void>();
+        const writeStarted = yield* Deferred.make<void>();
+        const failWriter = yield* Deferred.make<void>();
+        let admissions = 0;
         const releaseAdmission = yield* Deferred.make<void>();
         const failures = yield* Queue.unbounded<string>();
         const protocolScope = yield* Scope.make();
         const stdio = Stdio.make({
           args: Effect.succeed([]),
           stdin: Stream.never,
-          stdout: () => Sink.drain,
+          stdout: () =>
+            closing === "scope-close"
+              ? Sink.drain
+              : Sink.forEach(() =>
+                  Deferred.succeed(writeStarted, undefined).pipe(
+                    Effect.andThen(Deferred.await(failWriter)),
+                    Effect.andThen(Effect.die("closed")),
+                  ),
+                ),
           stderr: () => Sink.drain,
         });
         const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
@@ -970,9 +1233,14 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
           onOutgoingResponseFailure: (requestId) => Queue.offer(failures, requestId),
           testHooks: {
             onOutgoingWriteAdmitted: () =>
-              Deferred.succeed(admitted, undefined).pipe(
-                Effect.andThen(Deferred.await(releaseAdmission)),
-              ),
+              Effect.suspend(() => {
+                admissions += 1;
+                return closing === "writer-failure" && admissions === 1
+                  ? Effect.void
+                  : Deferred.succeed(admitted, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseAdmission)),
+                    );
+              }),
           },
         }).pipe(Effect.provideService(Scope.Scope, protocolScope));
         const send = (requestId: string) =>
@@ -983,16 +1251,111 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
               exit: { _tag: "Success", value: { ok: true } },
             })
             .pipe(Effect.exit);
+        const current =
+          closing === "writer-failure" ? yield* send("current").pipe(Effect.forkScoped) : undefined;
+        if (current !== undefined) yield* Deferred.await(writeStarted);
         const admittedSend = yield* send("admitted").pipe(Effect.forkScoped);
 
         yield* Deferred.await(admitted);
-        yield* Scope.close(protocolScope, Exit.void);
+        if (current === undefined) yield* Scope.close(protocolScope, Exit.void);
+        else {
+          yield* Deferred.succeed(failWriter, undefined);
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(current)));
+          assert.equal(yield* Queue.take(failures), "current");
+        }
         yield* Deferred.succeed(releaseAdmission, undefined);
         yield* Fiber.join(admittedSend);
         yield* send("future");
 
         assert.deepEqual(yield* Queue.takeN(failures, 2), ["admitted", "future"]);
+        yield* Scope.close(protocolScope, Exit.void);
       }),
+  );
+
+  it.effect.each(["input", "callback", "write", "diagnostic", "failed-writer-input"] as const)(
+    "closes the protocol scope while %s is blocked",
+    (blocked) =>
+      Effect.gen(function* () {
+        const { stdio, input } = yield* makeInMemoryStdio();
+        const scope = yield* Scope.make();
+        const started = yield* Deferred.make<void>();
+        const stopped = yield* Ref.make(0);
+        const terminations = yield* Ref.make(0);
+        const block = Deferred.succeed(started, undefined).pipe(
+          Effect.andThen(Effect.never),
+          Effect.ensuring(Ref.update(stopped, (count) => count + 1)),
+        );
+        const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+          stdio: {
+            ...stdio,
+            stdin:
+              blocked === "input" || blocked === "failed-writer-input"
+                ? Stream.fromEffect(block)
+                : stdio.stdin,
+            stdout: () =>
+              blocked === "write"
+                ? Sink.forEach(() => block)
+                : blocked === "failed-writer-input"
+                  ? Sink.fromEffect(Effect.die("closed"))
+                  : stdio.stdout(),
+          },
+          terminationError: blocked === "diagnostic" ? block : Effect.never,
+          serverRequestMethods: new Set(),
+          onNotification: () => (blocked === "callback" ? block : Effect.void),
+          onTermination: () => Ref.update(terminations, (count) => count + 1),
+        }).pipe(Effect.provideService(Scope.Scope, scope));
+        if (blocked === "write") yield* transport.notify("x/test", {});
+        if (blocked === "callback")
+          yield* Queue.offer(
+            input,
+            encoder.encode(
+              encodeUnknownJsonString({ jsonrpc: "2.0", method: "x/test", params: {} }) + "\n",
+            ),
+          );
+        if (blocked === "diagnostic") yield* Queue.end(input);
+        yield* Deferred.await(started);
+        yield* Scope.close(scope, Exit.void);
+        assert.equal(yield* Ref.get(stopped), 1);
+        assert.isAtMost(yield* Ref.get(terminations), 1);
+        assert.isAtMost(yield* Queue.size(transport.serverProtocol.disconnects), 1);
+      }),
+  );
+
+  it.effect("preserves a specific input error after the writer fails", () =>
+    Effect.gen(function* () {
+      const { stdio, input } = yield* makeInMemoryStdio();
+      const release = yield* Deferred.make<void>();
+      const failedWrite = yield* Deferred.make<void>();
+      const terminated = yield* Deferred.make<AcpError.AcpError>();
+      const readError = new AcpError.AcpTransportError({
+        operation: "read-input-stream",
+        cause: "read failed",
+      });
+      const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
+        stdio: {
+          ...stdio,
+          stdin: stdio.stdin.pipe(
+            Stream.concat(
+              Stream.fromEffect(
+                Deferred.await(release).pipe(Effect.andThen(Effect.fail(readError))),
+              ),
+            ),
+          ),
+          stdout: () =>
+            Sink.fromEffect(Effect.die("closed")).pipe(
+              Sink.onExit(() => Deferred.succeed(failedWrite, undefined)),
+            ),
+        },
+        serverRequestMethods: new Set(),
+        terminationError: Effect.succeed(new AcpError.AcpProcessExitedError({ code: 7 })),
+        onTermination: (error) => Deferred.succeed(terminated, error).pipe(Effect.asVoid),
+      });
+      yield* Deferred.await(failedWrite);
+      yield* Queue.end(input);
+      yield* Deferred.succeed(release, undefined);
+      assert.strictEqual(yield* Deferred.await(terminated), readError);
+      assert.isAtMost(yield* Queue.size(transport.serverProtocol.disconnects), 1);
+    }),
   );
 
   it.effect("drops agent-internal JSON-RPC responses with non-numeric request ids", () =>
@@ -1120,6 +1483,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       yield* Queue.offer(input, encoder.encode('{"jsonrpc":"2.0","id":1,"result":'));
       yield* Queue.end(input);
 
+      yield* TestClock.adjust("250 millis");
       const error = yield* Deferred.await(termination);
       assert.instanceOf(error, AcpError.AcpInputStreamEndedError);
       assert.strictEqual(yield* Fiber.join(pending), error);
@@ -1155,7 +1519,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("propagates the real child exit code when the input stream ends", () =>
+  live("propagates the real child exit code when the input stream ends", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({ ACP_MOCK_EXIT_IMMEDIATELY_CODE: "7" });
       const firstMessage = yield* Deferred.make<unknown>();
@@ -1185,7 +1549,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       assert.equal(defect.message, "ACP protocol terminated.");
       assert.instanceOf(defect.cause, AcpError.AcpProcessExitedError);
       assert.equal((defect.cause as AcpError.AcpProcessExitedError).code, 7);
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect("does not treat intentional serverProtocol.end as a transport failure", () =>
@@ -1212,19 +1576,24 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
     }),
   );
 
-  it.effect("does not emit a second process-exit error after a decode failure", () =>
+  live("does not emit a second process-exit error after a decode failure", () =>
     Effect.gen(function* () {
       const handle = yield* makeHandle({
         ACP_MOCK_MALFORMED_OUTPUT: "1",
         ACP_MOCK_MALFORMED_OUTPUT_EXIT_CODE: "23",
       });
       const terminationCalls = yield* Ref.make(0);
+      const terminated = yield* Deferred.make<void>();
       const firstMessage = yield* Deferred.make<unknown>();
       const transport = yield* AcpProtocol.makeAcpPatchedProtocol({
         stdio: makeChildStdio(handle),
         terminationError: makeTerminationError(handle),
         serverRequestMethods: new Set(),
-        onTermination: () => Ref.update(terminationCalls, (count) => count + 1),
+        onTermination: () =>
+          Ref.update(terminationCalls, (count) => count + 1).pipe(
+            Effect.andThen(Deferred.succeed(terminated, undefined)),
+            Effect.asVoid,
+          ),
       });
 
       yield* transport.clientProtocol
@@ -1232,6 +1601,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
         .pipe(Effect.forkScoped);
 
       const message = yield* Deferred.await(firstMessage);
+      yield* Deferred.await(terminated);
       assert.equal(yield* Ref.get(terminationCalls), 1);
       assert.equal((message as { readonly _tag?: string })._tag, "ClientProtocolError");
       const defect = (message as { readonly error: { readonly reason: unknown } }).error.reason as {
@@ -1242,7 +1612,7 @@ it.layer(NodeServices.layer)("effect-acp protocol", (it) => {
       assert.equal(defect._tag, "RpcClientDefect");
       assert.equal(defect.message, "ACP protocol terminated.");
       assert.instanceOf(defect.cause, AcpError.AcpProtocolParseError);
-    }),
+    }).pipe(Effect.provide(NodeServices.layer)),
   );
 
   it.effect.each(["request", "notification"] as const)(

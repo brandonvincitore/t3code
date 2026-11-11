@@ -1,6 +1,5 @@
 import type * as AcpCompat from "./compat.ts";
 import * as Cause from "effect/Cause";
-import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Deferred from "effect/Deferred";
 import * as Exit from "effect/Exit";
@@ -281,7 +280,14 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const protocolScope = yield* Effect.scope;
   const parser = makeStrictNdJsonRpcParser();
   const serverQueue = yield* Queue.unbounded<RpcMessage.FromClientEncoded>();
-  const clientQueue = yield* Queue.unbounded<RpcMessage.FromServerEncoded>();
+  const clientQueue = yield* Queue.unbounded<
+    | RpcMessage.FromServerEncoded
+    | {
+        readonly _tag: "DeliveryBarrier";
+        readonly acknowledge: Deferred.Deferred<void>;
+      }
+  >();
+  let clientConsumerDone: Deferred.Deferred<void> | undefined;
   const rawNotifications = yield* Queue.unbounded<AcpBufferedRawNotification, Cause.Done<void>>();
   // JSON length of the notifications offered since the queue was last empty.
   // `incoming` takes the whole backlog on every pull, so an empty queue holds
@@ -301,9 +307,18 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   const terminationHandled = yield* Ref.make(false);
   const terminationFailure = yield* Deferred.make<never, AcpError.AcpError>();
   const extPending = yield* Ref.make(new Map<string, AcpPendingRequest>());
+  const writerFailure = yield* Deferred.make<AcpError.AcpError>();
 
-  const ensureActive = Ref.get(terminationHandled).pipe(
-    Effect.flatMap((terminated) => (terminated ? Deferred.await(terminationFailure) : Effect.void)),
+  const ensureActive = Ref.get(outgoingWriterState).pipe(
+    Effect.flatMap((state) =>
+      state.terminalError !== undefined
+        ? Effect.fail(state.terminalError)
+        : Ref.get(terminationHandled).pipe(
+            Effect.flatMap((terminated) =>
+              terminated ? Deferred.await(terminationFailure) : Effect.void,
+            ),
+          ),
+    ),
   );
 
   const logProtocol = (event: AcpProtocolLogEvent) => {
@@ -514,6 +529,13 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
           yield* Deferred.fail(terminationFailure, error);
           yield* failAllExtPending(error);
           yield* emitClientProtocolError(error);
+          // EOF must not close the client scope before its FIFO replies are consumed.
+          const consumerDone = clientConsumerDone;
+          if (consumerDone !== undefined) {
+            const acknowledge = yield* Deferred.make<void>();
+            yield* Queue.offer(clientQueue, { _tag: "DeliveryBarrier", acknowledge });
+            yield* Effect.raceFirst(Deferred.await(acknowledge), Deferred.await(consumerDone));
+          }
           if (options.onTermination) {
             yield* options.onTermination(error);
           }
@@ -772,7 +794,33 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
     }
   };
 
-  yield* options.stdio.stdin.pipe(
+  const classifyInputEnd = Effect.fn("AcpProtocol.classifyInputEnd")(function (
+    fallback: AcpError.AcpError,
+  ) {
+    return options.terminationError === undefined
+      ? Effect.succeed(fallback)
+      : options.terminationError.pipe(
+          Effect.timeoutOption("250 millis"),
+          Effect.map(Option.getOrElse(() => fallback)),
+        );
+  });
+
+  // Only acquisition is bounded: ordered callbacks may outlive this grace period.
+  const input = Stream.fromPull(
+    Stream.toPull(options.stdio.stdin).pipe(
+      Effect.map((pull) =>
+        Effect.raceFirst(
+          pull,
+          Deferred.await(writerFailure).pipe(
+            Effect.flatMap((error) =>
+              Effect.sleep("250 millis").pipe(Effect.andThen(Effect.fail(error))),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+  yield* input.pipe(
     Stream.runForEach((data) =>
       (options.logIncoming
         ? logProtocol({
@@ -830,19 +878,18 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
               operation: "read-input-stream",
               cause: error,
             });
-        return handleTermination(() => Effect.succeed(normalized));
+        return handleTermination(() =>
+          Ref.get(outgoingWriterState).pipe(
+            Effect.flatMap((state) =>
+              state.terminalError === normalized
+                ? classifyInputEnd(normalized)
+                : Effect.succeed(normalized),
+            ),
+          ),
+        );
       },
       onSuccess: () =>
-        handleTermination(() => {
-          const ended = new AcpError.AcpInputStreamEndedError({});
-          if (!options.terminationError) return Effect.succeed(ended);
-          // Stdout can close without process exit; use a live-clock diagnostic grace period.
-          return options.terminationError.pipe(
-            Effect.timeoutOption("250 millis"),
-            Effect.provideService(Clock.Clock, Clock.Clock.defaultValue()),
-            Effect.map(Option.getOrElse(() => ended)),
-          );
-        }),
+        handleTermination(() => classifyInputEnd(new AcpError.AcpInputStreamEndedError({}))),
     }),
     Effect.forkScoped,
   );
@@ -915,9 +962,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
           });
           return failOutgoingWrites(error).pipe(
             Effect.andThen(
-              Cause.hasInterruptsOnly(cause)
-                ? Effect.void
-                : handleTermination(() => Effect.succeed(error)),
+              Cause.hasInterruptsOnly(cause) ? Effect.void : Deferred.succeed(writerFailure, error),
             ),
           );
         },
@@ -932,7 +977,7 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
                       cause: "Output writer ended",
                     });
                     return failOutgoingWrites(error).pipe(
-                      Effect.andThen(handleTermination(() => Effect.succeed(error))),
+                      Effect.andThen(Deferred.succeed(writerFailure, error)),
                     );
                   })();
               return handled.pipe(
@@ -954,9 +999,20 @@ export const makeAcpPatchedProtocol = Effect.fn("makeAcpPatchedProtocol")(functi
   // Protocol loops and per-message sends share the caller's operation span.
   const clientProtocol = RpcClient.Protocol.of({
     run: Effect.fnUntraced(function* (_clientId, f) {
+      const done = yield* Deferred.make<void>();
+      clientConsumerDone = done;
       return yield* Stream.fromQueue(clientQueue).pipe(
-        Stream.runForEach((message) => f(message)),
+        Stream.runForEach((message) =>
+          message._tag === "DeliveryBarrier"
+            ? Deferred.succeed(message.acknowledge, undefined)
+            : f(message),
+        ),
         Effect.forever,
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (clientConsumerDone === done) clientConsumerDone = undefined;
+          }).pipe(Effect.andThen(Deferred.succeed(done, undefined))),
+        ),
       );
     }),
     send: Effect.fnUntraced(function* (_clientId, request) {
