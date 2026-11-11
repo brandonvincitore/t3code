@@ -337,6 +337,59 @@ it.effect("checkpoint capture keeps LF files that core.safecrlf would refuse to 
   }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
 );
 
+it.effect.each(
+  [false, true].flatMap((nested) =>
+    (["gitignore", "exclude", "global"] as const).flatMap((source) =>
+      ["\r\n", "   \n"].map((blank) => ({ nested, source, blank })),
+    ),
+  ),
+)(
+  "checkpoint capture and restore keep new files with blank ignore lines (nested=$nested, source=$source, blank=$blank)",
+  ({ nested, source, blank }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const driver = yield* GitVcsDriver.makeVcsDriverShape();
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-checkpoint-blank-ignore-" });
+      const { git, checkpointRef } = yield* makeCheckpointFixture(driver, root);
+      const ignorePath = path.join(
+        root,
+        source === "gitignore"
+          ? ".gitignore"
+          : source === "exclude"
+            ? ".git/info/exclude"
+            : ".git/global-ignore",
+      );
+      yield* fs.writeFileString(ignorePath, blank);
+      if (source === "global") yield* git(["config", "core.excludesFile", ignorePath]);
+      const cwd = nested ? path.join(root, "nested", "scope") : root;
+      yield* fs.makeDirectory(cwd, { recursive: true });
+      const file = path.join(cwd, "new.txt");
+      yield* fs.writeFileString(file, "captured\n");
+      const originalIndex = yield* fs.readFile(path.join(root, ".git", "index"));
+
+      yield* driver.checkpoints.captureCheckpoint({ cwd, checkpointRef });
+      assert.deepEqual(yield* fs.readFile(path.join(root, ".git", "index")), originalIndex);
+      const captured =
+        (yield* git([
+          "ls-tree",
+          "-r",
+          "--name-only",
+          checkpointRef,
+          "--",
+          nested ? "nested/scope/new.txt" : "new.txt",
+        ])).stdout !== "";
+      yield* fs.writeFileString(file, "later\n");
+      yield* driver.checkpoints.restoreCheckpoint({ cwd, checkpointRef, fallbackToHead: false });
+
+      assert.deepEqual(
+        { captured, restored: yield* fs.exists(file) },
+        { captured: true, restored: true },
+      );
+      assert.strictEqual(yield* fs.readFileString(file), "captured\n");
+    }).pipe(Effect.scoped, Effect.provide(layerGitContract)),
+);
+
 it.effect("checkpoint capture refuses a truncated nested repository listing", () =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -1007,7 +1060,6 @@ it.effect.each(["committed", "unborn"] as const)(
         "rev-parse",
         "config",
         ...(head === "committed" ? ["read-tree", "ls-files"] : []),
-        "check-ignore",
         "add",
         "write-tree",
         "commit-tree",
@@ -1062,11 +1114,11 @@ it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
       assert.deepStrictEqual(commands, [
         "rev-parse",
         "rev-parse",
+        "rev-parse",
         "config",
         "rev-parse",
         "read-tree",
         "ls-files",
-        "check-ignore",
         "add",
         "write-tree",
         "commit-tree",
