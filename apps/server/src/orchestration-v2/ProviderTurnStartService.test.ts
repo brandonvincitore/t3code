@@ -40,6 +40,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { layerRealGit } from "./ProviderTurnStartService.testkit.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { agentSessionImportTurnItemId } from "../project/agentSessionImportIds.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
@@ -275,6 +276,7 @@ function makeLocalCommandHarness(input: {
   readonly gitWorkflow?: GitWorkflow.GitWorkflowService["Service"];
   readonly fileSystem?: FileSystem.FileSystem;
   readonly previousNativeSession?: boolean;
+  readonly useRealHandoffs?: boolean;
   readonly previousMessages?: ReadonlyArray<string>;
   readonly logoutFailure?: string;
   readonly openFailure?: unknown;
@@ -804,7 +806,9 @@ function makeLocalCommandHarness(input: {
     forkThread,
     startTurn,
   };
-  const open = vi.fn(() =>
+  const open = vi.fn<
+    () => ReturnType<ProviderSessionManager.ProviderSessionManagerV2Shape["open"]>
+  >(() =>
     input.sideChat !== undefined
       ? Effect.succeed(sideChatSession as never)
       : input.interruptOpen === true
@@ -913,23 +917,36 @@ function makeLocalCommandHarness(input: {
       ),
     }),
   );
+  const getTurnStartHistory = vi.fn<ProjectionStore.ProjectionStoreV2Shape["getTurnStartHistory"]>(
+    () =>
+      input.sideChat !== undefined
+        ? Effect.succeed([])
+        : Effect.fail(
+            new ProjectionStore.ProjectionStoreReadError({
+              threadId,
+              cause: input.historyReadFailureAfterFallback,
+            }),
+          ),
+  );
   const layer = ProviderTurnStart.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
-        Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
-          prepareProviderHandoff: (handoff) =>
-            input.sideChat?.nativeForkFrom === undefined
-              ? Effect.die("history read must fail first")
-              : Effect.succeed({
-                  ...handoff,
-                  id: ContextHandoffId.make("side-chat-fork-context"),
-                  createdByProviderInstanceId: handoff.toProviderInstanceId,
-                  status: "ready",
-                  summaryMessageId: null,
-                  summaryText: "PARENT_HISTORY",
-                  updatedAt: handoff.createdAt,
-                }),
-        }),
+        input.useRealHandoffs
+          ? ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer))
+          : Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
+              prepareProviderHandoff: (handoff) =>
+                input.sideChat?.nativeForkFrom === undefined
+                  ? Effect.die("history read must fail first")
+                  : Effect.succeed({
+                      ...handoff,
+                      id: ContextHandoffId.make("side-chat-fork-context"),
+                      createdByProviderInstanceId: handoff.toProviderInstanceId,
+                      status: "ready",
+                      summaryMessageId: null,
+                      summaryText: "PARENT_HISTORY",
+                      updatedAt: handoff.createdAt,
+                    }),
+            }),
         Layer.mock(EventSink.EventSinkV2)({
           writeIfRunCurrent,
           write: ({ events: incoming }) =>
@@ -971,15 +988,7 @@ function makeLocalCommandHarness(input: {
                   (m.text.trim().toLowerCase() !== "/compact" || m.attachments.length > 0),
               ),
             }),
-          getTurnStartHistory: () =>
-            input.sideChat !== undefined
-              ? Effect.succeed([])
-              : Effect.fail(
-                  new ProjectionStore.ProjectionStoreReadError({
-                    threadId,
-                    cause: input.historyReadFailureAfterFallback,
-                  }),
-                ),
+          getTurnStartHistory,
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           open,
@@ -1011,6 +1020,7 @@ function makeLocalCommandHarness(input: {
     settledRuns,
     getThreadRecords,
     getTurnStartContext,
+    getTurnStartHistory,
     setProjection: (next: OrchestrationV2ThreadProjection) => {
       projection = next;
     },
@@ -1850,3 +1860,214 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+effectIt.effect.each([
+  "same native session",
+  "no receipt",
+  "wrong native receipt",
+  "wrong instance receipt",
+  "wrong driver receipt",
+  "replaced native session",
+  "replaced provider instance",
+  "replaced driver",
+  "failed resume",
+  "uncertain delivery",
+  "fresh session",
+  "Edit from here",
+  "native fork",
+] as const)("continues imported native history: %s", (scenario) =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({ text: "Continue", useRealHandoffs: true });
+    const before = harness.projection();
+    const run = before.runs[0]!;
+    const providerThread = before.providerThreads[0]!;
+    const nativeThreadRef = {
+      driver: ProviderDriverKind.make("kiro"),
+      nativeId: "imported-native",
+      strength: "strong" as const,
+    };
+    const itemIds = [0, 1, 2].map((index) => agentSessionImportTurnItemId(run.threadId, index));
+    const importedHistory = {
+      driver:
+        scenario === "wrong driver receipt"
+          ? ProviderDriverKind.make("claudeAgent")
+          : nativeThreadRef.driver,
+      providerInstanceId:
+        scenario === "wrong instance receipt"
+          ? ProviderInstanceId.make("another-instance")
+          : providerThread.providerInstanceId,
+      nativeThreadId:
+        scenario === "wrong native receipt" ? "another-native" : nativeThreadRef.nativeId,
+      itemCount: itemIds.length,
+    };
+    const native = {
+      ...providerThread,
+      driver: nativeThreadRef.driver,
+      nativeThreadRef,
+      status: "idle" as const,
+      nativeMetadata: scenario === "no receipt" ? null : { importedHistory },
+    };
+    const importedItems = itemIds.map((id, index) => ({
+      id,
+      threadId: run.threadId,
+      runId: null,
+      nodeId: null,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: index + 1,
+      status: "completed" as const,
+      title: null,
+      startedAt: native.createdAt,
+      completedAt: native.createdAt,
+      updatedAt: native.createdAt,
+      ...(index === 0
+        ? {
+            type: "user_message" as const,
+            createdBy: "user" as const,
+            creationSource: "server" as const,
+            messageId: MessageId.make("imported-user"),
+            inputIntent: "turn_start" as const,
+            text: "NATIVE USER",
+            attachments: [],
+          }
+        : index === 1
+          ? { type: "reasoning" as const, text: "NATIVE THOUGHT", streaming: false }
+          : {
+              type: "assistant_message" as const,
+              messageId: MessageId.make("imported-reply"),
+              text: "NATIVE REPLY",
+              streaming: false,
+            }),
+    }));
+    harness.getTurnStartHistory.mockImplementation(() => Effect.succeed(importedItems));
+    const handoff = yield* Effect.gen(function* () {
+      return yield* (yield* ContextHandoffService.ContextHandoffServiceV2).prepareLegacyImport({
+        threadId: run.threadId,
+        targetRunId: run.id,
+        toProviderThreadId: native.id,
+        toProviderInstanceId: native.providerInstanceId,
+        items: importedItems,
+        createdAt: native.createdAt,
+      });
+    }).pipe(Effect.provide(ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer))));
+    harness.setProjection({
+      ...before,
+      thread: { ...before.thread, historyOrigin: "v1_import" },
+      runs: [
+        ...(scenario === "Edit from here"
+          ? [
+              {
+                ...run,
+                id: RunId.make("rolled-back-run"),
+                ordinal: 1,
+                status: "rolled_back" as const,
+              },
+            ]
+          : []),
+        run,
+      ],
+      contextHandoffs: [
+        {
+          ...handoff,
+          ...(scenario === "uncertain delivery"
+            ? {
+                delivery: {
+                  nativeThreadId: nativeThreadRef.nativeId,
+                  status: "pending" as const,
+                  itemIds: [],
+                },
+              }
+            : {}),
+        },
+      ],
+      providerThreads: [
+        { ...native, ...(scenario === "fresh session" ? { nativeThreadRef: null } : {}) },
+      ],
+      turnItems: importedItems,
+    });
+    const loaded = {
+      ...native,
+      ...(scenario === "replaced native session" || scenario === "native fork"
+        ? { nativeThreadRef: { ...nativeThreadRef, nativeId: "replacement-native" } }
+        : {}),
+      ...(scenario === "native fork"
+        ? { forkedFrom: { providerThreadId: ProviderThreadId.make("source-native") } }
+        : {}),
+      ...(scenario === "replaced provider instance"
+        ? { providerInstanceId: ProviderInstanceId.make("replacement-instance") }
+        : {}),
+      ...(scenario === "replaced driver" ? { driver: ProviderDriverKind.make("claudeAgent") } : {}),
+    };
+    const replacement = {
+      ...native,
+      nativeThreadRef: { ...nativeThreadRef, nativeId: "fresh-native" },
+    };
+    const startTurn = vi.fn((_turn: ProviderAdapter.ProviderAdapterV2TurnInput) => Effect.void);
+    const ensureThread = vi.fn(() => Effect.succeed(replacement));
+    const resumeThread = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>(
+      () =>
+        scenario === "failed resume"
+          ? Effect.fail(
+              new ProviderAdapter.ProviderAdapterResumeThreadError({
+                driver: native.driver,
+                providerThreadId: native.id,
+                providerSessionId: native.providerSessionId!,
+              }),
+            )
+          : Effect.succeed(loaded),
+    );
+    const session = {
+      instanceId: native.providerInstanceId,
+      driver: native.driver,
+      providerSession: {
+        id: native.providerSessionId!,
+        driver: native.driver,
+        providerInstanceId: native.providerInstanceId,
+        status: "ready",
+        cwd: "/tmp/native-account-command",
+        model: null,
+        capabilities: {
+          ...CodexProviderCapabilitiesV2,
+          checkpointing: {
+            ...CodexProviderCapabilitiesV2.checkpointing,
+            providerCanRollbackConversation: false,
+          },
+        },
+        createdAt: native.createdAt,
+        updatedAt: native.updatedAt,
+        lastError: null,
+      },
+      resumeThread,
+      ensureThread,
+      startTurn,
+    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    harness.open.mockImplementation(() => Effect.succeed(session));
+    harness.startRootRun.mockImplementation((input) =>
+      input.session.startTurn(input as never).pipe(Effect.orDie),
+    );
+    yield* harness.start;
+    expect(startTurn).toHaveBeenCalledOnce();
+    const prompt = startTurn.mock.calls[0]![0].message.text;
+    for (const marker of ["NATIVE USER", "NATIVE REPLY"]) {
+      expect(prompt.split(marker).length - 1).toBe(scenario === "same native session" ? 0 : 1);
+    }
+    expect(prompt).not.toContain("NATIVE THOUGHT");
+    expect(prompt.split("Continue").length - 1).toBe(1);
+    if (scenario === "same native session") expect(prompt).toBe("Continue");
+    // Re-entering startup on the accepted native identity must not deliver the handoff twice.
+    const after = harness.projection();
+    harness.setProjection({
+      ...after,
+      runs: after.runs.map((source) =>
+        source.id === run.id ? { ...source, status: "starting" } : source,
+      ),
+    });
+    resumeThread.mockImplementation(() =>
+      Effect.succeed(startTurn.mock.calls[0]![0].providerThread),
+    );
+    yield* harness.start;
+    expect(startTurn.mock.calls[1]![0].message.text).toBe("Continue");
+  }),
+);

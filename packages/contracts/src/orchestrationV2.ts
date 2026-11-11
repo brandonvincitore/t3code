@@ -1068,6 +1068,14 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
 export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
 
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
+  importedHistory: Schema.optional(
+    Schema.Struct({
+      driver: ProviderDriverKind,
+      providerInstanceId: ProviderInstanceId,
+      nativeThreadId: TrimmedNonEmptyString,
+      itemCount: NonNegativeInt,
+    }),
+  ),
   acpInstructions: Schema.optional(
     Schema.NullOr(
       Schema.Struct({

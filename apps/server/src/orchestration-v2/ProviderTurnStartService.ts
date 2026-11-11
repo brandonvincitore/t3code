@@ -30,6 +30,7 @@ import * as ServerConfig from "../config.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import { agentSessionImportTurnItemId } from "../project/agentSessionImportIds.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { makeIsManagedWorktreePath } from "../worktreesDirectory.ts";
@@ -885,6 +886,7 @@ export const layer: Layer.Layer<
       });
       let effectiveHandoffs = handoffs;
       let resumeFellBack = false;
+      let nativeImportItemIds = new Set<string>();
       const userText = projectComposerContextForProvider({
         text: message.text,
         records: message.context?.records ?? [],
@@ -962,9 +964,10 @@ export const layer: Layer.Layer<
             handoff.delivery?.nativeThreadId === loadedProviderThread.nativeThreadRef?.nativeId &&
             handoff.delivery?.status !== "pending",
         );
-        const deliveredItemIds = new Set(
-          settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
-        );
+        const deliveredItemIds = new Set([
+          ...(sameNativeThread ? nativeImportItemIds : []),
+          ...settledHandoffs.flatMap((handoff) => handoff.delivery?.itemIds ?? []),
+        ]);
         const coveredItemIds = new Set([
           ...deliveredItemIds,
           ...settledHandoffs.flatMap((handoff) => handoff.delivery?.omittedItemIds ?? []),
@@ -1338,12 +1341,53 @@ export const layer: Layer.Layer<
               }),
         );
         if (resumed._tag === "Success") {
+          const imported = providerThread.nativeMetadata?.importedHistory;
+          const loaded = resumed.success;
+          // An import proves ownership only for this native session; row identity also survives replacement.
+          if (
+            projection.thread.historyOrigin === "v1_import" &&
+            imported !== undefined &&
+            providerThread.nativeThreadRef.strength === "strong" &&
+            loaded.nativeThreadRef?.strength === "strong" &&
+            imported.driver === session.driver &&
+            imported.driver === providerThread.driver &&
+            imported.driver === loaded.driver &&
+            imported.driver === providerThread.nativeThreadRef.driver &&
+            imported.driver === loaded.nativeThreadRef?.driver &&
+            imported.providerInstanceId === run.providerInstanceId &&
+            imported.providerInstanceId === session.instanceId &&
+            imported.providerInstanceId === providerThread.providerInstanceId &&
+            imported.providerInstanceId === loaded.providerInstanceId &&
+            imported.nativeThreadId === providerThread.nativeThreadRef.nativeId &&
+            imported.nativeThreadId === loaded.nativeThreadRef.nativeId &&
+            loaded.id === providerThread.id &&
+            loaded.appThreadId === projection.thread.id &&
+            !projection.runs.some((source) => source.status === "rolled_back")
+          ) {
+            nativeImportItemIds = new Set(
+              Array.from({ length: imported.itemCount }, (_, index) =>
+                agentSessionImportTurnItemId(projection.thread.id, index),
+              ),
+            );
+            effectiveHandoffs = handoffs.filter(
+              (handoff) =>
+                handoff.strategy !== "manual_context" ||
+                handoff.transferId != null ||
+                handoff.fromProviderThreadIds.length > 0 ||
+                handoff.history === undefined ||
+                handoff.history.messages.length === 0 ||
+                ![
+                  ...handoff.history.messages.map((message) => message.itemId),
+                  ...(handoff.history.omittedItemIds ?? []),
+                ].every((itemId) => nativeImportItemIds.has(itemId)),
+            );
+          }
           const context = handoffContextForThread(resumed.success);
           context.budget = yield* Effect.cached(context.budget);
           resumedHandoffContext = context;
           resumedRetryHandoff = yield* prepareRetryHandoff(context);
           const fits = yield* deliverContextHandoffs({
-            handoffs: [...handoffs, ...resumedRetryHandoff],
+            handoffs: [...effectiveHandoffs, ...resumedRetryHandoff],
             providerThread: { ...resumed.success, id: providerThread.id },
             budget: context.budget,
             deferInline: isCompactionCommandMessage(message) || goalCommand,
@@ -1391,6 +1435,8 @@ export const layer: Layer.Layer<
         }
         resumedHandoffContext = undefined;
         resumedRetryHandoff = [];
+        nativeImportItemIds = new Set();
+        effectiveHandoffs = handoffs;
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
         // Another client is still writing to the native thread. A fresh
         // session here would silently split the conversation from it.

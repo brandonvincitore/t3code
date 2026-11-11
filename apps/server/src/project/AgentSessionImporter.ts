@@ -42,6 +42,7 @@ import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.t
 import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 import * as ProjectService from "./ProjectService.ts";
+import { agentSessionImportTurnItemId } from "./agentSessionImportIds.ts";
 
 const IMPORT_EVENT_PREFIX = "agent-session-import:v2";
 const CLAUDE_SESSION_ID_PATTERN =
@@ -119,9 +120,7 @@ function messageEvents(input: {
   const ordinal = input.index + 1;
   const suffix = String(input.index).padStart(6, "0");
   const messageId = MessageId.make(`${input.threadId}:${suffix}`);
-  const turnItemId = TurnItemId.make(
-    `${IMPORT_EVENT_PREFIX}:turn-item:${input.threadId}:${suffix}`,
-  );
+  const turnItemId = agentSessionImportTurnItemId(input.threadId, input.index);
   const at = dateTime(input.message.createdAt);
   const common = {
     id: turnItemId,
@@ -504,17 +503,53 @@ const make = Effect.gen(function* () {
     );
     // Thread commands write whole thread rows, so hold their lock from the
     // re-read through the write to keep both this marker and their changes.
-    const commit = (messages: ReadonlyArray<HistoryMessage>) =>
+    const commit = (
+      messages: ReadonlyArray<HistoryMessage>,
+      source: OrchestrationV2ProviderThread,
+      nativeThreadId: string,
+    ) =>
       threadCommands.withLock(
         input.threadId,
         Effect.gen(function* () {
           const current = yield* pendingThread;
           if (current === null) return 0;
+          const owner = current.providerThreads.find((candidate) => candidate.id === source.id);
+          if (
+            owner === undefined ||
+            current.thread.activeProviderThreadId !== owner.id ||
+            current.thread.modelSelection.instanceId !== source.providerInstanceId ||
+            owner.driver !== source.driver ||
+            owner.providerInstanceId !== source.providerInstanceId ||
+            owner.nativeThreadRef?.driver !== source.nativeThreadRef?.driver ||
+            owner.nativeThreadRef?.nativeId !== source.nativeThreadRef?.nativeId
+          )
+            return 0;
           yield* eventSink.write({
             events: [
               ...messages.flatMap((message, index) =>
                 messageEvents({ threadId: input.threadId, index, message }),
               ),
+              {
+                id: EventId.make(
+                  `${IMPORT_EVENT_PREFIX}:provider-thread:${owner.id}:native-history`,
+                ),
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                providerInstanceId: owner.providerInstanceId,
+                occurredAt: yield* DateTime.now,
+                payload: {
+                  ...owner,
+                  nativeMetadata: {
+                    ...owner.nativeMetadata,
+                    importedHistory: {
+                      driver: source.driver,
+                      providerInstanceId: source.providerInstanceId,
+                      nativeThreadId,
+                      itemCount: messages.length,
+                    },
+                  },
+                },
+              },
               {
                 id: EventId.make(`${IMPORT_EVENT_PREFIX}:thread:${input.threadId}:native-history`),
                 type: "thread.metadata-updated",
@@ -532,7 +567,11 @@ const make = Effect.gen(function* () {
     if (records === null) return 0;
     const { thread, providerThreads } = records;
     const providerThread = providerThreads.find(
-      (candidate) => candidate.appThreadId === input.threadId && candidate.nativeThreadRef !== null,
+      (candidate) =>
+        candidate.id === thread.activeProviderThreadId &&
+        candidate.appThreadId === input.threadId &&
+        candidate.providerInstanceId === thread.modelSelection.instanceId &&
+        candidate.nativeThreadRef !== null,
     );
     const nativeThreadId = providerThread?.nativeThreadRef?.nativeId;
     if (providerThread === undefined || nativeThreadId == null) return 0;
@@ -564,6 +603,14 @@ const make = Effect.gen(function* () {
         Effect.timeout(NATIVE_HISTORY_READ_TIMEOUT),
         Effect.scoped,
       );
+    if (
+      snapshot.providerThread.id !== providerThread.id ||
+      snapshot.providerThread.driver !== providerThread.driver ||
+      snapshot.providerThread.providerInstanceId !== providerThread.providerInstanceId ||
+      snapshot.providerThread.nativeThreadRef?.driver !== providerThread.nativeThreadRef?.driver ||
+      snapshot.providerThread.nativeThreadRef?.nativeId !== nativeThreadId
+    )
+      return 0;
     const reasoningIds = new Set(snapshot.reasoningMessageIds);
     const messages = snapshot.messages.flatMap((message) =>
       (message.role === "user" || message.role === "assistant") && message.text.trim() !== ""
@@ -577,7 +624,7 @@ const make = Effect.gen(function* () {
         : [],
     );
     // Loading the session can take a while, and the thread is usable meanwhile.
-    return yield* commit(messages);
+    return yield* commit(messages, providerThread, nativeThreadId);
   });
 
   return { importRecentAgentThreads, importNativeHistory };

@@ -7,6 +7,7 @@ import {
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   MessageId,
   RunId,
   ThreadId,
@@ -583,6 +584,17 @@ it.effect(
       expect((yield* projections.getThreadRecords(threadId, [])).thread.historyOrigin).toBe(
         "v1_import",
       );
+      expect(
+        (yield* projections.getThreadRecords(threadId, ["providerThreads"])).providerThreads[0]
+          ?.nativeMetadata,
+      ).toMatchObject({
+        importedHistory: {
+          driver: "codex",
+          providerInstanceId: CODEX_MODEL_SELECTION.instanceId,
+          nativeThreadId: source.source.providerSessionId,
+          itemCount: 3,
+        },
+      });
       expect(yield* importHistory).toBe(0);
       expect(opened).toHaveLength(2);
       const records = yield* projections.getThreadRecords(threadId, ["messages"]);
@@ -692,7 +704,10 @@ it.effect("releases the ACP import lock when a native session never answers", ()
  */
 const importDuringCommand = Effect.fn(function* (
   name: string,
-  command: (thread: OrchestrationV2AppThread) => ReadonlyArray<OrchestrationV2DomainEvent>,
+  command: (
+    thread: OrchestrationV2AppThread,
+    owner: OrchestrationV2ProviderThread,
+  ) => ReadonlyArray<OrchestrationV2DomainEvent>,
 ) {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
   const sink = yield* EventSink.EventSinkV2;
@@ -744,10 +759,12 @@ const importDuringCommand = Effect.fn(function* (
     lock.withLock(
       threadId,
       Effect.gen(function* () {
-        const { thread } = yield* projections.getThreadRecords(threadId, []);
+        const { thread, providerThreads } = yield* projections.getThreadRecords(threadId, [
+          "providerThreads",
+        ]);
         yield* Deferred.succeed(loaded, undefined);
         yield* Deferred.await(importerCommitting);
-        yield* sink.write({ events: command(thread) });
+        yield* sink.write({ events: command(thread, providerThreads[0]!) });
         yield* Deferred.succeed(commandWritten, undefined);
       }),
     ),
@@ -780,38 +797,79 @@ it.effect("keeps a thread edit made while the native history loads", () =>
   }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 
-it.effect("skips the native history when a run starts while it loads", () =>
-  Effect.gen(function* () {
-    const result = yield* importDuringCommand("run-during-load", (thread) => [
-      {
-        id: EventId.make(`${thread.id}:run`),
-        type: "run.updated",
-        threadId: thread.id,
-        occurredAt: now,
-        payload: {
-          id: RunId.make(`${thread.id}:run`),
-          threadId: thread.id,
-          ordinal: 1,
-          providerInstanceId: thread.providerInstanceId,
-          modelSelection: thread.modelSelection,
-          providerThreadId: null,
-          userMessageId: MessageId.make(`${thread.id}:prompt`),
-          rootNodeId: null,
-          activeAttemptId: null,
-          status: "queued",
-          requestedAt: now,
-          startedAt: null,
-          completedAt: null,
-          checkpointId: null,
-          contextHandoffId: null,
-        },
-      },
-    ]);
-    expect(result.imported).toBe(0);
-    expect(result.runs).toHaveLength(1);
-    expect(result.thread.historyOrigin).toBeUndefined();
-    expect(result.items).toEqual([]);
-  }).pipe(Effect.scoped, Effect.provide(persistence)),
+it.effect.each(["run", "native session", "provider instance", "driver", "active root"] as const)(
+  "skips native history when %s changes while it loads",
+  (change) =>
+    Effect.gen(function* () {
+      const result = yield* importDuringCommand(`changed-${change}`, (thread, owner) =>
+        change === "run"
+          ? [
+              {
+                id: EventId.make(`${thread.id}:run`),
+                type: "run.updated",
+                threadId: thread.id,
+                occurredAt: now,
+                payload: {
+                  id: RunId.make(`${thread.id}:run`),
+                  threadId: thread.id,
+                  ordinal: 1,
+                  providerInstanceId: thread.providerInstanceId,
+                  modelSelection: thread.modelSelection,
+                  providerThreadId: null,
+                  userMessageId: MessageId.make(`${thread.id}:prompt`),
+                  rootNodeId: null,
+                  activeAttemptId: null,
+                  status: "queued",
+                  requestedAt: now,
+                  startedAt: null,
+                  completedAt: null,
+                  checkpointId: null,
+                  contextHandoffId: null,
+                },
+              },
+            ]
+          : change === "active root"
+            ? [
+                {
+                  id: EventId.make(`${thread.id}:active-root`),
+                  type: "thread.metadata-updated",
+                  threadId: thread.id,
+                  occurredAt: now,
+                  payload: {
+                    ...thread,
+                    activeProviderThreadId: ProviderThreadId.make("another-root"),
+                  },
+                },
+              ]
+            : [
+                {
+                  id: EventId.make(`${thread.id}:owner`),
+                  type: "provider-thread.updated",
+                  threadId: thread.id,
+                  occurredAt: now,
+                  payload: {
+                    ...owner,
+                    ...(change === "native session"
+                      ? {
+                          nativeThreadRef: {
+                            ...owner.nativeThreadRef!,
+                            nativeId: "replacement-native",
+                          },
+                        }
+                      : {}),
+                    ...(change === "provider instance"
+                      ? { providerInstanceId: ProviderInstanceId.make("replacement-instance") }
+                      : {}),
+                    ...(change === "driver" ? { driver: ProviderDriverKind.make("kiro") } : {}),
+                  },
+                },
+              ],
+      );
+      expect(result.imported).toBe(0);
+      expect(result.runs).toHaveLength(change === "run" ? 1 : 0);
+      expect(result.thread.historyOrigin).toBeUndefined();
+      expect(result.items).toEqual([]);
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 
 it.effect("imports under a policy ceiling in the project's default, kept under the ceiling", () =>
