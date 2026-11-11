@@ -4818,7 +4818,7 @@ it.effect.each(["failed", "late"] as const)(
         });
         const subscription = yield* runtime.subscribeEvents!;
         let notifications = 0;
-        yield* runtime.onSessionClosed!(
+        const unsubscribe = yield* runtime.onSessionClosed!(
           subscription.close.pipe(
             Effect.tap(() =>
               Effect.sync(() => {
@@ -4842,21 +4842,24 @@ it.effect.each(["failed", "late"] as const)(
           yield* Deferred.await(observed);
           assert.equal(notifications, 1);
           let late = 0;
-          yield* runtime.onSessionClosed!(
+          const unsubscribeLate = yield* runtime.onSessionClosed!(
             Effect.sync(() => {
               late++;
             }),
           );
           assert.equal(late, 1);
+          yield* unsubscribeLate;
         } else {
           assert.isTrue(Exit.isFailure(yield* Fiber.join(release)));
-          yield* runtime.onSessionClosed!(
+          const unsubscribeFailed = yield* runtime.onSessionClosed!(
             Effect.sync(() => {
               notifications++;
             }),
           );
           assert.equal(notifications, 0);
+          yield* unsubscribeFailed;
         }
+        yield* unsubscribe;
       }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, beforeOpen })));
     }),
 );

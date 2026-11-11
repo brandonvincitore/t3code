@@ -5522,18 +5522,27 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         branch: null,
         worktreePath: process.cwd(),
       });
-      const send = (key: string, createdBy: "user" | "agent", start: boolean) =>
+      const send = (key: string, createdBy: "user" | "agent", start: boolean, buffered = false) =>
         orchestrator.dispatch({
           type: "message.dispatch",
           createdBy,
-          creationSource: createdBy === "user" ? "web" : "server",
+          creationSource: createdBy === "user" ? "web" : buffered ? "provider" : "server",
+          ...(buffered
+            ? {
+                notification: {
+                  source: { kind: "monitor" as const },
+                  outcome: "updated" as const,
+                  summary: key,
+                },
+              }
+            : {}),
           commandId: CommandId.make(`${threadId}:message:${key}`),
           threadId,
           messageId: MessageId.make(`${threadId}:message:${key}`),
           text: key,
           attachments: [],
           modelSelection,
-          dispatchMode: { type: start ? "start_immediately" : "queue_after_active" },
+          dispatchMode: { type: start && !buffered ? "start_immediately" : "queue_after_active" },
         });
       const runFor = (key: string) =>
         Effect.map(orchestrator.getThreadProjection(threadId), ({ runs }) => {
@@ -5649,77 +5658,78 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       return { send, runFor, end, startedRunIds, releasedAfter, awaitHeld };
     });
 
-  it.effect("releases held agent messages once a later run completes, not the user's", () =>
-    Effect.gen(function* () {
-      const eventSink = yield* EventSink.EventSinkV2;
-      const threadId = ThreadId.make("runtime-layer-failed-queue-agent-messages");
-      const { send, runFor, end, startedRunIds, releasedAfter, awaitHeld } =
-        yield* queueTestThread(threadId);
-      yield* send("earlier", "agent", true);
-      yield* end("earlier", "completed");
-      yield* send("active", "agent", true);
-      yield* send("issue", "agent", false);
-      yield* send("user", "user", false);
-      yield* end("active", "failed");
-      yield* awaitHeld("issue");
-      assert.isTrue((yield* runFor("issue")).queueHeld);
-      // Delivery bookkeeping rewrites an older completed run; the thread has not moved on.
-      yield* end("earlier", "completed", ":bookkeeping");
-      // A scheduled tick finds the thread idle and starts past the held queue.
-      yield* send("tick", "agent", true);
-      assert.equal((yield* runFor("tick")).status, "starting");
-      yield* end("tick", "completed");
-      assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("issue")).id);
-      yield* releasedAfter("issue", "tick");
-      const user = yield* runFor("user");
-      assert.equal(user.status, "queued");
-      assert.isTrue(user.queueHeld);
+  it.effect(
+    "releases held agent messages after buffered native output completes, not the user's",
+    () =>
+      Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const threadId = ThreadId.make("runtime-layer-failed-queue-agent-messages");
+        const { send, runFor, end, startedRunIds, releasedAfter, awaitHeld } =
+          yield* queueTestThread(threadId);
+        yield* send("earlier", "agent", true);
+        yield* end("earlier", "completed");
+        yield* send("active", "agent", true);
+        yield* send("issue", "agent", false);
+        yield* send("user", "user", false);
+        yield* end("active", "failed");
+        yield* awaitHeld("issue");
+        assert.isTrue((yield* runFor("issue")).queueHeld);
+        // Delivery bookkeeping rewrites an older completed run; the thread has not moved on.
+        yield* end("earlier", "completed", ":bookkeeping");
+        yield* send("tick", "agent", true, true);
+        assert.equal((yield* runFor("tick")).status, "starting");
+        yield* end("tick", "completed");
+        assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("issue")).id);
+        yield* releasedAfter("issue", "tick");
+        const user = yield* runFor("user");
+        assert.equal(user.status, "queued");
+        assert.isTrue(user.queueHeld);
 
-      // A run that finishes despite a stop request does not release what the stop held.
-      yield* send("after-stop", "agent", false);
-      assert.isTrue((yield* runFor("after-stop")).queueHeld);
-      const issue = yield* runFor("issue");
-      assert.isNotNull(issue.rootNodeId);
-      const now = yield* DateTime.now;
-      yield* eventSink.write({
-        events: [
-          {
-            id: EventId.make(`${threadId}:issue:interrupt-request`),
-            type: "turn-item.updated",
-            threadId,
-            runId: issue.id,
-            nodeId: issue.rootNodeId,
-            providerInstanceId: issue.providerInstanceId,
-            occurredAt: now,
-            payload: {
-              id: TurnItemId.make(`${threadId}:issue:interrupt-request`),
-              type: "run_interrupt_request",
+        // A run that finishes despite a stop request does not release what the stop held.
+        yield* send("after-stop", "agent", false);
+        assert.isTrue((yield* runFor("after-stop")).queueHeld);
+        const issue = yield* runFor("issue");
+        assert.isNotNull(issue.rootNodeId);
+        const now = yield* DateTime.now;
+        yield* eventSink.write({
+          events: [
+            {
+              id: EventId.make(`${threadId}:issue:interrupt-request`),
+              type: "turn-item.updated",
               threadId,
               runId: issue.id,
               nodeId: issue.rootNodeId,
-              providerThreadId: issue.providerThreadId,
-              providerTurnId: null,
-              nativeItemRef: null,
-              parentItemId: null,
-              ordinal: 2,
-              status: "completed",
-              title: "Interrupt requested",
-              startedAt: now,
-              completedAt: now,
-              updatedAt: now,
-              message: "Stopped by user",
+              providerInstanceId: issue.providerInstanceId,
+              occurredAt: now,
+              payload: {
+                id: TurnItemId.make(`${threadId}:issue:interrupt-request`),
+                type: "run_interrupt_request",
+                threadId,
+                runId: issue.id,
+                nodeId: issue.rootNodeId,
+                providerThreadId: issue.providerThreadId,
+                providerTurnId: null,
+                nativeItemRef: null,
+                parentItemId: null,
+                ordinal: 2,
+                status: "completed",
+                title: "Interrupt requested",
+                startedAt: now,
+                completedAt: now,
+                updatedAt: now,
+                message: "Stopped by user",
+              },
             },
-          },
-        ],
-      });
-      yield* end("issue", "completed");
-      // The next completed run releases it, which also shows the listener handled the stopped one.
-      yield* send("probe", "agent", true);
-      assert.equal((yield* runFor("probe")).status, "starting");
-      yield* end("probe", "completed");
-      assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("after-stop")).id);
-      yield* releasedAfter("after-stop", "probe");
-    }),
+          ],
+        });
+        yield* end("issue", "completed");
+        // The next completed run releases it, which also shows the listener handled the stopped one.
+        yield* send("probe", "agent", true, true);
+        assert.equal((yield* runFor("probe")).status, "starting");
+        yield* end("probe", "completed");
+        assert.equal(yield* Queue.take(startedRunIds), (yield* runFor("after-stop")).id);
+        yield* releasedAfter("after-stop", "probe");
+      }),
   );
 
   it.effect("keeps held agent messages while the thread's worktree setup is unresolved", () =>
@@ -5736,7 +5746,7 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
       });
       yield* dispatcher.awaitHeld("issue");
       assert.isTrue((yield* dispatcher.runFor("issue")).queueHeld);
-      yield* dispatcher.send("tick", "agent", true);
+      yield* dispatcher.send("tick", "agent", true, true);
       assert.equal((yield* dispatcher.runFor("tick")).status, "starting");
       yield* witness.send("active", "agent", true);
       yield* witness.send("queued", "agent", false);
@@ -6667,6 +6677,15 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           type: "message.dispatch",
           createdBy: source === "web" ? "user" : "agent",
           creationSource: source,
+          ...(source === "provider"
+            ? {
+                notification: {
+                  source: { kind: "monitor" as const },
+                  outcome: "updated" as const,
+                  summary: text,
+                },
+              }
+            : {}),
           commandId: CommandId.make(`${threadId}:message:${index}`),
           threadId,
           messageId: MessageId.make(`${threadId}:message:${index}`),
@@ -8791,10 +8810,11 @@ it.layer(layerTest)("usage-limit recovery", (it) => {
         const resumed = yield* orchestrator.getThreadProjection(threadId);
         assert.deepEqual(
           resumed.runs.map((run) => run.id),
-          [run.id, continuation.id, held.id],
+          [run.id, held.id, continuation.id],
         );
-        assert.equal(resumed.runs[2]?.status, "starting");
-        assert.isFalse(resumed.runs[2]?.queueHeld);
+        const resumedHeld = resumed.runs.find((candidate) => candidate.id === held.id)!;
+        assert.equal(resumedHeld.status, "starting");
+        assert.isFalse(resumedHeld.queueHeld);
       }
     }),
   );
