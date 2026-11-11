@@ -124,6 +124,25 @@ The feature commits retained alongside the pinned heads are #33741's `93dcebe567
 
 The Git classifier repair has synthetic Git 2.56 diagnostic coverage and cleanup coverage on installed Git 2.43.0. Actual Git 2.56, hosted CI, client verification, and live Kiro behavior remain unverified by this batch. Account-priced Kiro titles and their deliberate no-fallback behavior, combined generator allowlists, native ACP history, and callback ownership guards remain in place.
 
+## November 11 second local repair batch
+
+These four local adaptations retain the original import pins above. Their integration links identify local commits and do not imply publication. Source main merges and unrelated cleanup are excluded.
+
+| PR                                                       | Contribution / original author                                                | New pinned source                                                                                 | Local integration / method                                                                                                     |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| [#31019](https://github.com/pingdotgg/t3code/pull/31019) | Sanitized OAuth secret-read diagnostics / `juliusmarminge`                    | [d16216dd81](https://github.com/pingdotgg/t3code/commit/d16216dd8198c0832eecf93983f8f120e218f935) | [5d606724e4](https://github.com/brandonvincitore/t3code/commit/5d606724e4e411a3d96a175499968fc8709da5a1), selective adaptation |
+| [#22155](https://github.com/pingdotgg/t3code/pull/22155) | Native imported thought history as reasoning / `only21mil; alanjds coauthor`  | [57c141ab98](https://github.com/pingdotgg/t3code/commit/57c141ab983ca5e0305b032a97fc0b3d03a3a147) | [8918e933b2](https://github.com/brandonvincitore/t3code/commit/8918e933b21267aa558fc6909db1a686d431e6bc), selective adaptation |
+| [#30188](https://github.com/pingdotgg/t3code/pull/30188) | Kept-history rollback guide correction / `juliusmarminge`                     | [f2dbe7ac7a](https://github.com/pingdotgg/t3code/commit/f2dbe7ac7a49e23d5087fc00cd47319840e6e778) | [2654621646](https://github.com/brandonvincitore/t3code/commit/26546216469ce16323efc4be55e9909670acc95b), selective adaptation |
+| [#33448](https://github.com/pingdotgg/t3code/pull/33448) | Offline background probes and success-only version parsing / `juliusmarminge` | [fa391993aa](https://github.com/pingdotgg/t3code/commit/fa391993aa704e3e17ec220413431e3dc9bab6b6) | [a72928e4ba](https://github.com/brandonvincitore/t3code/commit/a72928e4ba008a363807dc75d28fa1cee99763b3), selective adaptation |
+
+#31019's new pin removes native-file writes upstream. This fork adopts sanitized read/decode errors while retaining store/delete; adopting read-only storage is a separate decision because the native CLI does not share T3's write lock. Synthetic two-actor evidence confirms that atomic replacement alone cannot prevent lost updates. Native browser callbacks remain separate, and this batch does not prove signed-in OAuth success.
+
+#22155 selects only `061f6e9d65ac30312e692ca67599c11a22675b34` and `54f92235c322de03076090cc9818931a2c1bcc52`, crediting original author Victor Vogel (`only21mil`) and coauthor Alan Justino da Silva (`alanjds`), from [only21mil/t3code#6](https://github.com/only21mil/t3code/pull/6). Its main merge and WebSocket import cleanup are excluded. #30188 adopts only the source-authored guide correction; its prior production import remains unchanged.
+
+#33448 selects `03c2c858b109086cb3c3bacb4f95176833272a3a`, `009fb7667b7a29554e07d29f7e5a43406b30e85a`, `e1db7a974c197b9f5cba754fefbfc0ab645e370b`, and `f7d8178c2b54983b1e0cfda1ed447eb839c825d2`. The adaptation also enforces successful exits at the fork's OpenCode CLI version boundary. User-started session, command, and text-generation environments remain unchanged. Kiro retains session-free initialize/template discovery and authoritative native metadata. The original #33275 pin and timeout override names/defaults remain unchanged; its later `bf76606dfe630da3730478d55886a81dc67a09bb` OpenCode scan deadline adjustment is excluded pending a deterministic setup-versus-scan repro.
+
+Validation uses synthetic fixtures and focused local checks. No real Kiro/mise invocation, account, paid turn, dev server, or client verification is claimed. Independent review and integrated client proof remain separate.
+
 ## Updating this ledger
 
 When adopting another contribution, add its canonical PR URL, original author, exact source revision, and actual fork integration commit. Keep closed sources and preserve the distinction between merged history, adapted code, and already-inherited foundations. Record new source revisions explicitly; a link to a moving branch is not a replacement for a pinned SHA.
