@@ -11,6 +11,7 @@ import {
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import type { ProviderWorkspaceSnapshot } from "@t3tools/provider-core/server/driver";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import { ProviderAdapterV2RuntimePolicy } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -98,6 +99,10 @@ const acpProcess = (
   extensionMethods: ReadonlyArray<string>,
   afterSessionNew?: ReadonlyArray<unknown>,
   requests: Array<string> = [],
+  workspaceState?: () => {
+    readonly result?: unknown;
+    readonly error?: { readonly code: number; readonly message: string };
+  },
 ) =>
   Effect.gen(function* () {
     const output = yield* Queue.unbounded<Uint8Array>();
@@ -140,9 +145,11 @@ const acpProcess = (
                 authMethods: [],
               },
             }
-          : request.method === "_kiro/config/template"
-            ? (templateParams.push(request.params), { result: template })
-            : { error: { code: -32601, message: `${request.method} is not scripted` } };
+          : request.method === "_kiro/configuration/getState" && workspaceState !== undefined
+            ? workspaceState()
+            : request.method === "_kiro/config/template"
+              ? (templateParams.push(request.params), { result: template })
+              : { error: { code: -32601, message: `${request.method} is not scripted` } };
       yield* send({ id: request.id, ...response });
     });
     return ChildProcessSpawner.makeHandle({
@@ -174,6 +181,10 @@ function kiroCli(
   template?: unknown,
   afterSessionNew?: ReadonlyArray<unknown>,
   extensionMethods: ReadonlyArray<string> = KIRO_EXTENSION_METHODS,
+  workspaceState?: (cwd: string | undefined) => {
+    readonly result?: unknown;
+    readonly error?: { readonly code: number; readonly message: string };
+  },
 ) {
   const invoked: Array<string> = [];
   const environments: Array<ChildProcess.CommandOptions["env"]> = [];
@@ -184,7 +195,19 @@ function kiroCli(
     invoked.push(args);
     environments.push(ChildProcess.isStandardCommand(command) ? command.options.env : undefined);
     return args === KIRO_ACP_ARGS && (template !== undefined || afterSessionNew !== undefined)
-      ? acpProcess(template, templateParams, extensionMethods, afterSessionNew, requests)
+      ? acpProcess(
+          template,
+          templateParams,
+          extensionMethods,
+          afterSessionNew,
+          requests,
+          workspaceState === undefined
+            ? undefined
+            : () =>
+                workspaceState(
+                  ChildProcess.isStandardCommand(command) ? command.options.cwd : undefined,
+                ),
+        )
       : Effect.succeed(processHandle(outputs[args] ?? { stdout: "", code: 127 }));
   });
   return { invoked, environments, templateParams, requests, spawner };
@@ -798,14 +821,69 @@ describe("KiroProvider", () => {
 
   // Shaped like kiro-cli 2.37.1's second `available_commands_update` after
   // `session/new` with `~/.kiro/skills/probe-skill/SKILL.md` installed.
-  it.effect("lists the skills a Kiro session advertises", () =>
+  it.effect("scopes session advertisements under native workspace resource authority", () =>
     Effect.gen(function* () {
+      const agent = {
+        id: "mode",
+        name: "Agent",
+        type: "select",
+        category: "mode",
+        currentValue: "cached-agent",
+        options: [
+          { value: "cached-agent", name: "Cached agent" },
+          { value: "native-agent", name: "Native agent" },
+        ],
+      };
+      const model = {
+        id: "model",
+        name: "Model",
+        type: "select",
+        category: "model",
+        currentValue: "future-model",
+        options: [
+          {
+            value: "future-model",
+            name: "Native future model",
+            _meta: {
+              kiro: {
+                hasEffort: true,
+                effortLevels: ["medium", "high"],
+                defaultEffortLevel: "medium",
+              },
+            },
+          },
+        ],
+      };
+      const resources = (allowed: ReadonlyArray<string>) => ({
+        resources: [
+          {
+            type: "agent",
+            items: ["cached-agent", "native-agent"].map((id) => ({
+              layer: "workspace",
+              standing: { kind: allowed.includes(id) ? "active" : "blocked" },
+              value: { id, name: id },
+            })),
+          },
+        ],
+      });
+      let state: {
+        readonly result?: unknown;
+        readonly error?: { readonly code: number; readonly message: string };
+      } = { result: {} };
+      const methods = [...KIRO_EXTENSION_METHODS, "_kiro/configuration/getState"];
       const cli = kiroCli(
         {
           "--version": { stdout: "kiro-cli 2.37.1\n", code: 0 },
-          "whoami --format json": { stdout: "", code: 2 },
+          "whoami --format json": { stdout: '{"accountType":"ApiKey"}\n', code: 0 },
+          "chat --list-models --format json": {
+            stdout: JSON.stringify({
+              models: [{ model_id: "auto", model_name: "Auto" }],
+              default_model: "auto",
+            }),
+            code: 0,
+          },
         },
-        undefined,
+        { configOptions: [agent] },
         [
           {
             sessionUpdate: "available_commands_update",
@@ -824,7 +902,27 @@ describe("KiroProvider", () => {
               },
             ],
           },
+          {
+            sessionUpdate: "config_option_update",
+            configOptions: [
+              agent,
+              model,
+              {
+                id: "effortLevel",
+                name: "Effort",
+                type: "select",
+                category: "thought_level",
+                currentValue: "high",
+                options: [
+                  { value: "medium", name: "Medium" },
+                  { value: "high", name: "High" },
+                ],
+              },
+            ],
+          },
         ],
+        methods,
+        (cwd) => (cwd === "/other-workspace" ? { result: { resources: [] } } : state),
       );
       yield* Effect.gen(function* () {
         const instanceId = ProviderInstanceId.make("kiro");
@@ -836,8 +934,15 @@ describe("KiroProvider", () => {
           environment: [],
           config: settings,
         });
+        yield* instance.snapshot.refresh;
+        const prechat = yield* instance.snapshotForCwd!("/workspace");
+        assert.equal(
+          prechat.models[0]?.capabilities?.optionDescriptors?.find((option) => option.id === "mode")
+            ?.currentValue,
+          "cached-agent",
+        );
         const threadId = ThreadId.make("thread-kiro-skills");
-        const modelSelection = { instanceId, model: "default" };
+        const modelSelection = { instanceId, model: "future-model" };
         const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
           runtimeMode: "full-access",
           interactionMode: "default",
@@ -900,7 +1005,72 @@ describe("KiroProvider", () => {
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runDrain,
         );
+        yield* instance.snapshot.refresh;
         const snapshot = yield* instance.snapshotForCwd!("/workspace");
+        const mode = (snapshot: ProviderWorkspaceSnapshot) =>
+          snapshot.optionDescriptors?.find((option) => option.id === "mode");
+        const choices = (snapshot: ProviderWorkspaceSnapshot) => {
+          const agent = mode(snapshot);
+          return agent?.type === "select" ? agent.options.map((option) => option.id) : [];
+        };
+        const assertNativeModel = (snapshot: ProviderWorkspaceSnapshot) => {
+          const native = snapshot.models.find((model) => model.slug === "future-model");
+          assert.equal(native?.name, "Native future model");
+          assert.equal(
+            native?.capabilities?.optionDescriptors?.find(
+              (option) => option.id === "reasoningEffort",
+            )?.currentValue,
+            "high",
+          );
+          for (const model of snapshot.models) {
+            assert.deepEqual(
+              model.capabilities?.optionDescriptors?.find((option) => option.id === "mode"),
+              mode(snapshot),
+            );
+          }
+        };
+        assert.deepEqual(choices(snapshot), ["cached-agent", "native-agent"]);
+        assertNativeModel(snapshot);
+        for (const result of [
+          { resources: [] },
+          resources([]),
+          resources(["native-agent"]),
+          resources(["cached-agent", "native-agent"]),
+        ]) {
+          state = { result };
+          yield* TestClock.adjust("5 seconds");
+          const scoped = yield* instance.snapshotForCwd!("/workspace");
+          const allowed = result.resources.flatMap((resource) =>
+            resource.items
+              .filter((item) => item.standing.kind === "active")
+              .map((item) => item.value.id),
+          );
+          assert.deepEqual(choices(scoped), allowed);
+          assert.equal(
+            mode(scoped)?.currentValue,
+            allowed.includes("cached-agent") ? "cached-agent" : undefined,
+          );
+          assertNativeModel(scoped);
+          const other = yield* instance.snapshotForCwd!("/other-workspace");
+          assert.deepEqual(choices(other), []);
+          assert.isUndefined(other.models.find((model) => model.slug === "future-model"));
+        }
+        for (const fallback of [
+          { result: {} },
+          { error: { code: -32601, message: "unsupported" } },
+          { error: { code: -32603, message: "failed probe" } },
+        ]) {
+          state = fallback;
+          yield* TestClock.adjust("5 seconds");
+          const scoped = yield* instance.snapshotForCwd!("/workspace");
+          assert.deepEqual(choices(scoped), ["cached-agent", "native-agent"]);
+          assertNativeModel(scoped);
+        }
+        methods.pop();
+        yield* TestClock.adjust("5 seconds");
+        const unsupported = yield* instance.snapshotForCwd!("/workspace");
+        assert.deepEqual(choices(unsupported), ["cached-agent", "native-agent"]);
+        assertNativeModel(unsupported);
         assert.deepEqual(
           snapshot.skills.map(({ name, enabled }) => ({ name, enabled })),
           [{ name: "probe-skill", enabled: true }],

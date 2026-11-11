@@ -231,7 +231,11 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv, Path.Path> 
         !effectiveConfig.enabled
           ? snapshot.getSnapshot
           : Effect.gen(function* () {
-              const base = yield* snapshot.getSnapshot;
+              const base = yield* applyKiroConfiguration(
+                configurations,
+                cwd,
+                yield* snapshot.getSnapshot,
+              );
               const resources = base.status === "ready" ? yield* discovery.get(cwd) : undefined;
               const previousAgent = base.models
                 .flatMap((model) => model.capabilities?.optionDescriptors ?? [])
@@ -243,7 +247,12 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv, Path.Path> 
               const workspace = {
                 ...base,
                 skills: yield* getKiroSkills(skills, cwd, resources?.skills),
-                optionDescriptors: agent === undefined ? [] : [agent],
+                optionDescriptors: [
+                  ...("optionDescriptors" in base ? base.optionDescriptors : []).filter(
+                    (option) => option.id !== "mode",
+                  ),
+                  ...(agent === undefined ? [] : [agent]),
+                ],
                 models:
                   resources === undefined && agent === undefined
                     ? base.models
@@ -259,8 +268,7 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv, Path.Path> 
                         }),
                       })),
               };
-              const scoped = yield* applyKiroConfiguration(configurations, cwd, workspace);
-              return { ...scoped, workspaceModels: scoped.models.slice(0, 256) };
+              return { ...workspace, workspaceModels: workspace.models.slice(0, 256) };
             }),
       acpSessionManagement: {
         listSessions: ({ cwd, cursor }) =>
