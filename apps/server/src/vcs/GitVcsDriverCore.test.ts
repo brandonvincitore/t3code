@@ -1907,10 +1907,35 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
     );
 
     // regression: #8645 name the cause of a failed git command
-    it.effect("names a missing repository behind a failed command", () =>
+    it.effect.each([
+      { label: "installed Git", stderr: undefined, expectedReason: "not_a_repository" },
+      {
+        label: "Git 2.56 broken gitfile",
+        stderr: "fatal: gitfile does not point to a valid repository: /synthetic/.git",
+        expectedReason: "not_a_repository",
+      },
+      {
+        label: "invalid gitfile format",
+        stderr: "fatal: invalid gitfile format: /synthetic/.git",
+        expectedReason: undefined,
+      },
+      {
+        label: "unknown failure",
+        stderr: "fatal: synthetic unexpected failure",
+        expectedReason: undefined,
+      },
+    ] as const)("classifies failed repository commands ($label)", ({ stderr, expectedReason }) =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
-        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const driver =
+          stderr === undefined
+            ? yield* GitVcsDriver.GitVcsDriver
+            : yield* makeGitVcsDriverCore().pipe(
+                Effect.provideService(
+                  ChildProcessSpawner.ChildProcessSpawner,
+                  ChildProcessSpawner.make(() => Effect.succeed(makeFailedHandle(stderr))),
+                ),
+              );
 
         const error = yield* driver
           .execute({
@@ -1924,9 +1949,10 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.deepInclude(error, {
           _tag: "GitCommandError",
           operation: "GitVcsDriver.test.notARepository",
-          reason: "not_a_repository",
         });
-        assert.include(error.message, "(not_a_repository)");
+        assert.equal(error.reason, expectedReason);
+        if (expectedReason !== undefined) assert.include(error.message, `(${expectedReason})`);
+        else assert.notInclude(error.message, "(not_a_repository)");
       }),
     );
 
