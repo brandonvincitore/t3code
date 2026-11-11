@@ -5,7 +5,7 @@ import * as Exit from "effect/Exit";
 import * as Migrator from "effect/sql/Migrator";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { migrationManifest, runMigrations } from "./Migrations.ts";
+import { hasPendingMigrations, migrationManifest, runMigrations } from "./Migrations.ts";
 import PullRequestFilesViewed from "./Migrations/053_PullRequestFilesViewed.ts";
 import RemoveRedundantProjectionIndexes from "./Migrations/056_RemoveRedundantProjectionIndexes.ts";
 import OrchestrationV2 from "./Migrations/055_OrchestrationV2.ts";
@@ -32,6 +32,7 @@ describe("V2 preview upgrade", () => {
       const sql = yield* SqlClient.SqlClient;
       yield* seedPreview;
       const imports = yield* sql`SELECT * FROM orchestration_v2_legacy_imports`;
+      assert.isTrue(yield* hasPendingMigrations());
       assert.deepStrictEqual(yield* runMigrations(), [
         [53, "PullRequestFilesViewed"],
         [54, "ProjectionThreadsAutoSettleDisabledAt"],
@@ -98,7 +99,9 @@ describe("V2 preview upgrade", () => {
               : {}),
           }),
         });
+        assert.isTrue(yield* hasPendingMigrations());
         yield* runMigrations();
+        assert.isFalse(yield* hasPendingMigrations());
         assert.deepStrictEqual(yield* runMigrations(), []);
         const history = yield* sql<{
           readonly migration_id: number;

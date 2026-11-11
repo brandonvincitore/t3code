@@ -7,7 +7,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import { migrationManifest, runMigrations } from "./Migrations.ts";
+import { hasPendingMigrations, migrationManifest, runMigrations } from "./Migrations.ts";
 
 const v2Migrations = migrationManifest.filter(([id]) => id >= 55);
 const newerMigrationId = Math.max(...migrationManifest.map(([id]) => id)) + 1;
@@ -71,8 +71,11 @@ describe("runMigrations", () => {
 
   it.effect("upgrades a database at exactly 54", () =>
     Effect.gen(function* () {
+      assert.isTrue(yield* hasPendingMigrations());
       yield* runMigrations({ toMigrationInclusive: 54 });
+      assert.isTrue(yield* hasPendingMigrations());
       assert.deepStrictEqual(yield* runMigrations(), v2Migrations);
+      assert.isFalse(yield* hasPendingMigrations());
       assert.deepStrictEqual(yield* history, migrationManifest);
       assert.isAbove(yield* v2TableCount, 0);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
@@ -160,6 +163,7 @@ describe("runMigrations", () => {
         VALUES (${newerMigrationId}, 'NewerV2Migration')
       `;
 
+      assert.isFalse(yield* hasPendingMigrations());
       assert.deepStrictEqual(yield* runMigrations(), []);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );

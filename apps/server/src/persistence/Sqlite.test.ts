@@ -5,14 +5,24 @@ import * as NodePath from "node:path";
 import * as NodeSqlite from "node:sqlite";
 import type * as NodeWorkerThreads from "node:worker_threads";
 
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as SqlClient from "effect/sql/SqlClient";
 import { vi } from "vite-plus/test";
 
+import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import * as ServerOwnership from "../serverOwnership.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import { migrationManifest, runMigrations } from "./Migrations.ts";
 import * as SqlitePersistence from "./Sqlite.ts";
 
 const workers = vi.hoisted((): Array<NodeWorkerThreads.Worker> => []);
@@ -181,5 +191,172 @@ it.effect("drops planner statistics a database already has", () => {
     }).pipe(Effect.provide(persistence()));
   }).pipe(
     Effect.ensuring(Effect.sync(() => NodeFS.rmSync(tempDir, { recursive: true, force: true }))),
+  );
+});
+
+const ownT3Home = Effect.fn("SqliteTest.ownT3Home")(function* () {
+  const { serverRuntimeStatePath } = yield* ServerConfig.ServerConfig;
+  const home = yield* (yield* FileSystem.FileSystem).makeTempDirectoryScoped();
+  yield* ServerOwnership.acquireServerOwnership(serverRuntimeStatePath).pipe(
+    Effect.provide(ProcessRunner.layer),
+    Effect.provideService(HostProcess.HomeDirectory, home),
+    Effect.provideService(HostProcess.Environment, {}),
+  );
+});
+
+const migrateTo = Effect.fn("SqliteTest.migrateTo")(function* (toMigrationInclusive?: number) {
+  const { dbPath } = yield* ServerConfig.ServerConfig;
+  yield* runMigrations({ toMigrationInclusive }).pipe(
+    Effect.provide(NodeSqliteClient.layer({ filename: dbPath })),
+  );
+});
+
+const databaseSnapshot = Effect.fn("SqliteTest.databaseSnapshot")(function* () {
+  const { dbPath } = yield* ServerConfig.ServerConfig;
+  return yield* Effect.acquireUseRelease(
+    Effect.sync(() => new NodeSqlite.DatabaseSync(dbPath, { readOnly: true })),
+    (db) =>
+      Effect.sync(() => ({
+        schema: db
+          .prepare("SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name")
+          .all(),
+        migrations: db.prepare("SELECT * FROM effect_sql_migrations ORDER BY migration_id").all(),
+        data: db.prepare("SELECT * FROM guard_probe ORDER BY id").all(),
+      })),
+    (db) => Effect.sync(() => db.close()),
+  );
+});
+
+const layerT3Home = ServerConfig.layerTest(process.cwd(), { prefix: "t3-sqlite-cli-" });
+
+it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI database ownership", (it) => {
+  it.effect("refuses CLI auth before changing a running server's older schema or data", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped();
+      yield* Effect.gen(function* () {
+        yield* migrateTo(Math.max(...migrationManifest.map(([id]) => id)) - 1);
+        const { dbPath } = yield* ServerConfig.ServerConfig;
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`CREATE TABLE guard_probe(id INTEGER PRIMARY KEY, payload TEXT)`;
+          yield* sql`INSERT INTO guard_probe VALUES (1, 'retained')`;
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+        yield* ownT3Home();
+        const before = yield* databaseSnapshot();
+        const opened = yield* Effect.void.pipe(
+          Effect.provide(EnvironmentAuth.layerRuntime),
+          Effect.result,
+        );
+        assert.deepEqual(yield* databaseSnapshot(), before);
+        assert.equal(opened._tag, "Failure");
+        if (opened._tag === "Failure") assert.equal(opened.failure._tag, "ServerOwnsDatabaseError");
+      }).pipe(
+        Effect.provideService(HostProcess.HomeDirectory, home),
+        Effect.provideService(HostProcess.Environment, {}),
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
+  );
+
+  it.effect("allows current-schema CLI auth and persistence while the server owns the home", () =>
+    Effect.gen(function* () {
+      yield* migrateTo();
+      yield* ownT3Home();
+      yield* Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        assert.deepEqual(yield* auth.listSessions(), []);
+      }).pipe(Effect.provide(EnvironmentAuth.layerRuntime));
+      yield* Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const rows = yield* sql<{
+          readonly id: number;
+        }>`SELECT MAX(migration_id) AS id FROM effect_sql_migrations`;
+        assert.equal(rows[0]?.id, Math.max(...migrationManifest.map(([id]) => id)));
+      }).pipe(Effect.provide(SqlitePersistence.layerCliConfig));
+    }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
+  );
+
+  it.effect("migrates after release, ignores stale runtime metadata and permits a new owner", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped();
+      yield* Effect.gen(function* () {
+        yield* migrateTo(Math.max(...migrationManifest.map(([id]) => id)) - 1);
+        const { serverRuntimeStatePath } = yield* ServerConfig.ServerConfig;
+        yield* Effect.scoped(ownT3Home());
+        yield* fs.writeFileString(
+          serverRuntimeStatePath,
+          JSON.stringify({
+            version: 1,
+            pid: -1,
+            ownerId: "released-owner",
+            port: 1,
+            origin: "http://127.0.0.1:1",
+            startedAt: "2026-01-01T00:00:00.000Z",
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            readonly id: number;
+          }>`SELECT MAX(migration_id) AS id FROM effect_sql_migrations`;
+          assert.equal(rows[0]?.id, Math.max(...migrationManifest.map(([id]) => id)));
+        }).pipe(Effect.provide(SqlitePersistence.layerCliConfig));
+        yield* Effect.scoped(ownT3Home());
+        yield* Effect.void.pipe(Effect.provide(SqlitePersistence.layerCliConfig));
+      }).pipe(
+        Effect.provideService(HostProcess.HomeDirectory, home),
+        Effect.provideService(HostProcess.Environment, {}),
+      );
+    }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
+  );
+
+  it.effect(
+    "releases a migration lock on failure and interruption without claiming runtime state",
+    () =>
+      Effect.gen(function* () {
+        const { serverRuntimeStatePath } = yield* ServerConfig.ServerConfig;
+        const fs = yield* FileSystem.FileSystem;
+        const contents = JSON.stringify({
+          version: 1,
+          pid: -1,
+          ownerId: "stale-owner",
+          port: 1,
+          origin: "http://127.0.0.1:1",
+          startedAt: "2026-01-01T00:00:00.000Z",
+        });
+        yield* fs.writeFileString(serverRuntimeStatePath, contents);
+        yield* migrateTo(Math.max(...migrationManifest.map(([id]) => id)) - 1);
+        const { dbPath } = yield* ServerConfig.ServerConfig;
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* sql`ALTER TABLE scheduled_tasks RENAME TO migration_probe_tasks`;
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+        const failed = yield* Effect.void.pipe(
+          Effect.provide(SqlitePersistence.layerCliConfig),
+          Effect.result,
+        );
+        assert.equal(failed._tag, "Failure");
+        yield* Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          const rows = yield* sql<{
+            readonly id: number;
+          }>`SELECT MAX(migration_id) AS id FROM effect_sql_migrations`;
+          assert.equal(rows[0]?.id, Math.max(...migrationManifest.map(([id]) => id)) - 1);
+          yield* sql`ALTER TABLE migration_probe_tasks RENAME TO scheduled_tasks`;
+        }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
+        yield* Effect.void.pipe(Effect.provide(SqlitePersistence.layerCliConfig));
+        const acquired = yield* Deferred.make<void>();
+        const holder = yield* Effect.scoped(
+          ServerOwnership.holdServerOwnershipLock(serverRuntimeStatePath).pipe(
+            Effect.andThen(Deferred.succeed(acquired, undefined)),
+            Effect.andThen(Effect.never),
+          ),
+        ).pipe(Effect.forkChild);
+        yield* Deferred.await(acquired);
+        yield* Fiber.interrupt(holder);
+        yield* Effect.scoped(ServerOwnership.holdServerOwnershipLock(serverRuntimeStatePath));
+        assert.equal(yield* fs.readFileString(serverRuntimeStatePath), contents);
+      }).pipe(Effect.scoped, Effect.provide(layerT3Home)),
   );
 });
