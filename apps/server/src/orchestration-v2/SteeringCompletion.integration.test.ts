@@ -487,6 +487,9 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
   canSteer = true,
   interruptTurn: Effect.Effect<void> = Effect.void,
   steeringAcceptsAttachments = true,
+  nativeStart?: (
+    input: ProviderAdapter.ProviderAdapterV2TurnInput,
+  ) => Effect.Effect<void, ProviderAdapter.ProviderAdapterTurnStartError>,
 ) {
   const cwd = yield* checkpointWorkspace(name);
   const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
@@ -535,6 +538,7 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
           });
         const startTurn = (turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
           Effect.gen(function* () {
+            if (nativeStart !== undefined) yield* nativeStart(turn);
             started.push(turn);
             yield* turnUpdated(turn, "running");
           });
@@ -591,7 +595,25 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
                     (turn) =>
                       ProviderTurnId.make(`provider-turn:${turn.attemptId}`) === providerTurnId,
                   ),
-                  (turn) => turnUpdated(turn, "interrupted"),
+                  (turn) =>
+                    turnUpdated(turn, "interrupted").pipe(
+                      Effect.andThen(
+                        nativeStart === undefined
+                          ? Effect.void
+                          : Queue.offer(events, {
+                              type: "turn.terminal",
+                              driver,
+                              providerThreadId: turn.providerThread.id,
+                              providerTurnId: ProviderTurnId.make(
+                                `provider-turn:${turn.attemptId}`,
+                              ),
+                              runOrdinal: turn.runOrdinal,
+                              status: "interrupted",
+                              failure: null,
+                              threadDisposition: "reusable",
+                            }),
+                      ),
+                    ),
                   { discard: true },
                 ),
               ),
@@ -2299,4 +2321,139 @@ it.effect("a side chat that opens with /goal gets its context on the next questi
       }).pipe(Effect.provide(layer));
     }),
   ),
+);
+
+it.effect.each(["accepted", "before-acceptance", "known-unsent"] as const)(
+  "repro #31933 Stop during native start (%s)",
+  (timing) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const entered = yield* Deferred.make<void>();
+        const response = yield* Deferred.make<void>();
+        const cancelled = yield* Deferred.make<void>();
+        const calls: string[] = [];
+        let nativeActive = false;
+        let responseCancelled = false;
+        let previousTurnActive = false;
+        const { cwd, started, interrupted, layer } = yield* nextTurnSelectionHarness(
+          `native-accept-stop-${timing}`,
+          false,
+          true,
+          Effect.sync(() => {
+            nativeActive = false;
+          }),
+          true,
+          (input) =>
+            Effect.gen(function* () {
+              calls.push(input.message.messageId);
+              if (input.message.messageId === "message:first") {
+                if (timing === "accepted") nativeActive = true;
+                yield* Deferred.succeed(entered, undefined);
+                yield* Deferred.await(response).pipe(
+                  Effect.onInterrupt(() =>
+                    Effect.gen(function* () {
+                      responseCancelled = true;
+                      yield* Deferred.succeed(cancelled, undefined);
+                    }),
+                  ),
+                );
+                nativeActive = true;
+              } else {
+                if (nativeActive) {
+                  previousTurnActive = true;
+                  return yield* new ProviderAdapter.ProviderAdapterTurnStartError({
+                    driver,
+                    threadId: input.threadId,
+                    providerThreadId: input.providerThread.id,
+                    runId: input.runId,
+                    cause: "previous_turn_active",
+                  });
+                }
+                nativeActive = true;
+              }
+            }),
+        );
+        yield* Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+          const threadId = ThreadId.make(`thread:native-accept-stop-${timing}`);
+          yield* orchestrator.dispatch({
+            type: "thread.create",
+            commandId: CommandId.make("create"),
+            threadId,
+            projectId: ProjectId.make(`project:native-accept-stop-${timing}`),
+            title: "Native start Stop race",
+            modelSelection: runSelection,
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            branch: null,
+            worktreePath: cwd,
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const send = (text: string) =>
+            orchestrator.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(text),
+              threadId,
+              messageId: MessageId.make(`message:${text}`),
+              text,
+              attachments: [],
+              modelSelection: runSelection,
+              dispatchMode: { type: "start_immediately" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+          yield* send("first");
+          const draining =
+            timing === "known-unsent" ? undefined : yield* worker.drain().pipe(Effect.forkScoped);
+          if (draining !== undefined) yield* Deferred.await(entered);
+          const beforeStop = yield* orchestrator.getThreadProjection(threadId);
+          assert.lengthOf(beforeStop.providerTurns, 0);
+          yield* orchestrator.dispatch({
+            type: "thread.stop",
+            commandId: CommandId.make("stop"),
+            threadId,
+          });
+
+          yield* Deferred.succeed(response, undefined);
+          if (draining !== undefined) yield* Fiber.join(draining);
+          yield* worker.drain();
+          const afterStop = yield* orchestrator.getThreadProjection(threadId);
+          const activeAfterStop = nativeActive;
+          const interruptsAfterStop = interrupted.length;
+          yield* send("next");
+          yield* worker.drain();
+          yield* send("next");
+          yield* worker.drain();
+          const afterNext = yield* orchestrator.getThreadProjection(threadId);
+          const next = afterNext.runs.find((run) => run.userMessageId === "message:next")!;
+          const actual = {
+            timing,
+            activeAfterStop,
+            interruptsAfterStop,
+            responseCancelled,
+            previousTurnActive,
+            firstStatus: afterStop.runs[0]?.status,
+            projectedTurnsAfterStop: afterStop.providerTurns.length,
+            nextCalls: calls.filter((call) => call === "message:next").length,
+            nextStatus: next.status,
+            acceptedMessages: started.map((turn) => turn.message.messageId),
+          };
+          yield* Effect.logInfo("NATIVE_START_STOP_REPRO", actual);
+          assert.equal(actual.nextCalls, 1);
+          assert.equal(actual.interruptsAfterStop, timing === "known-unsent" ? 0 : 1);
+          assert.isFalse(actual.responseCancelled);
+          assert.equal(actual.firstStatus, "interrupted");
+          assert.deepEqual(
+            { activeAfterStop, previousTurnActive, nextStatus: next.status },
+            {
+              activeAfterStop: false,
+              previousTurnActive: false,
+              nextStatus: "running",
+            },
+          );
+        }).pipe(Effect.provide(layer));
+      }),
+    ),
 );

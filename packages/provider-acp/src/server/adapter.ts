@@ -9187,6 +9187,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     activated,
                     turnInput.modelSelection,
                     turnInput.runtimePolicy,
+                  ).pipe(
+                    Effect.mapError(
+                      (cause) =>
+                        new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
+                    ),
                   );
                   yield* Ref.set(activeSelection, turnInput.modelSelection);
                   yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
@@ -9211,12 +9216,22 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   currentSessionSetup,
                   turnInput.modelSelection,
                   turnInput.runtimePolicy,
+                ).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
+                  ),
                 );
                 yield* Ref.set(activeSelection, turnInput.modelSelection);
                 yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
               }
             }
-            yield* validateModelSelection(turnInput.modelSelection);
+            yield* validateModelSelection(turnInput.modelSelection).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
+              ),
+            );
             yield* Ref.set(lastTurnRoute, {
               threadId: turnInput.threadId,
               providerThreadId: turnInput.providerThread.id,
@@ -9251,7 +9266,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             const promptParts = isContinuationTurn
               ? null
-              : yield* resolvePromptParts(turnInput, requestedSessionId);
+              : yield* resolvePromptParts(turnInput, requestedSessionId).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
+                  ),
+                );
             const startedAt = yield* DateTime.now;
             const nativeTurnId = `${requestedSessionId}:turn:${turnInput.providerTurnOrdinal}`;
             const providerTurnId = deriveProviderTurnId(nativeTurnId);

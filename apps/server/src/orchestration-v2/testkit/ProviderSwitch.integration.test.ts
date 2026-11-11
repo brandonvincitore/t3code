@@ -52,6 +52,9 @@ import * as LegacyV1ThreadImporter from "../legacy/LegacyV1ThreadImporter.ts";
 import * as Orchestrator from "../Orchestrator.ts";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EffectOutbox from "../EffectOutbox.ts";
+import * as RunExecutionService from "../RunExecutionService.ts";
+import * as ProviderSessionManager from "../ProviderSessionManager.ts";
+import * as Option from "effect/Option";
 import * as ProjectionReplay from "./ProjectionReplay.ts";
 import * as ProjectionStore from "../ProjectionStore.ts";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
@@ -255,7 +258,21 @@ function makeTestAdapter(input: {
                 input.failStartOnce !== undefined &&
                 (yield* Ref.getAndSet(input.failStartOnce, false))
               )
-                return yield* unimplemented(input.driver, "turn start failed after injection");
+                return yield* unimplemented(input.driver, "turn start failed after injection").pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterTurnStartError({
+                        driver: input.driver,
+                        threadId: turnInput.threadId,
+                        providerThreadId: turnInput.providerThread.id,
+                        runId: turnInput.runId,
+                        cause: new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                          driver: input.driver,
+                          cause,
+                        }),
+                      }),
+                  ),
+                );
               if (
                 input.refuseStarts !== undefined &&
                 (yield* Ref.getAndUpdate(input.refuseStarts, (left) => Math.max(0, left - 1))) > 0
@@ -1109,6 +1126,16 @@ describe("orchestration v2 provider switching", () => {
           yield* Effect.gen(function* () {
             const orchestrator = yield* Orchestrator.OrchestratorV2;
             const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+            const execution = yield* RunExecutionService.RunExecutionServiceV2;
+            const startFailed = yield* Deferred.make<void>();
+            const originalStart = execution.startRootRun;
+            using _startOutcome = vi
+              .spyOn(execution, "startRootRun")
+              .mockImplementation((input) =>
+                originalStart(input).pipe(
+                  Effect.tapError(() => Deferred.succeed(startFailed, undefined)),
+                ),
+              );
             const dispatch = (ordinal: number, text: string, selection: ModelSelection) =>
               orchestrator.dispatch({
                 type: "message.dispatch",
@@ -1162,6 +1189,27 @@ describe("orchestration v2 provider switching", () => {
               failure === "large-missed-request" ? "x".repeat(7_000) : "First target request",
               CLAUDE_MODEL_SELECTION,
             );
+            if (failure === "injection") {
+              yield* Deferred.await(startFailed);
+              const uncertain = yield* orchestrator.getThreadProjection(threadId);
+              const run = uncertain.runs.at(-1)!;
+              assert.equal(run.status, "running");
+              const ownership = yield* execution.getStartOwnership({
+                threadId,
+                runId: run.id,
+                attemptId: run.activeAttemptId!,
+              });
+              assert.isTrue(Option.isSome(ownership));
+              if (Option.isSome(ownership)) assert.isFalse(ownership.value.startPending);
+              const target = uncertain.providerThreads.find(
+                (thread) => thread.id === run.providerThreadId,
+              )!;
+              const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+              yield* manager.release({
+                providerSessionId: target.providerSessionId!,
+                reason: "manual_shutdown",
+              });
+            }
             yield* wait(2, "failed");
             const failed = yield* orchestrator.getThreadProjection(threadId);
             const failedHandoff = failed.contextHandoffs.at(-1)!;

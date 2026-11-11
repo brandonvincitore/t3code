@@ -424,7 +424,7 @@ function unimplemented(detail: string) {
 const makeProviderAdapter = Effect.fnUntraced(function* (
   state: Ref.Ref<TestProviderRuntimeState>,
   options: {
-    readonly failEventStream?: boolean;
+    readonly failEventStream?: boolean | "after-events";
     readonly capabilities?: OrchestrationV2ProviderCapabilities;
     readonly extensionStatuses?: OrchestrationV2ProviderSession["extensionStatuses"];
     readonly mcpConfigs?: Ref.Ref<
@@ -514,21 +514,34 @@ const makeProviderAdapter = Effect.fnUntraced(function* (
           get providerSession() {
             return session;
           },
-          events: options.failEventStream
-            ? Stream.fail(
-                new ProviderAdapter.ProviderAdapterEventStreamError({
-                  driver: CODEX_DRIVER,
-                  providerSessionId: input.providerSessionId,
-                  cause: "process exited",
-                }),
-              )
-            : Stream.fromQueue(events).pipe(
-                Stream.tap((event) =>
-                  Effect.sync(() => {
-                    if (event.type === "provider_session.updated") session = event.providerSession;
+          events:
+            options.failEventStream === true
+              ? Stream.fail(
+                  new ProviderAdapter.ProviderAdapterEventStreamError({
+                    driver: CODEX_DRIVER,
+                    providerSessionId: input.providerSessionId,
+                    cause: "process exited",
                   }),
+                )
+              : Stream.fromQueue(events).pipe(
+                  Stream.concat(
+                    options.failEventStream === "after-events"
+                      ? Stream.fail(
+                          new ProviderAdapter.ProviderAdapterEventStreamError({
+                            driver: CODEX_DRIVER,
+                            providerSessionId: input.providerSessionId,
+                            cause: "synthetic stream failure after buffered events",
+                          }),
+                        )
+                      : Stream.empty,
+                  ),
+                  Stream.tap((event) =>
+                    Effect.sync(() => {
+                      if (event.type === "provider_session.updated")
+                        session = event.providerSession;
+                    }),
+                  ),
                 ),
-              ),
           ...(options.backgroundTasksEndWithProcess === false
             ? {}
             : { backgroundTasksEndWithProcess: true as const }),
@@ -578,7 +591,7 @@ function layerTest(input: {
   readonly state: Ref.Ref<TestProviderRuntimeState>;
   readonly idleTimeoutMs: number;
   readonly maxIdlePinMs?: number;
-  readonly failEventStream?: boolean;
+  readonly failEventStream?: boolean | "after-events";
   readonly capabilities?: OrchestrationV2ProviderCapabilities;
   readonly extensionStatuses?: OrchestrationV2ProviderSession["extensionStatuses"];
   readonly mcpConfigs?: Ref.Ref<
@@ -1949,80 +1962,110 @@ it.effect("ProviderSessionManagerV2 interrupts event subscriptions on server shu
 
       yield* manager.shutdown;
 
-      const exit = yield* bufferedSubscription.events.pipe(Stream.runCollect, Effect.exit);
-      assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+      for (const subscription of [bufferedSubscription, yield* runtime.subscribeEvents!]) {
+        const exit = yield* subscription.events.pipe(Stream.runCollect, Effect.exit);
+        assert.isTrue(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause));
+      }
     });
 
     yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
   }),
 );
 
-it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops", () =>
-  Effect.gen(function* () {
-    const state = yield* Ref.make(emptyState);
-    const effect = Effect.gen(function* () {
-      const eventSink = yield* EventSink.EventSinkV2;
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
-      const now = yield* DateTime.now;
-      const threadId = ThreadId.make("thread-provider-session-manager-provider-stop");
-      const providerSessionId = yield* idAllocator.allocate.providerSession({
-        providerInstanceId: modelSelection.instanceId,
-        threadId,
-      });
-      yield* eventSink.write({
-        events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
-      });
-      const runtime = yield* manager.open({
-        threadId,
-        providerSessionId,
-        modelSelection,
-        runtimePolicy,
-      });
-      const subscription = yield* runtime.subscribeEvents!;
-      const collected = yield* subscription.events.pipe(Stream.runCollect, Effect.forkScoped);
-      const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
-      assert.isDefined(adapterQueue);
-      const providerThreadId = idAllocator.derive.providerThread({
-        driver: CODEX_DRIVER,
-        nativeThreadId: "provider-stop-thread",
-      });
-      const providerTurnId = idAllocator.derive.providerTurn({
-        driver: CODEX_DRIVER,
-        nativeTurnId: "provider-stop-turn",
-      });
-      yield* Queue.offer(adapterQueue!, {
-        type: "turn.terminal",
-        driver: CODEX_DRIVER,
-        providerThreadId,
-        providerTurnId,
-        runOrdinal: 1,
-        status: "completed",
-        failure: null,
-        threadDisposition: "reusable",
-      });
-      yield* Queue.offer(adapterQueue!, {
-        type: "provider_session.updated",
-        driver: CODEX_DRIVER,
-        providerSession: {
-          ...runtime.providerSession,
-          status: "stopped",
-          updatedAt: now,
-        },
-      });
-      yield* Queue.end(adapterQueue!);
+it.effect.each(["stopped", "EOF", "failure"] as const)(
+  "ProviderSessionManagerV2 drains subscribers on %s",
+  (termination) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-provider-stop");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* eventSink.write({
+          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const subscription = yield* runtime.subscribeEvents!;
+        const closed = yield* Deferred.make<void>();
+        const unsubscribe = yield* runtime.onSessionClosed!(
+          Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+        );
+        const adapterQueue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId));
+        assert.isDefined(adapterQueue);
+        const providerThreadId = idAllocator.derive.providerThread({
+          driver: CODEX_DRIVER,
+          nativeThreadId: "provider-stop-thread",
+        });
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: CODEX_DRIVER,
+          nativeTurnId: "provider-stop-turn",
+        });
+        yield* Queue.offer(adapterQueue!, {
+          type: "turn.terminal",
+          driver: CODEX_DRIVER,
+          providerThreadId,
+          providerTurnId,
+          runOrdinal: 1,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+        yield* Queue.offer(adapterQueue!, {
+          type: "provider_session.updated",
+          driver: CODEX_DRIVER,
+          providerSession: {
+            ...runtime.providerSession,
+            status: termination === "stopped" ? "stopped" : "ready",
+            updatedAt: now,
+          },
+        });
+        yield* Queue.end(adapterQueue!);
 
-      const events = Array.from(yield* Fiber.join(collected));
-      assert.deepEqual(
-        events.map((event) => event.type),
-        ["turn.terminal", "provider_session.updated"],
+        yield* Deferred.await(closed);
+        const events: Array<ProviderAdapter.ProviderAdapterV2Event["type"]> = [];
+        const exit = yield* subscription.events.pipe(
+          Stream.tap((event) => Effect.sync(() => events.push(event.type))),
+          Stream.runDrain,
+          Effect.exit,
+        );
+        assert.deepEqual(events, ["turn.terminal", "provider_session.updated"]);
+        const late = yield* runtime.subscribeEvents!;
+        const lateExit = yield* late.events.pipe(Stream.runDrain, Effect.exit);
+        if (termination === "stopped") {
+          assert.isTrue(Exit.isSuccess(exit));
+          assert.isTrue(Exit.isSuccess(lateExit));
+        } else {
+          assert.isTrue(Exit.isFailure(exit));
+          assert.isTrue(Exit.isFailure(lateExit));
+          if (Exit.isFailure(exit) && Exit.isFailure(lateExit))
+            assert.strictEqual(Cause.squash(lateExit.cause), Cause.squash(exit.cause));
+        }
+        yield* unsubscribe;
+        assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
+        assert.equal((yield* Ref.get(state)).closeCount, 1);
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 60_000,
+            failEventStream: termination === "failure" ? "after-events" : false,
+          }),
+        ),
       );
-      assert.isTrue(Option.isNone(yield* manager.get(providerSessionId)));
-      assert.equal((yield* Ref.get(state)).closeCount, 1);
-    });
-
-    yield* effect.pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000 })));
-  }),
+    }),
 );
 
 it.effect(
@@ -3109,14 +3152,29 @@ it.effect("ProviderSessionManagerV2 releases sessions when provider event stream
         modelSelection,
         runtimePolicy,
       });
-      yield* runtime.events.pipe(Stream.runDrain, Effect.ignore, Effect.forkScoped);
-      yield* Effect.yieldNow;
+      const closed = yield* Deferred.make<void>();
+      const unsubscribe = yield* runtime.onSessionClosed!(
+        Deferred.succeed(closed, undefined).pipe(Effect.asVoid),
+      );
+      yield* Deferred.await(closed);
+      yield* eventSink.stream({ threadId, eventType: "provider-session.updated" }).pipe(
+        Stream.filter(
+          ({ event }) =>
+            event.type === "provider-session.updated" && event.payload.status === "error",
+        ),
+        Stream.take(1),
+        Stream.runDrain,
+      );
 
       const liveSession = yield* manager.get(providerSessionId);
       const runtimeState = yield* Ref.get(state);
       const projection = yield* projectionStore.getThreadProjection(threadId);
 
       assert.isTrue(Option.isNone(liveSession));
+      const late = yield* runtime.subscribeEvents!;
+      const lateExit = yield* late.events.pipe(Stream.runCollect, Effect.exit);
+      assert.isTrue(Exit.isFailure(lateExit) && !Cause.hasInterruptsOnly(lateExit.cause));
+      yield* unsubscribe;
       assert.equal(runtimeState.closeCount, 1);
       assert.equal(projection.providerSessions.at(-1)?.status, "error");
       assert.equal(
@@ -4718,4 +4776,87 @@ it.effect("ProviderSessionManagerV2 gives a delegated child its project's device
     });
     assert.isTrue(child?.capabilities?.has("device"));
   }),
+);
+
+it.effect.each(["failed", "late"] as const)(
+  "ProviderSessionManagerV2 observes only successful scope closure (%s)",
+  (outcome) =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const closing = yield* Deferred.make<void>();
+      const finishClose = yield* Deferred.make<void>();
+      const observed = yield* Deferred.make<void>();
+      const beforeOpen = () =>
+        Effect.addFinalizer(() =>
+          Deferred.succeed(closing, undefined).pipe(
+            Effect.andThen(
+              outcome === "failed"
+                ? Effect.die(new Error("synthetic failed finalizer"))
+                : Deferred.await(finishClose),
+            ),
+          ),
+        );
+      yield* Effect.gen(function* () {
+        const sink = yield* EventSink.EventSinkV2;
+        const ids = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const threadId = ThreadId.make(`thread:scope-close:${outcome}`);
+        const providerSessionId = yield* ids.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+        yield* sink.write({
+          events: [
+            yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now: yield* DateTime.now }),
+          ],
+        });
+        const runtime = yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const subscription = yield* runtime.subscribeEvents!;
+        let notifications = 0;
+        yield* runtime.onSessionClosed!(
+          subscription.close.pipe(
+            Effect.tap(() =>
+              Effect.sync(() => {
+                notifications++;
+              }),
+            ),
+            Effect.andThen(Deferred.succeed(observed, undefined)),
+            Effect.asVoid,
+          ),
+        );
+        const release = yield* manager
+          .release({ providerSessionId, reason: "manual_shutdown" })
+          .pipe(Effect.exit, Effect.forkScoped);
+        yield* Deferred.await(closing);
+        assert.isFalse(yield* Deferred.isDone(observed));
+        if (outcome === "late") {
+          yield* TestClock.adjust("30 seconds");
+          assert.isTrue(Exit.isSuccess(yield* Fiber.join(release)));
+          assert.equal(notifications, 0);
+          yield* Deferred.succeed(finishClose, undefined);
+          yield* Deferred.await(observed);
+          assert.equal(notifications, 1);
+          let late = 0;
+          yield* runtime.onSessionClosed!(
+            Effect.sync(() => {
+              late++;
+            }),
+          );
+          assert.equal(late, 1);
+        } else {
+          assert.isTrue(Exit.isFailure(yield* Fiber.join(release)));
+          yield* runtime.onSessionClosed!(
+            Effect.sync(() => {
+              notifications++;
+            }),
+          );
+          assert.equal(notifications, 0);
+        }
+      }).pipe(Effect.provide(layerTest({ state, idleTimeoutMs: 60_000, beforeOpen })));
+    }),
 );
