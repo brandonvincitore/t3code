@@ -356,7 +356,11 @@ export const OpenCodeDriver: ProviderDriver<
             Deferred.await(scanned),
             processEnv,
           );
-        }).pipe(Effect.scoped),
+        }).pipe(
+          Effect.scoped,
+          // Connection readiness has its own deadline; reserve both scan wait and fallback reads.
+          Effect.timeout(2 * resolveProviderProbeTimeoutMs("opencode", 10_000, processEnv)),
+        ),
       );
     const serverOwner = yield* OpenCodeServerOwner.make({
       binaryPath: effectiveConfig.binaryPath,
@@ -536,7 +540,6 @@ export const OpenCodeDriver: ProviderDriver<
                   v2: Effect.all([
                     snapshot.getSnapshot,
                     listOpenCode2Workspace(cwd).pipe(
-                      Effect.timeout(resolveProviderProbeTimeoutMs("opencode", 20_000, processEnv)),
                       Effect.mapError(
                         (cause) =>
                           new ProviderDriverError({

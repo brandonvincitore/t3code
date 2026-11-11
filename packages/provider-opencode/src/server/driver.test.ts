@@ -18,6 +18,8 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Duration from "effect/Duration";
 import * as Fiber from "effect/Fiber";
+import * as Exit from "effect/Exit";
+import * as Queue from "effect/Queue";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Logger from "effect/Logger";
@@ -172,6 +174,143 @@ const lazyMiseShim = {
 } as unknown as OpenCodeRuntime.OpenCodeRuntime["Service"];
 
 it.layer(layer)("OpenCodeDriver runtime selection", (it) => {
+  it.effect.each(["events", "fallback"] as const)(
+    "keeps the workspace scan budget after connection and verification (%s)",
+    (mode) =>
+      Effect.gen(function* () {
+        const connecting = yield* Deferred.make<void>();
+        const connected = yield* Deferred.make<void>();
+        const verifying = yield* Deferred.make<void>();
+        const verified = yield* Deferred.make<void>();
+        const reading = yield* Deferred.make<void>();
+        const frames = yield* Queue.unbounded<string>();
+        const milestones: string[] = [];
+        let commandReads = 0;
+        let skillReads = 0;
+        let inventoryReady = false;
+        const server = HttpClient.make((request) =>
+          Effect.gen(function* () {
+            const path = new URL(request.url).pathname;
+            if (path === "/api/info") {
+              milestones.push("verify");
+              yield* Deferred.succeed(verifying, undefined);
+              yield* Deferred.await(verified);
+              return HttpClientResponse.fromWeb(
+                request,
+                Response.json({
+                  version: "2.0.18",
+                  pid: 1,
+                  urls: [],
+                  paths: { tmp: "/tmp/opencode" },
+                }),
+              );
+            }
+            if (path === "/api/event") {
+              milestones.push("subscribe");
+              const reply = HttpClientResponse.fromWeb(
+                request,
+                new Response(null, {
+                  headers: { "content-type": "text/event-stream" },
+                }),
+              );
+              return Object.defineProperty(reply, "stream", {
+                value: Stream.fromQueue(frames).pipe(
+                  Stream.map((frame) => new TextEncoder().encode(frame)),
+                ),
+              });
+            }
+            if (path === "/api/command") {
+              commandReads += 1;
+              milestones.push(`commands:${commandReads}`);
+              yield* Deferred.succeed(reading, undefined);
+            }
+            if (path === "/api/skill") skillReads += 1;
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json({
+                location: { directory: "/work" },
+                data:
+                  path === "/api/command" && inventoryReady
+                    ? [{ name: "review", description: "Review work" }]
+                    : [],
+              }),
+            );
+          }),
+        );
+        const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+        const instance = yield* OpenCodeDriver.create({
+          instanceId: ProviderInstanceId.make(`opencode-scan-deadline-${mode}`),
+          displayName: undefined,
+          environment: [
+            { name: "T3CODE_OPENCODE_PROBE_TIMEOUT_MS", value: "120000", sensitive: false },
+          ],
+          enabled: true,
+          config: OpenCodeDriver.defaultConfig(),
+        }).pipe(
+          Effect.provideService(HttpClient.HttpClient, server),
+          Effect.provide(TestProviderHost.layer({ runBackgroundWork: false })),
+          Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, {
+            ...openCode2Runtime,
+            startOpenCodeServerProcess: (input) =>
+              Effect.gen(function* () {
+                environments.push(input.environment);
+                milestones.push("connect");
+                yield* Deferred.succeed(connecting, undefined);
+                yield* Deferred.await(connected);
+                const url = "http://127.0.0.1:4096";
+                const version = input.verify ? yield* input.verify(url) : "2.0.18";
+                return { url, version, isRunning: Effect.succeed(true), exitCode: Effect.never };
+              }),
+          }),
+        );
+        const snapshot = yield* instance.snapshotForCwd!("/work").pipe(
+          Effect.exit,
+          Effect.forkChild,
+        );
+        yield* Deferred.await(connecting);
+        yield* TestClock.adjust("45 seconds");
+        yield* Deferred.succeed(connected, undefined);
+        yield* Deferred.await(verifying);
+        yield* TestClock.adjust("45 seconds");
+        yield* Deferred.succeed(verified, undefined);
+        yield* Deferred.await(reading);
+        const ticks = mode === "events" ? 2 : 4;
+        for (let tick = 0; tick < ticks; tick += 1) {
+          yield* Queue.offer(frames, ": heartbeat\n\n");
+          yield* TestClock.adjust("30 seconds");
+          if (tick === 0) inventoryReady = true;
+        }
+        if (mode === "events") {
+          for (const type of ["command.updated", "skill.updated"]) {
+            yield* Queue.offer(
+              frames,
+              `data: ${JSON.stringify({ id: `evt_${type}`, created: 0, type, location: { directory: "/work" }, data: {} })}\n\n`,
+            );
+          }
+        }
+        const result = yield* Fiber.join(snapshot);
+        assert.isTrue(Exit.isSuccess(result), `workspace read failed before its ${mode} milestone`);
+        if (Exit.isFailure(result)) return;
+        assert.equal(commandReads, 2);
+        assert.equal(skillReads, 2);
+        assert.include(
+          result.value.slashCommands.map((command) => command.name),
+          "review",
+        );
+        assert.isFalse(result.value.slashCommandsPending);
+        assert.deepEqual(milestones, [
+          "connect",
+          "verify",
+          "subscribe",
+          "commands:1",
+          "commands:2",
+        ]);
+        assert.lengthOf(environments, 1);
+        assert.equal(environments[0]?.T3CODE_OPENCODE_PROBE_TIMEOUT_MS, "120000");
+        assert.equal(environments[0]?.MISE_OFFLINE, process.env.MISE_OFFLINE);
+      }).pipe(Effect.scoped, Effect.provide(TestClock.layer())),
+  );
+
   it.effect("never starts a 1.x server for an OpenCode 2 instance", () =>
     Effect.gen(function* () {
       serverStarts.length = 0;
