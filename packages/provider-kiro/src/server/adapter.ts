@@ -45,6 +45,9 @@ import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
+  KIRO_APPROVE_FOR_ME_CONFIG_ID,
+  kiroNativeAuto,
+  validateKiroRuntimePolicy,
   KIRO_EFFORT_CONFIG_ID,
   KIRO_MODEL_CONFIG_ID,
   kiroApprovalOptions,
@@ -701,16 +704,30 @@ function makeKiroAcpAdapterFlavor(
   const makeNativeRuntime =
     options.makeRuntime ??
     ((input: AcpAdapterV2RuntimeInput) => {
-      const { runtimePolicy: _runtimePolicy, processEnvironment, ...runtimeInput } = input;
+      const { runtimePolicy, processEnvironment, ...runtimeInput } = input;
       return makeKiroAcpRuntime({
         ...runtimeInput,
         settings: options.settings,
+        nativeAuto: kiroNativeAuto(runtimePolicy),
         environment: { ...options.environment, ...processEnvironment },
       });
     });
   // Not `registerExtensions`: a replacement runtime (rollback, failed resume) wires that after `start()`.
   const makeRuntime = (input: AcpAdapterV2RuntimeInput) =>
-    makeNativeRuntime(input).pipe(
+    validateKiroRuntimePolicy(input.runtimePolicy).pipe(
+      Effect.andThen(
+        makeNativeRuntime({
+          ...input,
+          processEnvironment: {
+            ...input.processEnvironment,
+            KIRO_TRUST_CLASSIFIER_MODE: kiroNativeAuto(input.runtimePolicy) ? "enforce" : "off",
+          },
+          clientCapabilities: {
+            ...input.clientCapabilities,
+            session: { ...input.clientCapabilities?.session, configOptions: { boolean: {} } },
+          },
+        }),
+      ),
       Effect.tap(secretStorage.installHandlers),
       Effect.tap((runtime) => options.mcp?.installHandlers(runtime) ?? Effect.void),
     );
@@ -747,6 +764,8 @@ function makeKiroAcpAdapterFlavor(
       },
     },
     makeRuntime,
+    runtimePolicyKey: (policy) => String(kiroNativeAuto(policy)),
+    validateRuntimePolicy: validateKiroRuntimePolicy,
     promptFailure: kiroPromptFailure,
     ignoreSessionUpdate: makeKiroCloudConfigFilter(),
     normalizeSessionUpdate: (notification) =>
@@ -767,12 +786,15 @@ function makeKiroAcpAdapterFlavor(
     ),
     // The generic option loop runs after the model write, and an agent write
     // there would put the agent's own model back.
-    ownedModelOptionIds: ["reasoningEffort", KIRO_AGENT_CONFIG_ID],
+    ownedModelOptionIds: ["reasoningEffort", KIRO_AGENT_CONFIG_ID, KIRO_APPROVE_FOR_ME_CONFIG_ID],
     // With Autopilot off (Supervised) Kiro asks the user to accept a turn's
     // changes before it ends. T3's runtime policy answers its per-tool prompts
     // either way, and a runtime-mode change reopens the session to reapply it.
     sessionConfigForPolicy: (policy) => [
       { id: KIRO_AUTOPILOT_CONFIG_ID, value: kiroAutopilotValue(policy) },
+      ...(kiroNativeAuto(policy)
+        ? [{ id: KIRO_APPROVE_FOR_ME_CONFIG_ID, value: true, required: true }]
+        : []),
     ],
     // See isKiroPromptActivity: Kiro 2.27.1 can drop a cancel sent just after
     // `session/prompt` and run the turn to completion.

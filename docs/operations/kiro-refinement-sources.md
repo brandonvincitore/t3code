@@ -210,3 +210,34 @@ race finding. It binds separate host credential records to a versioned namespace
 instance and normalized native home, with no native-file import, fallback or writes. The
 existing d16216dd8198c0832eecf93983f8f120e218f935 pin remains the unadopted write-removal
 alternative; this repair preserves in-app OAuth store/delete. All earlier source pins remain.
+
+## November 11 fork-owned native Approve for Me
+
+This is maintainer-selected, fork-owned implementation by Codex (gpt-6.1-sol),
+using the existing T3 Auto runtime mode. It does not adopt or claim an upstream
+contribution or PR. The dependent integration base is `90ad7fb448504af31878459c329f898f71aad8fe`.
+
+The native contract comes from the parent's completed inspection of the public
+Kiro 3.2 ACP bundle (SHA256
+`fdcf34835ff8b8f9c536c1480e938734850917b9958d47ab4741c6f3585a1d90`).
+The research report has 30 exact extracts and SHA256
+`55fffea9953c0609c03af688be7a8884aaff56e20904a2a8c4570d7b5e1dc01e`.
+These are supplied native-source references, not a claim that this writer ran
+Kiro or independently retrieved that bundle. The official
+[Kiro CLI documentation](https://kiro.dev/docs/cli/) provides public product context;
+the advertised boolean control, rather than an undocumented preset, is the
+implementation authority. The inspected 3.1 bundle lacks that control.
+
+Auto advertises boolean configuration support, enables the classifier only in
+its admitted foreground process, and requires a returned and effective true
+`approveForMe` value before prompting. Native uncertainty reaches the user.
+Other modes and probes force the classifier off; switching across Auto recreates
+the process and reloads native history. Explicit approval or sandbox overrides,
+Plan, and stricter managed ceilings reject native Auto. Stored model options
+cannot activate it. No native permission files or process-global environment are
+changed, and no classifier or model is called for discovery or verification.
+
+Verification uses the free scripted ACP peer and focused tests. Native backend
+availability, plan charges, and live organization behavior remain unprobed.
+Client integration and independent review belong to the parent task. Earlier
+ledger bytes and all 131 unique source pins remain intact.

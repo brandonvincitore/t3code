@@ -80,12 +80,12 @@ export const makeKiroTextGeneration = Effect.fn("KiroTextGeneration.make")(funct
       const spawn = yield* resolveSpawnCommand(
         command,
         ["chat", "--list-models", "--format", "json"],
-        { env: environment },
+        { env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: "off" } },
       );
       const listed = yield* spawnAndCollect(
         command,
         ChildProcess.make(spawn.command, spawn.args, {
-          env: environment,
+          env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: "off" },
           shell: spawn.shell,
         }),
       );

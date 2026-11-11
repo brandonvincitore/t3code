@@ -123,7 +123,7 @@ export const makeKiroPowers = Effect.fn("KiroPowers.make")(function* (
       const child = yield* spawner.spawn(
         ChildProcess.make(settings.binaryPath || "kiro-cli", ["powers", operation, "--", target], {
           cwd,
-          env: environment,
+          env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: "off" },
           shell: false,
         }),
       );

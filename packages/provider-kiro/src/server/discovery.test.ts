@@ -65,7 +65,7 @@ import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 createInterface({ input: process.stdin }).on('line', line => {
   const request = JSON.parse(line);
-  appendFileSync(process.env.KIRO_TEST_LOG, JSON.stringify({ method: request.method, cwd: process.cwd(), home: process.env.KIRO_HOME, offline: process.env.MISE_OFFLINE }) + '\\n');
+  appendFileSync(process.env.KIRO_TEST_LOG, JSON.stringify({ method: request.method, cwd: process.cwd(), home: process.env.KIRO_HOME, offline: process.env.MISE_OFFLINE, classifier: process.env.KIRO_TRUST_CLASSIFIER_MODE }) + '\\n');
   if (request.id === undefined) return;
   const result = request.method === 'initialize'
     ? { protocolVersion: 1, agentCapabilities: { _meta: { kiro: { extensionMethods: ['_kiro/configuration/getState'] } } } }
@@ -82,6 +82,7 @@ createInterface({ input: process.stdin }).on('line', line => {
           KIRO_TEST_STATE: state,
           KIRO_TEST_LOG: log,
           MISE_OFFLINE: "0",
+          KIRO_TRUST_CLASSIFIER_MODE: "enforce",
         });
         const discovery = yield* makeKiroDiscovery(
           yield* decodeSettings({ enabled: true, binaryPath }),
@@ -104,11 +105,16 @@ createInterface({ input: process.stdin }).on('line', line => {
         );
         yield* discovery.invalidate;
         assert.deepEqual((yield* discovery.get(a))?.skills, []);
-        const requests: Array<{ method: string; home: string; cwd: string; offline: string }> =
-          (yield* fs.readFileString(log))
-            .trim()
-            .split("\n")
-            .map((line) => JSON.parse(line));
+        const requests: Array<{
+          method: string;
+          home: string;
+          cwd: string;
+          offline: string;
+          classifier: string;
+        }> = (yield* fs.readFileString(log))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line));
         assert.deepEqual(
           requests.map((request) => request.method),
           [
@@ -121,6 +127,7 @@ createInterface({ input: process.stdin }).on('line', line => {
           ],
         );
         assert.isTrue(requests.every((request) => request.home === customHome));
+        assert.isTrue(requests.every((request) => request.classifier === "off"));
         assert.deepEqual(
           requests.map((request) => request.cwd),
           [a, a, b, b, a, a],

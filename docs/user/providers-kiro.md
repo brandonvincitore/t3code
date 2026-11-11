@@ -110,9 +110,15 @@ Kiro asks before tool calls such as writes and commands, and T3 Code answers by 
 
 - **Supervised** sends those requests to you. Kiro's Autopilot is off, so Kiro also asks you to
   review the turn's file changes before it finishes.
+- **Auto (Approve for Me)** uses Kiro’s native permission classifier for routine actions.
+  Uncertain or refused actions still ask you. This requires a Kiro CLI version that advertises
+  Approve for Me and consumes your Kiro plan. Native account or backend failures
+  can still require your approval. T3 refuses to start Auto if native activation is unavailable
+  or an explicit approval, sandbox, Plan, or stricter managed restriction cannot be enforced.
 - **Full access** approves them without asking you. Autopilot stays on, so there is no review step.
 
-Kiro offers no **Auto** or **Auto-accept edits**. Approvals offer only the choices Kiro sends. Kiro's
+Switching out of Auto reopens the native conversation with the classifier disabled.
+Kiro offers no **Auto-accept edits**. Approvals offer only the choices Kiro sends. Kiro's
 **Always allow** saves a rule for the whole workspace, so T3 Code shows it only when Kiro offers no
 one-time choice.
 

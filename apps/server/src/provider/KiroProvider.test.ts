@@ -665,7 +665,11 @@ describe("KiroProvider", () => {
         { value: "large-tasks", name: "Large tasks only" },
         { value: "delegate-all", name: "Delegate all work" },
       ];
-      const environment = Object.freeze({ MISE_OFFLINE: "0", KIRO_PROBE_FIXTURE: "kept" });
+      const environment = Object.freeze({
+        MISE_OFFLINE: "0",
+        KIRO_PROBE_FIXTURE: "kept",
+        KIRO_TRUST_CLASSIFIER_MODE: "enforce",
+      });
       const { snapshot, templateParams, environments } = yield* check(
         {
           "--version": { stdout: "kiro-cli 2.32.0\n", code: 0 },
@@ -688,7 +692,11 @@ describe("KiroProvider", () => {
       );
       assert.isTrue(environments.length >= 3);
       for (const probeEnvironment of environments) {
-        assert.deepEqual(probeEnvironment, { ...environment, MISE_OFFLINE: "1" });
+        assert.deepEqual(probeEnvironment, {
+          ...environment,
+          MISE_OFFLINE: "1",
+          KIRO_TRUST_CLASSIFIER_MODE: "off",
+        });
       }
       assert.equal(environment.MISE_OFFLINE, "0");
       assert.deepEqual(templateParams, [

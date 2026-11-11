@@ -66,6 +66,7 @@ export type ClientCapabilities = {
     readonly list?: Meta;
     readonly notices?: Meta;
     readonly compaction?: Meta;
+    readonly configOptions?: { readonly boolean?: Meta };
   } | null;
   readonly plan?: Meta;
   readonly auth?: { readonly terminal?: boolean };

@@ -132,11 +132,13 @@ const runKiroCli = Effect.fn("KiroProvider.runKiroCli")(function* (
   environment: NodeJS.ProcessEnv,
 ) {
   const command = settings.binaryPath || "kiro-cli";
-  const spawnCommand = yield* resolveSpawnCommand(command, args, { env: environment });
+  const spawnCommand = yield* resolveSpawnCommand(command, args, {
+    env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: "off" },
+  });
   return yield* spawnAndCollect(
     command,
     ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-      env: environment,
+      env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: "off" },
       shell: spawnCommand.shell,
     }),
   );

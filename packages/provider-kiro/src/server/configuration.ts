@@ -9,6 +9,7 @@ import type * as Acp from "effect-acp/compat";
 import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
+  KIRO_APPROVE_FOR_ME_CONFIG_ID,
   KIRO_EFFORT_CONFIG_ID,
   KIRO_MODEL_CONFIG_ID,
 } from "./acpSupport.ts";
@@ -36,7 +37,10 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
 ) {
   const descriptors = acpProviderOptionDescriptors({
     configOptions: configOptions.filter(
-      (option) => option.id !== KIRO_AUTOPILOT_CONFIG_ID && option.id !== KIRO_MODEL_CONFIG_ID,
+      (option) =>
+        option.id !== KIRO_AUTOPILOT_CONFIG_ID &&
+        option.id !== KIRO_MODEL_CONFIG_ID &&
+        option.id !== KIRO_APPROVE_FOR_ME_CONFIG_ID,
     ),
     modeState,
   });

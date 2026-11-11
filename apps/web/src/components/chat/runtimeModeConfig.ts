@@ -21,7 +21,8 @@ export const runtimeModeConfig: Record<
   },
   auto: {
     label: "Auto",
-    description: "Supported providers approve routine actions; others still ask.",
+    description:
+      "Native approval for routine actions. Kiro: Approve for Me uses your Kiro plan; uncertain actions still ask.",
     icon: SparklesIcon,
   },
   "full-access": {

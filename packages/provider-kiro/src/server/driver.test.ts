@@ -1,8 +1,14 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
 import { KiroSettings } from "../settings.ts";
-import { buildKiroAcpSpawnInput, kiroSessionMeta, kiroWorkflowSessionMeta } from "./acpSupport.ts";
+import {
+  buildKiroAcpSpawnInput,
+  kiroSessionMeta,
+  kiroWorkflowSessionMeta,
+  validateKiroRuntimePolicy,
+} from "./acpSupport.ts";
 import { kiroAuthFromWhoami } from "./status.ts";
 
 const decodeSettings = Schema.decodeUnknownSync(KiroSettings);
@@ -13,6 +19,7 @@ describe("KiroDriver", () => {
       command: "kiro-cli",
       args: ["acp", "--agent-engine=v3", "--auth-method=cli"],
       cwd: "/work",
+      env: { KIRO_TRUST_CLASSIFIER_MODE: "off" },
     });
     const custom = buildKiroAcpSpawnInput(
       decodeSettings({ binaryPath: "/opt/kiro/bin/kiro-cli" }),
@@ -21,7 +28,14 @@ describe("KiroDriver", () => {
     );
     assert.equal(custom.command, "/opt/kiro/bin/kiro-cli");
     assert.deepEqual(custom.args, ["acp", "--agent-engine=v3", "--auth-method=cli"]);
-    assert.deepEqual(custom.env, { KIRO_API_KEY: "ksk_test" });
+    assert.deepEqual(custom.env, { KIRO_API_KEY: "ksk_test", KIRO_TRUST_CLASSIFIER_MODE: "off" });
+    assert.equal(
+      buildKiroAcpSpawnInput(undefined, "/work", {
+        KIRO_TRUST_CLASSIFIER_MODE: "enforce",
+        KIRO_HOME: "/isolated",
+      }).env?.KIRO_TRUST_CLASSIFIER_MODE,
+      "off",
+    );
     assert.deepEqual(
       kiroWorkflowSessionMeta({
         kiro: { extensionMethods: ["_kiro/workflow/new", "_kiro/workflow/cancel"] },
@@ -50,6 +64,38 @@ describe("KiroDriver", () => {
       kiroWorkflowSessionMeta({ kiro: { extensionMethods: ["_kiro/workflow/new"] } }),
     );
   });
+
+  it.effect("rejects native Auto restrictions before process startup", () =>
+    Effect.gen(function* () {
+      for (const overrides of [
+        { approvalPolicy: "on-request" },
+        { approvalPolicy: "never" },
+        { sandboxPolicy: { type: "readOnly" } },
+        { sandboxPolicy: { type: "workspaceWrite" } },
+        { maxRuntimeMode: "approval-required" as const },
+        { maxRuntimeMode: "auto-accept-edits" as const },
+        { interactionMode: "plan" },
+      ]) {
+        const error = yield* validateKiroRuntimePolicy({ runtimeMode: "auto", ...overrides }).pipe(
+          Effect.flip,
+        );
+        assert.include(error.message, "cannot enforce");
+      }
+      for (const runtimeMode of ["approval-required", "full-access"] as const) {
+        yield* validateKiroRuntimePolicy({ runtimeMode, sandboxPolicy: { type: "readOnly" } });
+      }
+      yield* validateKiroRuntimePolicy({ runtimeMode: "auto", maxRuntimeMode: "auto" });
+      const env = { KIRO_TRUST_CLASSIFIER_MODE: "enforce", KIRO_HOME: "/isolated" };
+      const spawned = buildKiroAcpSpawnInput(undefined, "/work", env, true);
+      assert.equal(spawned.env?.KIRO_TRUST_CLASSIFIER_MODE, "enforce");
+      assert.equal(spawned.env?.KIRO_HOME, "/isolated");
+      assert.equal(
+        buildKiroAcpSpawnInput(undefined, "/work", env).env?.KIRO_TRUST_CLASSIFIER_MODE,
+        "off",
+      );
+      assert.deepEqual(env, { KIRO_TRUST_CLASSIFIER_MODE: "enforce", KIRO_HOME: "/isolated" });
+    }),
+  );
 
   // Outputs recorded from `kiro-cli whoami --format json` on Kiro CLI 2.27.0.
   it("reads the sign-in state from kiro-cli whoami", () => {

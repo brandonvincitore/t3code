@@ -96,8 +96,17 @@ describe("Kiro workspace configuration", () => {
           ?.optionDescriptors?.[0]?.currentValue,
         "high",
       );
-      yield* recordKiroConfiguration(configurations, "/work/a", [model("future-model"), effort]);
+      yield* recordKiroConfiguration(configurations, "/work/a", [
+        model("future-model"),
+        effort,
+        { id: "approveForMe", name: "Approve for Me", type: "boolean", currentValue: true },
+      ]);
       const a = yield* applyKiroConfiguration(configurations, "/work/a", base);
+      assert.isFalse(
+        a.models.some((entry) =>
+          entry.capabilities?.optionDescriptors?.some((option) => option.id === "approveForMe"),
+        ),
+      );
       const future = a.models.find((entry) => entry.slug === "future-model");
       const reasoning = future?.capabilities?.optionDescriptors?.find(
         (option) => option.id === "reasoningEffort",

@@ -56,7 +56,7 @@ const option = (id, value, options) => ({ type: 'select', id, name: id, currentV
 let configOptions = [option('mode','vibe',['vibe','t3-title']),option('model','auto',['auto','cheap'])];
 createInterface({input:process.stdin}).on('line', line => {
  const {id,method,params} = JSON.parse(line);
- record({method,params,cwd:process.cwd(),home:process.env.KIRO_HOME});
+ record({method,params,cwd:process.cwd(),home:process.env.KIRO_HOME,classifier:process.env.KIRO_TRUST_CLASSIFIER_MODE});
  if (id === undefined) return;
  let result = {};
  if (method === 'initialize') result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{delete:{}},_meta:{kiro:{extensionMethods:['_kiro/memory/list']}}}};
@@ -75,6 +75,7 @@ createInterface({input:process.stdin}).on('line', line => {
         for (const reply of ['{"title":"Fix login","needsRefinement":true}', "invalid"]) {
           const service = yield* makeKiroTextGeneration(settings, {
             ...process.env,
+            KIRO_TRUST_CLASSIFIER_MODE: "enforce",
             T3_TITLE_LOG: log,
             T3_TITLE_REPLY: reply,
           });
@@ -111,6 +112,7 @@ createInterface({input:process.stdin}).on('line', line => {
           .trim()
           .split("\n")
           .map((line) => JSON.parse(line));
+        for (const row of rows.filter((row) => row.method)) assert.equal(row.classifier, "off");
         assert.equal(rows.filter((row) => row.method === "session/delete").length, 2);
         assert.equal(rows.filter((row) => row.method === "session/prompt").length, 2);
         for (const row of rows.filter((row) => row.agent)) {

@@ -8,7 +8,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import type * as EffectAcpErrors from "effect-acp/errors";
+import * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   acpPermissionDisposition,
@@ -30,6 +30,7 @@ const KIRO_ACP_ARGS = ["acp", "--agent-engine=v3", "--auth-method=cli"] as const
  * sets it from the thread's runtime mode.
  */
 export const KIRO_AUTOPILOT_CONFIG_ID = "autopilot";
+export const KIRO_APPROVE_FOR_ME_CONFIG_ID = "approveForMe";
 
 /** Kiro's model session option (`configId: "model"` in the V3 migration guide). */
 export const KIRO_MODEL_CONFIG_ID = "model";
@@ -48,12 +49,12 @@ export const KIRO_EFFORT_CONFIG_ID = "effortLevel";
 export const KIRO_AGENT_CONFIG_ID = "mode";
 
 /**
- * Kiro offers two permission postures, Supervised and Autopilot, which T3's
- * Supervised and Full access select. Any other mode runs Supervised.
+ * Auto selects native Approve for Me; availability is verified in the foreground session.
  */
 export const KIRO_SUPPORTED_RUNTIME_MODES = [
   "approval-required",
   "full-access",
+  "auto",
 ] as const satisfies ReadonlyArray<RuntimeMode>;
 
 /**
@@ -108,12 +109,13 @@ export function buildKiroAcpSpawnInput(
   settings: KiroAcpRuntimeSettings | null | undefined,
   cwd: string,
   environment?: NodeJS.ProcessEnv,
+  nativeAuto = false,
 ): AcpSessionRuntime.AcpSpawnInput {
   return {
     command: settings?.binaryPath || "kiro-cli",
     args: [...KIRO_ACP_ARGS],
     cwd,
-    ...(environment === undefined ? {} : { env: environment }),
+    env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: nativeAuto ? "enforce" : "off" },
   };
 }
 
@@ -152,7 +154,11 @@ export function kiroPermissionDisposition(
   const offersOnce = request.options.some(
     (option) => option.kind === "allow_once" && option.optionId.trim().length > 0,
   );
-  return disposition === "allow" && !offersOnce ? "ask" : disposition;
+  return disposition !== "deny" && policy.runtimeMode === "auto"
+    ? "ask"
+    : disposition === "allow" && !offersOnce
+      ? "ask"
+      : disposition;
 }
 
 export interface KiroAcpRuntimeInput extends Omit<
@@ -161,6 +167,7 @@ export interface KiroAcpRuntimeInput extends Omit<
 > {
   readonly settings: KiroAcpRuntimeSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
+  readonly nativeAuto?: boolean;
 }
 
 export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")(function* (
@@ -170,14 +177,45 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
   EffectAcpErrors.AcpError,
   ChildProcessSpawner.ChildProcessSpawner | SecureRandom.SecureRandom | Scope.Scope
 > {
-  const { settings, environment, ...runtimeOptions } = input;
+  const { settings, environment, nativeAuto, ...runtimeOptions } = input;
   const context = yield* Layer.build(
     AcpSessionRuntime.layer({
       ...runtimeOptions,
       // ACP sessions do not inherit the CLI's workflow feature setting.
       sessionMeta: (initialized) => kiroSessionMeta(initialized.agentCapabilities?._meta, settings),
-      spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment),
+      clientCapabilities: {
+        ...runtimeOptions.clientCapabilities,
+        session: { ...runtimeOptions.clientCapabilities?.session, configOptions: { boolean: {} } },
+      },
+      spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment, nativeAuto),
     }),
   );
   return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));
 });
+
+export function kiroNativeAuto(
+  policy: Pick<AcpRuntimePolicy, "runtimeMode" | "approvalPolicy" | "sandboxPolicy"> & {
+    readonly maxRuntimeMode?: RuntimeMode | undefined;
+    readonly interactionMode?: string;
+  },
+): boolean {
+  return policy.runtimeMode === "auto";
+}
+
+export const validateKiroRuntimePolicy = Effect.fn("KiroAcpSupport.validateRuntimePolicy")(
+  function* (policy: Parameters<typeof kiroNativeAuto>[0]) {
+    if (
+      kiroNativeAuto(policy) &&
+      (policy.approvalPolicy !== undefined ||
+        policy.sandboxPolicy !== undefined ||
+        policy.interactionMode === "plan" ||
+        (policy.maxRuntimeMode !== undefined &&
+          policy.maxRuntimeMode !== "auto" &&
+          policy.maxRuntimeMode !== "full-access"))
+    ) {
+      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
+        "Kiro Approve for Me cannot enforce this approval, sandbox, Plan, or managed runtime restriction. Choose Supervised.",
+      );
+    }
+  },
+);

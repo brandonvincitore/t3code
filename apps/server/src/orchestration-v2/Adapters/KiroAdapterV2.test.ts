@@ -21,6 +21,7 @@ import {
 } from "@t3tools/contracts";
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -451,6 +452,11 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   /** Option selections (e.g. reasoningEffort) for the session and `startTurn`. */
   readonly options?: ModelSelection["options"];
   readonly runtimeMode?: RuntimeMode;
+  readonly policyOverrides?: Partial<ProviderAdapterV2RuntimePolicy>;
+  readonly expectedOpenFailure?: string;
+  readonly inspectRuntime?: (
+    input: Parameters<NonNullable<Parameters<typeof makeKiroAdapterV2>[0]["makeRuntime"]>>[0],
+  ) => void;
   readonly environment?: NodeJS.ProcessEnv;
   /** Holds the script's inbound frames at labels the test releases. */
   readonly replayGate?: ProviderReplayGate;
@@ -477,6 +483,10 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       nativeId?: string,
     ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
     /** Starts turn `ordinal` (from 1) on `model`, with `options` if given. */
+    readonly startTurnInMode: (
+      ordinal: number,
+      mode: RuntimeMode,
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly startTurnOn: (
       ordinal: number,
       model: string,
@@ -540,6 +550,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       ? {}
       : { defaultModel: Effect.succeed(input.defaultModel) }),
     makeRuntime: (runtimeInput) => {
+      input.inspectRuntime?.(runtimeInput);
       const script = scripts[runtimesMade++];
       if (script === undefined) {
         // An unscripted runtime is a retry after the last one failed; report why it failed.
@@ -591,13 +602,14 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     model: input.model ?? "default",
     ...(input.options === undefined ? {} : { options: input.options }),
   };
-  const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+  let runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
     runtimeMode: input.runtimeMode ?? "approval-required",
     interactionMode: "default",
     cwd: replayDir,
+    ...input.policyOverrides,
   });
   yield* Effect.gen(function* () {
-    const session = yield* adapter.openSession({
+    const open = adapter.openSession({
       threadId,
       providerSessionId: ProviderSessionId.make(`provider-session-kiro-${input.scenario}`),
       modelSelection,
@@ -606,6 +618,14 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
         ? {}
         : { initialNativeThreadId: input.initialNativeThreadId }),
     });
+    if (input.expectedOpenFailure !== undefined) {
+      const result = yield* Effect.exit(open);
+      assert.isTrue(Exit.isFailure(result));
+      if (Exit.isFailure(result))
+        assert.include(Cause.pretty(result.cause), input.expectedOpenFailure);
+      return;
+    }
+    const session = yield* open;
     let providerThread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
     const now = yield* DateTime.now;
     const startTurnOn = (ordinal: number, model: string, options?: ModelSelection["options"]) => {
@@ -667,6 +687,11 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
         }),
       startTurn: startTurnOn(1, modelSelection.model, input.options),
       startTurnOn,
+      startTurnInMode: (ordinal, mode) =>
+        Effect.suspend(() => {
+          runtimePolicy = { ...runtimePolicy, runtimeMode: mode };
+          return startTurnOn(ordinal, modelSelection.model, input.options);
+        }),
       interrupt: (providerTurnId) => session.interruptTurn({ providerThread, providerTurnId }),
       respond: (requestId, decision) => session.respondToRuntimeRequest({ requestId, decision }),
       answerQuestion: (requestId, answers) =>
@@ -1508,6 +1533,373 @@ describe("Kiro native question callbacks", () => {
       }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 });
+
+const approveForMeOption = (currentValue: boolean) => ({
+  id: "approveForMe",
+  name: "Approve for Me",
+  type: "boolean",
+  currentValue,
+});
+const activateApproveForMe = outbound("session/set_config_option", {
+  sessionId: SESSION_ID,
+  configId: "approveForMe",
+  type: "boolean",
+  value: true,
+});
+
+it.live.each(["new", "load"] as const)(
+  "verifies native Approve for Me on %s before prompting",
+  (activation) =>
+    runKiroScript({
+      scenario: `approve-for-me-${activation}`,
+      runtimeMode: "auto",
+      ...(activation === "load" ? { initialNativeThreadId: SESSION_ID } : {}),
+      inspectRuntime: (input) => {
+        assert.deepEqual(input.clientCapabilities?.session?.configOptions?.boolean, {});
+        assert.equal(input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE, "enforce");
+      },
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound(activation === "load" ? "session/load" : "session/new", {
+          ...(activation === "load" ? { sessionId: SESSION_ID } : {}),
+          cwd: "<workspace>",
+          mcpServers: "<any>",
+        }),
+        answer(
+          activation === "load" ? "session/load" : "session/new",
+          sessionSetup([approveForMeOption(false)]),
+        ),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        // Reverify even a previously true state before a subsequent prompt.
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ startTurn, events }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live("routes native Auto uncertainty to the original user callback", () =>
+  runKiroScript({
+    scenario: "approve-for-me-uncertain",
+    runtimeMode: "auto",
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      turnPrompt,
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: "native-allowed",
+        title: "Synthetic native allowed action",
+        kind: "read",
+        status: "completed",
+      }),
+      update({
+        sessionUpdate: "tool_call",
+        toolCallId: "native-denied",
+        title: "Synthetic native denied action",
+        kind: "execute",
+        status: "failed",
+      }),
+      {
+        type: "emit_inbound",
+        label: "uncertain",
+        frame: {
+          kind: "request",
+          method: "session/request_permission",
+          params: {
+            sessionId: SESSION_ID,
+            toolCall: { toolCallId: "uncertain", title: "Uncertain command", kind: "execute" },
+            options: [
+              { optionId: "accept", name: "Allow once", kind: "allow_once" },
+              { optionId: "reject", name: "Deny", kind: "reject_once" },
+            ],
+          },
+        },
+      },
+      {
+        type: "expect_outbound",
+        label: "original-callback-denied",
+        frame: {
+          kind: "response",
+          method: "session/request_permission",
+          result: { outcome: { outcome: "selected", optionId: "reject" } },
+        },
+      },
+      answer("session/prompt", { stopReason: "end_turn" }),
+      ...closeSession,
+    ],
+    drive: ({ events, startTurn, respond }) =>
+      Effect.gen(function* () {
+        const pending = yield* Deferred.make<RuntimeRequestId>();
+        const turn = yield* collectTurn(
+          events.pipe(
+            Stream.tap((event) =>
+              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
+                ? Deferred.succeed(pending, event.runtimeRequest.id)
+                : Effect.void,
+            ),
+          ),
+        ).pipe(Effect.forkChild);
+        yield* startTurn;
+        yield* respond(yield* Deferred.await(pending), "decline");
+        assert.equal(terminalStatus(yield* Fiber.join(turn)), "completed");
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each(["approval-required", "full-access"] as const)(
+  "reopens native Auto with classifier off when switching to %s",
+  (mode) =>
+    runKiroScript({
+      scenario: `approve-for-me-switch-${mode}`,
+      runtimeMode: "auto",
+      inspectRuntime: (input) =>
+        assert.equal(
+          input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+          input.runtimePolicy.runtimeMode === "auto" ? "enforce" : "off",
+        ),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+      ],
+      replacementFrames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(true)])),
+        outbound("session/load", {
+          sessionId: SESSION_ID,
+          cwd: "<workspace>",
+          mcpServers: "<any>",
+        }),
+        answer("session/load", sessionSetup([approveForMeOption(true)])),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ startTurn, startTurnInMode, events }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          yield* startTurnInMode(2, mode);
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each(["approval-required", "full-access"] as const)(
+  "reserves forged native approveForMe options in %s",
+  (runtimeMode) =>
+    runKiroScript({
+      scenario: `approve-for-me-forged-${runtimeMode}`,
+      runtimeMode,
+      options: [{ id: "approveForMe", value: true }],
+      policyOverrides: {
+        maxRuntimeMode: "approval-required",
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly" },
+      },
+      inspectRuntime: (input) =>
+        assert.equal(input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE, "off"),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(true)])),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ startTurn, events }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each(["approval-required", "full-access"] as const)(
+  "starts an enforce runtime when switching %s into native Auto",
+  (runtimeMode) =>
+    runKiroScript({
+      scenario: `approve-for-me-enter-${runtimeMode}`,
+      runtimeMode,
+      inspectRuntime: (input) =>
+        assert.equal(
+          input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+          input.runtimePolicy.runtimeMode === "auto" ? "enforce" : "off",
+        ),
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(true)])),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+      ],
+      replacementFrames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        outbound("session/load", {
+          sessionId: SESSION_ID,
+          cwd: "<workspace>",
+          mcpServers: "<any>",
+        }),
+        answer("session/load", sessionSetup([approveForMeOption(true)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ startTurn, startTurnInMode, events }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          yield* startTurnInMode(2, "auto");
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live("verifies native Auto again on a rollback replacement", () =>
+  runKiroScript({
+    scenario: "approve-for-me-replacement",
+    runtimeMode: "auto",
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+    ],
+    replacementFrames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+      ...closeSession,
+    ],
+    drive: ({ rollbackToStart, startTurn, events }) =>
+      Effect.gen(function* () {
+        yield* rollbackToStart;
+        yield* startTurn;
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live("marks lost native Auto activation as unsent preparation before prompting", () =>
+  runKiroScript({
+    scenario: "approve-for-me-withdrawn",
+    runtimeMode: "auto",
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(true)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      activateApproveForMe,
+      configResult([approveForMeOption(false)]),
+      ...closeSession,
+    ],
+    drive: ({ startTurn }) =>
+      Effect.gen(function* () {
+        const result = yield* Effect.exit(startTurn);
+        assert.isTrue(Exit.isFailure(result));
+        if (Exit.isFailure(result)) {
+          assert.include(Cause.pretty(result.cause), "ProviderAdapterTurnPreparationError");
+          assert.include(Cause.pretty(result.cause), "approveForMe is unavailable");
+        }
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each(["absent", "select", "false", "no-op", "organization", "error"] as const)(
+  "fails closed before prompting when native Approve for Me is %s",
+  (failure) =>
+    runKiroScript({
+      scenario: `approve-for-me-${failure}`,
+      runtimeMode: "auto",
+      expectedOpenFailure:
+        failure === "organization"
+          ? "Organization requires"
+          : failure === "error"
+            ? "Synthetic native failure"
+            : "approveForMe is unavailable",
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer(
+          "session/new",
+          sessionSetup(
+            failure === "absent"
+              ? []
+              : failure === "select"
+                ? [{ ...autopilotOption("off"), id: "approveForMe" }]
+                : [approveForMeOption(false)],
+          ),
+        ),
+        ...(["absent", "select"].includes(failure)
+          ? []
+          : [
+              activateApproveForMe,
+              ...(["organization", "error"].includes(failure)
+                ? [
+                    {
+                      type: "emit_inbound",
+                      label: "native-rejection",
+                      frame: {
+                        kind: "response",
+                        method: "session/set_config_option",
+                        error: {
+                          code: -32603,
+                          message:
+                            failure === "organization"
+                              ? "Organization requires supervised permissions"
+                              : "Synthetic native failure",
+                        },
+                      },
+                    },
+                  ]
+                : [configResult(failure === "no-op" ? [] : [approveForMeOption(false)])]),
+            ]),
+      ],
+      drive: () => Effect.die("Unavailable native Auto must not open"),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
 
 describe("KiroAdapterV2", () => {
   it.effect.each([true, false])(
@@ -2560,7 +2952,7 @@ describe("KiroAdapterV2", () => {
             clientCapabilities: {
               fs: "<any>",
               terminal: "<any>",
-              session: "<any>",
+              session: { configOptions: { boolean: {} }, notices: {}, compaction: {} },
               elicitation: "<any>",
               _meta: {
                 kiro: {
@@ -3478,6 +3870,13 @@ describe("Kiro permission policy", () => {
 
   it("never lets a policy approval persist Kiro's workspace-wide allow_always", () => {
     const fullAccess = policy({ runtimeMode: "full-access" });
+    assert.equal(
+      kiroPermissionDisposition(
+        policy({ runtimeMode: "auto" }),
+        writeRequest([{ optionId: "accept", name: "Allow", kind: "allow_once" }]),
+      ),
+      "ask",
+    );
     assert.equal(
       kiroPermissionDisposition(
         fullAccess,
