@@ -45,6 +45,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import {
   type ProviderAdapterV2Error,
   type ProviderAdapterV2Event,
+  type ProviderAdapterV2ThreadSnapshot,
   ProviderAdapterV2RuntimePolicy,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import {
@@ -445,6 +446,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   /** Frames for the runtime a rollback starts, replayed by a second agent process. */
   readonly replacementFrames?: ReadonlyArray<Frame>;
   readonly model?: string;
+  readonly initialNativeThreadId?: string;
   readonly defaultModel?: string;
   /** Option selections (e.g. reasoningEffort) for the session and `startTurn`. */
   readonly options?: ModelSelection["options"];
@@ -468,6 +470,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   readonly drive: (session: {
     readonly events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>;
     readonly startTurn: Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly readSnapshot: (
+      nativeId?: string,
+    ) => Effect.Effect<ProviderAdapterV2ThreadSnapshot, ProviderAdapterV2Error>;
     /** Starts turn `ordinal` (from 1) on `model`, with `options` if given. */
     readonly startTurnOn: (
       ordinal: number,
@@ -588,6 +593,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       providerSessionId: ProviderSessionId.make(`provider-session-kiro-${input.scenario}`),
       modelSelection,
       runtimePolicy,
+      ...(input.initialNativeThreadId === undefined
+        ? {}
+        : { initialNativeThreadId: input.initialNativeThreadId }),
     });
     let providerThread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
     const now = yield* DateTime.now;
@@ -638,6 +646,16 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     };
     yield* input.drive({
       events: session.events,
+      readSnapshot: (nativeId) =>
+        session.readThreadSnapshot({
+          providerThread:
+            nativeId === undefined
+              ? providerThread
+              : {
+                  ...providerThread,
+                  nativeThreadRef: { driver: KIRO_PROVIDER, nativeId, strength: "strong" },
+                },
+        }),
       startTurn: startTurnOn(1, modelSelection.model, input.options),
       startTurnOn,
       interrupt: (providerTurnId) => session.interruptTurn({ providerThread, providerTurnId }),
@@ -682,6 +700,103 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     { discard: true },
   );
 });
+
+it.live.each(["startup", "switch"] as const)(
+  "keeps native Kiro history replay during %s load",
+  (activation) =>
+    Effect.gen(function* () {
+      const loadedId = activation === "startup" ? SESSION_ID : "other-native-session";
+      const replay = (sessionId: string, sessionUpdate: Record<string, unknown>): Frame => ({
+        type: "emit_inbound",
+        label: `history.${sessionId}.${String(sessionUpdate.sessionUpdate)}`,
+        frame: {
+          kind: "notification",
+          method: "session/update",
+          params: { sessionId, update: sessionUpdate },
+        },
+      });
+      const history: ReadonlyArray<Frame> = [
+        replay("unowned-child-session", {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "foreign history must stay out" },
+        }),
+        replay(loadedId, {
+          sessionUpdate: "user_message_chunk",
+          content: { type: "text", text: "SYNTHETIC IMPORT USER" },
+        }),
+        replay(loadedId, {
+          sessionUpdate: "agent_thought_chunk",
+          content: { type: "text", text: "SYNTHETIC THOUGHT CHUNK" },
+        }),
+        replay(loadedId, {
+          sessionUpdate: "agent_thought",
+          messageId: "synthetic-whole-thought",
+          content: [{ type: "text", text: "SYNTHETIC THOUGHT WHOLE" }],
+        }),
+        replay(loadedId, {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "SYNTHETIC REPLY CHUNK" },
+        }),
+        replay(loadedId, {
+          sessionUpdate: "agent_message",
+          messageId: "synthetic-whole-reply",
+          content: [{ type: "text", text: "SYNTHETIC REPLY WHOLE" }],
+        }),
+      ];
+      const initialize = {
+        ...KIRO_V3_INITIALIZE_WITHOUT_EXTENSIONS,
+        agentCapabilities: {
+          ...KIRO_V3_INITIALIZE_WITHOUT_EXTENSIONS.agentCapabilities,
+          sessionCapabilities: { close: {} },
+          _meta: { kiro: { replayMarking: true } },
+        },
+      };
+      yield* runKiroScript({
+        scenario: `native-history-${activation}`,
+        ...(activation === "startup" ? { initialNativeThreadId: loadedId } : {}),
+        frames: [
+          ...(activation === "startup"
+            ? [outbound("initialize"), answer("initialize", initialize)]
+            : openSessionFrames({ initialize, configOptions: [autopilotOption("on")] })),
+          outbound("session/load", {
+            sessionId: loadedId,
+            cwd: "<workspace>",
+            mcpServers: "<any>",
+          }),
+          ...history,
+          answer("session/load", { configOptions: [autopilotOption("off")] }),
+          outbound("session/close", { sessionId: loadedId }),
+          answer("session/close", {}),
+        ],
+        drive: ({ readSnapshot }) =>
+          Effect.gen(function* () {
+            const snapshot = yield* readSnapshot(loadedId);
+            assert.deepEqual(
+              snapshot.messages.map((message) => message.text),
+              [
+                "SYNTHETIC IMPORT USER",
+                "SYNTHETIC THOUGHT CHUNK",
+                "SYNTHETIC THOUGHT WHOLE",
+                "SYNTHETIC REPLY CHUNK",
+                "SYNTHETIC REPLY WHOLE",
+              ],
+            );
+            assert.deepEqual(
+              snapshot.reasoningMessageIds,
+              snapshot.messages.slice(1, 3).map((message) => message.id),
+            );
+            assert.isTrue(
+              snapshot.messages.every(
+                (message) =>
+                  message.runId === null && message.nodeId === null && !message.streaming,
+              ),
+            );
+            const repeated = yield* readSnapshot(loadedId);
+            assert.deepEqual(repeated.messages, snapshot.messages);
+          }),
+      });
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
 
 const collectTurn = (events: Stream.Stream<ProviderAdapterV2Event, ProviderAdapterV2Error>) =>
   events.pipe(

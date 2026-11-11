@@ -2042,6 +2042,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             : flavor.extractSubagentUpdate?.(tool);
         let turnAttached = yield* Deferred.make<boolean>();
         const activeSessionId = yield* Ref.make<string | null>(null);
+        const loadingSessionId = yield* Ref.make<string | null>(null);
+        // Startup and load already have runtime spans; this only scopes replay routing.
+        const withLoadingSession = Effect.fnUntraced(function* <A, E, R>(
+          sessionId: string | undefined,
+          load: Effect.Effect<A, E, R>,
+        ) {
+          return yield* Effect.acquireUseRelease(
+            Ref.getAndSet(loadingSessionId, sessionId ?? null),
+            () => load,
+            (previous) => Ref.set(loadingSessionId, previous),
+          );
+        });
         const contextUsageBySessionId = yield* Ref.make(
           new Map<string, ThreadTokenUsageSnapshot>(),
         );
@@ -5770,6 +5782,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           if (
             flavor.supportsNativeWorkflows === true &&
             notification.sessionId !== (yield* Ref.get(activeSessionId)) &&
+            // The loading root replays before it can become the active session.
+            notification.sessionId !== (yield* Ref.get(loadingSessionId)) &&
             !context?.subagentsBySessionId.has(notification.sessionId)
           ) {
             const carryover = (yield* Ref.get(carryoverSubagents))?.subagents.find(
@@ -7882,7 +7896,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const startup = Effect.gen(function* () {
             yield* spawnAcpRuntime(threadId, resumeSessionId);
             yield* wireAcpRuntimeHandlers(runtime, yield* Ref.get(runtimeCallbackGeneration));
-            return yield* runtime.start();
+            return yield* withLoadingSession(resumeSessionId, runtime.start());
           });
           return yield* flavor.withRuntimeStartup?.(startup) ?? startup;
         });
@@ -8173,14 +8187,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const mcpContext = yield* readMcpContext(threadId);
           const activationOptions = acpMcpActivation(mcpContext);
           prepareTerminalEnvironment(mcpContext, sessionId);
-          const activated = canLoadSession
-            ? yield* runtime.loadSession(sessionId, activationOptions)
-            : canResumeSession
-              ? yield* runtime.resumeSession(sessionId, activationOptions)
-              : yield* new ProviderAdapter.ProviderAdapterProtocolError({
-                  driver,
-                  detail: `ACP driver cannot load or resume session ${sessionId}`,
-                });
+          const activated = yield* withLoadingSession(
+            sessionId,
+            Effect.gen(function* () {
+              return canLoadSession
+                ? yield* runtime.loadSession(sessionId, activationOptions)
+                : canResumeSession
+                  ? yield* runtime.resumeSession(sessionId, activationOptions)
+                  : yield* new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver,
+                      detail: `ACP driver cannot load or resume session ${sessionId}`,
+                    });
+            }),
+          );
           rememberTerminalEnvironment(activated.sessionId, yield* readMcpContext(threadId));
           return activated;
         });
@@ -10469,9 +10488,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       snapshotInput.providerThread.appThreadId,
                     );
                     prepareTerminalEnvironment(mcpContext, sessionId);
-                    const activated = yield* runtime.loadSession(
+                    const activated = yield* withLoadingSession(
                       sessionId,
-                      acpMcpActivation(mcpContext),
+                      runtime.loadSession(sessionId, acpMcpActivation(mcpContext)),
                     );
                     rememberTerminalEnvironment(
                       activated.sessionId,
