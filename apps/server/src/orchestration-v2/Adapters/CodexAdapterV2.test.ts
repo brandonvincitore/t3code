@@ -1,5 +1,5 @@
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
-import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
+import { makeProviderFailure, refusedBeforePrompt } from "@t3tools/provider-core/server/failure";
 import {
   makeProviderTextDeltaCoalescer,
   type ProviderTextDeltaUpdate,
@@ -8681,6 +8681,96 @@ describe("CodexAdapterV2 post-settle continuation", () => {
       events.flatMap((event) =>
         event.type === "provider_thread.updated" ? [event.providerThread.goal?.status ?? null] : [],
       );
+
+    it.effect.each(["pre-start", "activation"] as const)(
+      "classifies a goal rejection at its actual %s boundary",
+      (boundary) =>
+        Effect.gen(function* () {
+          const preStart = boundary === "pre-start";
+          const rejection = "goal objective must be at most 4000 characters";
+          const transcript = makeCodexReplayTranscript({
+            scenario: `goal-rejection-${boundary}`,
+            entries: [
+              ...sessionStart,
+              ...request(3, "thread/goal/get", { threadId: nativeThreadId }, { goal: null }),
+              ...(preStart
+                ? []
+                : [
+                    ...request(
+                      4,
+                      "thread/goal/set",
+                      { threadId: nativeThreadId, objective, status: "paused" },
+                      { goal: codexGoal("paused", 0) },
+                    ),
+                    ...withReplayRequestId(
+                      codexReplayPreamble({
+                        nativeThreadId,
+                        nativeTurnId: "goal-accepted",
+                        prompt: objective,
+                        sentPrompt: `This thread's goal is already set. Do not call create_goal. Start working on it now: ${objective}`,
+                      }).slice(5),
+                      5,
+                    ),
+                  ]),
+              {
+                type: "expect_outbound",
+                frame: {
+                  id: preStart ? 4 : 6,
+                  method: "thread/goal/set",
+                  params: preStart
+                    ? { threadId: nativeThreadId, objective, status: "paused" }
+                    : { threadId: nativeThreadId, status: "active" },
+                },
+              },
+              {
+                type: "emit_inbound",
+                frame: { id: preStart ? 4 : 6, error: { code: -32600, message: rejection } },
+              },
+            ],
+          });
+          const requests: string[] = [];
+          const harness = yield* makeCodexReplayHarness(
+            transcript,
+            () => Effect.void,
+            (method) =>
+              Effect.sync(() => {
+                requests.push(method);
+              }),
+          );
+          const error = yield* harness.runtime
+            .startTurn(yield* goalTurnInput(harness, `/goal ${objective}`))
+            .pipe(Effect.flip);
+          assert.equal(refusedBeforePrompt(error), preStart);
+          assert.include(
+            makeProviderFailure({ cause: error, class: "provider_error" }).message,
+            rejection,
+          );
+          assert.equal(
+            requests.filter((method) => method === "turn/start").length,
+            preStart ? 0 : 1,
+          );
+          if (!preStart) {
+            yield* harness.until(() =>
+              harness.events.some(
+                (event) =>
+                  event.type === "provider_turn.updated" &&
+                  event.providerTurn.runAttemptId === RunAttemptId.make("goal-attempt"),
+              ),
+            );
+            assert.lengthOf(harness.terminalEvents(), 0);
+          }
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
+          ),
+        ),
+    );
 
     it.effect("keeps a /goal run open across the turns Codex continues on its own", () =>
       Effect.gen(function* () {

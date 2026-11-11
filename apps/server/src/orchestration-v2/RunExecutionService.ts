@@ -560,15 +560,6 @@ export const RunExecutionServiceV2Error = Schema.Union([
 export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
 
 const isRunExecutionStartError = Schema.is(RunExecutionStartError);
-// This structured rejection precedes turn/start, unlike a lost start response.
-const isRejectedGoal = Schema.is(
-  Schema.Struct({
-    cause: Schema.TaggedStruct("CodexAppServerRequestError", {
-      code: Schema.Literal(-32600),
-      method: Schema.Literal("thread/goal/set"),
-    }),
-  }),
-);
 
 export interface RunExecutionServiceV2StartRootRunInput {
   readonly commandId: CommandId;
@@ -2032,7 +2023,7 @@ export const layer: Layer.Layer<
               if (
                 !owner.revoked &&
                 !(yield* Deferred.isDone(owner.accepted)) &&
-                (isRejectedGoal(Cause.squash(cause)) || refusedBeforePrompt(Cause.squash(cause)))
+                refusedBeforePrompt(Cause.squash(cause))
               )
                 return yield* failBeforeNativeStart(cause);
               // A failed response is not proof that native work never started.

@@ -928,7 +928,9 @@ class CodexGoalObjectiveTooLongError extends Schema.TaggedError<CodexGoalObjecti
   }
 }
 
-function validateCodexGoalObjective(objective: string) {
+function validateCodexGoalObjective(
+  objective: string,
+): Effect.Effect<void, CodexGoalObjectiveTooLongError> {
   let length = 0;
   for (const _ of objective) length++;
   return length > CodexSchema.MAX_THREAD_GOAL_OBJECTIVE_CHARS
@@ -6927,7 +6929,16 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
             turnInput: ProviderAdapter.ProviderAdapterV2TurnInput,
             command: OrchestrationV2GoalCommand,
           ) {
-            if (command.type === "set") yield* validateCodexGoalObjective(command.objective);
+            if (command.type === "set")
+              yield* validateCodexGoalObjective(command.objective).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                      driver: CODEX_PROVIDER,
+                      cause,
+                    }),
+                ),
+              );
             const threadId = yield* getNativeThreadId(turnInput.providerThread);
             rootProviderThreads.set(threadId, turnInput.providerThread);
             const readGoal = client
@@ -6954,10 +6965,24 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               return yield* completeGoalCommandTurn(turnInput, "No goal is set.");
             }
             if (command.type === "pause") {
-              const { goal } = yield* client.request("thread/goal/set", {
-                threadId,
-                status: "paused",
-              });
+              const { goal } = yield* client
+                .request("thread/goal/set", {
+                  threadId,
+                  status: "paused",
+                })
+                .pipe(
+                  Effect.catchTags({
+                    CodexAppServerRequestError: (cause) =>
+                      Effect.fail(
+                        cause.code === -32600
+                          ? new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                              driver: CODEX_PROVIDER,
+                              cause,
+                            })
+                          : cause,
+                      ),
+                  }),
+                );
               goalsByNativeThread.set(threadId, providerGoalFromCodex(goal));
               return yield* completeGoalCommandTurn(turnInput, null);
             }
@@ -6965,11 +6990,25 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               goalUpdatesHeld.add(threadId);
               if (current !== null) yield* client.request("thread/goal/clear", { threadId });
               // Keep paused until our turn starts so Codex cannot start one first.
-              const { goal } = yield* client.request("thread/goal/set", {
-                threadId,
-                objective: command.objective,
-                status: "paused",
-              });
+              const { goal } = yield* client
+                .request("thread/goal/set", {
+                  threadId,
+                  objective: command.objective,
+                  status: "paused",
+                })
+                .pipe(
+                  Effect.catchTags({
+                    CodexAppServerRequestError: (cause) =>
+                      Effect.fail(
+                        cause.code === -32600
+                          ? new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                              driver: CODEX_PROVIDER,
+                              cause,
+                            })
+                          : cause,
+                      ),
+                  }),
+                );
               goalsByNativeThread.set(threadId, providerGoalFromCodex(goal));
             }
             // Hold fast first turns until activation; Stop cancels activation.

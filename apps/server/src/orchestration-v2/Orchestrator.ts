@@ -12207,7 +12207,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       } satisfies PendingOrchestrationEffectV2,
       ...otherProviderInterrupts,
     ]);
-    return undefined;
+    return Option.isSome(ownership)
+      ? {
+          runId: run.id,
+          effectTypes: ["provider-turn.start", "provider-turn.restart"] as const,
+          reason: `Stop requested for owned start ${run.id}.`,
+        }
+      : undefined;
   });
 
   /** Writes a parent's app-owned task, and sets its node and turn items to the task's status. */

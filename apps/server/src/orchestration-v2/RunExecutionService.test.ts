@@ -2715,10 +2715,13 @@ it.effect("records a provider's input rejection at turn start in the terminal er
             threadId: turnInput.threadId,
             providerThreadId: turnInput.providerThread.id,
             runId: turnInput.runId,
-            cause: new CodexAppServerRequestError({
-              code: -32600,
-              errorMessage: rejection,
-              method: "thread/goal/set",
+            cause: new ProviderAdapter.ProviderAdapterTurnPreparationError({
+              driver,
+              cause: new CodexAppServerRequestError({
+                code: -32600,
+                errorMessage: rejection,
+                method: "thread/goal/set",
+              }),
             }),
           }),
         ),
