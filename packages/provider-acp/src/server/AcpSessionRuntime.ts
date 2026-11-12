@@ -166,6 +166,15 @@ export interface AcpSessionRequestLogEvent {
   readonly cause?: Cause.Cause<EffectAcpErrors.AcpError>;
 }
 
+export class AcpPromptAdmissionError extends Schema.TaggedError<AcpPromptAdmissionError>()(
+  "AcpPromptAdmissionError",
+  {},
+) {
+  override get message() {
+    return "The native session or required configuration changed before prompt dispatch.";
+  }
+}
+
 export class AcpProcessGroupTerminationError extends Schema.TaggedError<AcpProcessGroupTerminationError>()(
   "AcpProcessGroupTerminationError",
   {
@@ -1166,8 +1175,17 @@ export class AcpSessionRuntime extends Context.Service<
     /** options.dispatched settles when cancel can target this prompt. */
     readonly prompt: (
       payload: Omit<EffectAcpSchema.PromptRequest, "sessionId">,
-      options?: { readonly dispatched?: Deferred.Deferred<void> },
-    ) => Effect.Effect<EffectAcpSchema.PromptResponse, EffectAcpErrors.AcpError>;
+      options?: {
+        readonly dispatched?: Deferred.Deferred<void>;
+        readonly admission?: {
+          readonly sessionId: string;
+          readonly configOptions: ReadonlyArray<{ readonly id: string; readonly value: boolean }>;
+        };
+      },
+    ) => Effect.Effect<
+      EffectAcpSchema.PromptResponse,
+      EffectAcpErrors.AcpError | AcpPromptAdmissionError
+    >;
     readonly cancel: Effect.Effect<void, EffectAcpErrors.AcpError>;
     readonly terminateProcessGroup?: Effect.Effect<void, AcpProcessGroupTerminationError>;
     readonly setMode: (
@@ -2608,6 +2626,18 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           promptDispatchSemaphore.withPermit(
             Effect.gen(function* () {
               const started = yield* getStartedState;
+              if (promptOptions?.admission !== undefined) {
+                const configOptions = yield* SubscriptionRef.get(configOptionsRef);
+                if (
+                  started.sessionId !== promptOptions.admission.sessionId ||
+                  promptOptions.admission.configOptions.some((required) => {
+                    const option = findSessionConfigOption(configOptions, required.id);
+                    return option?.type !== "boolean" || option.currentValue !== required.value;
+                  })
+                ) {
+                  return yield* new AcpPromptAdmissionError();
+                }
+              }
               yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });
               yield* Ref.set(assistantUpdatesOpenRef, true);
               const requestPayload = {

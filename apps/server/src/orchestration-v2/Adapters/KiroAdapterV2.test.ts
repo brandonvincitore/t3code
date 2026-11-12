@@ -41,6 +41,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import { makeProviderEventRoutingState, routeProviderEvent } from "../RunExecutionService.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import { refusedBeforePrompt } from "@t3tools/provider-core/server/failure";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
@@ -465,6 +466,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     notification: EffectAcpSchema.SessionNotification,
   ) => Effect.Effect<void>;
   /** Wraps the runtime's `session/cancel` send. */
+  readonly wrapRuntime?: (
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+  ) => AcpSessionRuntime.AcpSessionRuntime["Service"];
   readonly wrapCancel?: (
     send: AcpSessionRuntime.AcpSessionRuntime["Service"]["cancel"],
   ) => AcpSessionRuntime.AcpSessionRuntime["Service"]["cancel"];
@@ -502,6 +506,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     readonly answerQuestion: (
       requestId: RuntimeRequestId,
       answers?: ProviderUserInputAnswers,
+    ) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly forceReplacement: (
+      policy: Partial<ProviderAdapterV2RuntimePolicy>,
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly rollbackToStart: Effect.Effect<void, ProviderAdapterV2Error>;
     readonly disconnect: Effect.Effect<void>;
@@ -578,17 +585,20 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
         fileSystem,
         ...(input.replayGate === undefined ? {} : { replayGate: input.replayGate }),
       })(runtimeInput).pipe(
-        Effect.map((runtime) => ({
-          ...runtime,
-          handleSessionUpdate: (handler) =>
-            runtime.handleSessionUpdate((notification) =>
-              handler(notification).pipe(
-                Effect.andThen(input.onSessionUpdate?.(notification) ?? Effect.void),
+        Effect.map((original) => {
+          const runtime = input.wrapRuntime?.(original) ?? original;
+          return {
+            ...runtime,
+            handleSessionUpdate: (handler) =>
+              runtime.handleSessionUpdate((notification) =>
+                handler(notification).pipe(
+                  Effect.andThen(input.onSessionUpdate?.(notification) ?? Effect.void),
+                ),
               ),
-            ),
-          ...(input.wrapCancel === undefined ? {} : { cancel: input.wrapCancel(runtime.cancel) }),
-          ...(input.wrapPrompt === undefined ? {} : { prompt: input.wrapPrompt(runtime.prompt) }),
-        })),
+            ...(input.wrapCancel === undefined ? {} : { cancel: input.wrapCancel(runtime.cancel) }),
+            ...(input.wrapPrompt === undefined ? {} : { prompt: input.wrapPrompt(runtime.prompt) }),
+          };
+        }),
       );
     },
     ...(input.testHooks === undefined ? {} : { testHooks: input.testHooks }),
@@ -700,6 +710,18 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
           ...(answers === undefined ? {} : { answers }),
         }),
       disconnect: Effect.suspend(() => disconnect),
+      forceReplacement: (overrides) =>
+        Effect.gen(function* () {
+          const nextPolicy = { ...runtimePolicy, ...overrides };
+          const replacement = yield* session.ensureThread({
+            threadId,
+            modelSelection,
+            runtimePolicy: nextPolicy,
+            forceNewNativeThread: true,
+          });
+          providerThread = replacement;
+          runtimePolicy = nextPolicy;
+        }),
       rollbackToStart: session
         .rollbackThread({
           providerThread,
@@ -1815,6 +1837,272 @@ it.live("verifies native Auto again on a rollback replacement", () =>
         yield* rollbackToStart;
         yield* startTurn;
         assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each(["false", "missing", "true"] as const)(
+  "admits native Auto at dispatch after preparation observes %s",
+  (state) =>
+    Effect.gen(function* () {
+      const mcp = yield* McpProviderSessions.McpProviderSessions;
+      const preparing = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const observed = yield* Deferred.make<void>();
+      const gate = makeProviderReplayGate(["withdraw-during-preparation"]);
+      let writes = 0;
+      let held = false;
+      yield* runKiroScript({
+        scenario: `approve-dispatch-${state}`,
+        runtimeMode: "auto",
+        replayGate: gate,
+        wrapRuntime: (runtime) => ({
+          ...runtime,
+          setConfigOption: (id, value, options) =>
+            runtime.setConfigOption(id, value, options).pipe(
+              Effect.tap(() =>
+                Effect.sync(() => {
+                  if (id === "approveForMe") writes++;
+                }),
+              ),
+            ),
+        }),
+        onSessionUpdate: ({ update }) =>
+          update.sessionUpdate === "config_option_update"
+            ? Deferred.succeed(observed, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", sessionSetup([approveForMeOption(false)])),
+          activateApproveForMe,
+          configResult([approveForMeOption(true)]),
+          activateApproveForMe,
+          configResult([approveForMeOption(true)]),
+          {
+            ...update({
+              sessionUpdate: "config_option_update",
+              configOptions: state === "missing" ? [] : [approveForMeOption(state === "true")],
+            }),
+            label: "withdraw-during-preparation",
+          },
+          ...(state === "true"
+            ? [turnPrompt, answer("session/prompt", { stopReason: "end_turn" })]
+            : []),
+          ...(state === "false"
+            ? [
+                activateApproveForMe,
+                configResult([approveForMeOption(true)]),
+                turnPrompt,
+                answer("session/prompt", { stopReason: "end_turn" }),
+              ]
+            : []),
+          ...closeSession,
+        ],
+        drive: ({ startTurn, startTurnOn, events, hasPendingBackgroundWork }) =>
+          Effect.gen(function* () {
+            const terminal = yield* collectTurn(events).pipe(Effect.forkChild);
+            const started = yield* Effect.exit(startTurn).pipe(Effect.forkChild);
+            yield* Deferred.await(preparing);
+            assert.equal(writes, 2);
+            gate.release("withdraw-during-preparation");
+            yield* Deferred.await(observed);
+            yield* Deferred.succeed(release, undefined);
+            const result = yield* Fiber.join(started);
+            const settled = yield* Fiber.join(terminal);
+            assert.equal(terminalStatus(settled), state === "true" ? "completed" : "failed");
+            if (state === "true") assert.isTrue(Exit.isSuccess(result));
+            else {
+              assert.isTrue(Exit.isFailure(result));
+              if (Exit.isFailure(result)) {
+                const error = Cause.findError(result.cause);
+                assert.isTrue(error._tag === "Success" && refusedBeforePrompt(error.success));
+              }
+            }
+            assert.isFalse(yield* hasPendingBackgroundWork);
+            if (state === "false") {
+              yield* startTurnOn(2, "default");
+              assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+            }
+          }),
+      }).pipe(
+        Effect.provideService(McpProviderSessions.McpProviderSessions, {
+          ...mcp,
+          read: (threadId) =>
+            Effect.suspend(() => {
+              if (writes !== 2 || held) return mcp.read(threadId);
+              held = true;
+              return Deferred.succeed(preparing, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(mcp.read(threadId)),
+              );
+            }),
+        }),
+      );
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live("admits the incoming Supervised policy before forced native Auto replacement", () => {
+  let made = 0;
+  return runKiroScript({
+    scenario: "approve-replacement-supervised",
+    runtimeMode: "auto",
+    inspectRuntime: (input) => {
+      made++;
+      assert.equal(input.runtimePolicy.runtimeMode, made === 1 ? "auto" : "approval-required");
+      assert.equal(
+        input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+        made === 1 ? "enforce" : "off",
+      );
+    },
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+    ],
+    replacementFrames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(true)])),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+      ...closeSession,
+    ],
+    drive: ({ forceReplacement, startTurnOn, events }) =>
+      Effect.gen(function* () {
+        yield* forceReplacement({ runtimeMode: "approval-required" });
+        yield* startTurnOn(1, "default");
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        assert.equal(made, 2);
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped);
+});
+
+it.live("retains native Auto ownership after a changed-policy candidate fails startup", () => {
+  let made = 0;
+  return runKiroScript({
+    scenario: "approve-replacement-startup-failure",
+    runtimeMode: "auto",
+    inspectRuntime: (input) => {
+      made++;
+      assert.equal(
+        input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+        made === 1 ? "enforce" : "off",
+      );
+    },
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+      ...closeSession,
+    ],
+    replacementFrames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      {
+        type: "emit_inbound",
+        label: "candidate-startup-error",
+        frame: {
+          kind: "response",
+          method: "session/new",
+          error: { code: -32603, message: "Synthetic candidate startup failure" },
+        },
+      },
+    ],
+    drive: ({ forceReplacement, startTurn, events }) =>
+      Effect.gen(function* () {
+        const failed = yield* Effect.exit(forceReplacement({ runtimeMode: "approval-required" }));
+        assert.isTrue(Exit.isFailure(failed));
+        yield* startTurn;
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        assert.equal(made, 2);
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped);
+});
+
+it.live.each([
+  { approvalPolicy: "on-request" },
+  { sandboxPolicy: { type: "readOnly" } },
+  { interactionMode: "plan" as const },
+  { maxRuntimeMode: "approval-required" as const },
+])("rejects forbidden replacement policy before candidate construction (%j)", (policy) => {
+  let made = 0;
+  return runKiroScript({
+    scenario: `approve-replacement-forbidden-${Object.keys(policy)[0]}`,
+    runtimeMode: "auto",
+    inspectRuntime: () => {
+      made++;
+    },
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+      ...closeSession,
+    ],
+    drive: ({ forceReplacement, startTurn, events }) =>
+      Effect.gen(function* () {
+        const result = yield* Effect.exit(forceReplacement(policy));
+        assert.isTrue(Exit.isFailure(result));
+        assert.equal(made, 1);
+        if (Exit.isFailure(result)) assert.include(Cause.pretty(result.cause), "cannot enforce");
+        yield* startTurn;
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        assert.equal(made, 1);
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped);
+});
+
+it.live("keeps native errors after Auto dispatch classified as sent", () =>
+  runKiroScript({
+    scenario: "approve-dispatched-native-error",
+    runtimeMode: "auto",
+    frames: [
+      outbound("initialize"),
+      answer("initialize", KIRO_V3_INITIALIZE),
+      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/new", sessionSetup([approveForMeOption(false)])),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      activateApproveForMe,
+      configResult([approveForMeOption(true)]),
+      turnPrompt,
+      update({ sessionUpdate: "config_option_update", configOptions: [approveForMeOption(false)] }),
+      {
+        type: "emit_inbound",
+        label: "native-prompt-error",
+        frame: {
+          kind: "response",
+          method: "session/prompt",
+          error: { code: -32603, message: "Synthetic error after native acceptance" },
+        },
+      },
+      ...closeSession,
+    ],
+    drive: ({ startTurn, events }) =>
+      Effect.gen(function* () {
+        yield* startTurn;
+        const turn = yield* collectTurn(events);
+        assert.equal(terminalStatus(turn), "failed");
       }),
   }).pipe(Effect.provide(testLayer), Effect.scoped),
 );

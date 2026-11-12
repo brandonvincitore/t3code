@@ -2690,10 +2690,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           resumeSessionId?: string,
           onTermination: AcpAdapterV2RuntimeInput["onTermination"] = () =>
             handleRuntimeTerminationAtGeneration(runtimeGeneration),
+          runtimePolicy = latestRuntimePolicy,
         ): AcpAdapterV2RuntimeInput => {
           return {
             cwd: input.runtimePolicy.cwd ?? process.cwd(),
-            runtimePolicy: latestRuntimePolicy,
+            runtimePolicy,
             mcpServers: mcpContext.servers,
             acpMcpServers: mcpContext.acpServers,
             httpMcpServers: mcpContext.httpServers,
@@ -7947,10 +7948,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         const startReplacementAcpRuntime = Effect.fnUntraced(function* (
           threadId: ThreadId | null,
+          replacementPolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
           commitSessionState: (
             replacement: AcpSessionRuntime.AcpSessionRuntimeStartResult,
           ) => Effect.Effect<void>,
         ) {
+          yield* flavor.validateRuntimePolicy?.(replacementPolicy) ?? Effect.void;
           const previousScope = runtimeScope;
           const previousGeneration = yield* Ref.get(runtimeCallbackGeneration);
           yield* runtimeCallbackPermit.withPermit(awaitAdmittedNativeResponses);
@@ -7990,7 +7993,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const startup = Effect.gen(function* () {
             const mcpContext = yield* readMcpContext(threadId);
             replacementMcpBridge = yield* makeRuntimeMcpBridge(mcpContext, replacementScope);
-            yield* flavor.validateRuntimePolicy?.(latestRuntimePolicy) ?? Effect.void;
             const replacementRuntime = yield* flavor
               .makeRuntime(
                 makeRuntimeInput(
@@ -7999,6 +8001,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   mcpContext,
                   undefined,
                   handleCandidateTermination,
+                  replacementPolicy,
                 ),
               )
               .pipe(
@@ -8058,6 +8061,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   yield* terminalizeNativeWorkflows("interrupted");
                   yield* quarantineNativeTransportAtGeneration(previousGeneration);
                   runtime = replacementExit.value.replacementRuntime;
+                  spawnedRuntimePolicyKey = flavor.runtimePolicyKey?.(replacementPolicy);
                   runtimeScope = replacementScope;
                   runtimeMcpBridge = replacementMcpBridge;
                   openAgentRequests = replacementAgentRequests;
@@ -9328,6 +9332,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 return wasRequested;
               }),
             );
+            const promptRuntime = runtime;
+            const requiredConfigOptions = (
+              flavor.sessionConfigForPolicy?.(turnInput.runtimePolicy) ?? []
+            ).flatMap((option) =>
+              option.required && typeof option.value === "boolean"
+                ? [{ id: option.id, value: option.value }]
+                : [],
+            );
             const promptParts = isContinuationTurn
               ? null
               : yield* resolvePromptParts(turnInput, requestedSessionId).pipe(
@@ -9579,7 +9591,17 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 return updated;
               });
             }
-            const promptOptions = { dispatched: context.promptDispatched };
+            const promptOptions = {
+              dispatched: context.promptDispatched,
+              ...(requiredConfigOptions.length === 0
+                ? {}
+                : {
+                    admission: {
+                      sessionId: requestedSessionId,
+                      configOptions: requiredConfigOptions,
+                    },
+                  }),
+            };
             context.promptSentAt = yield* Clock.currentTimeMillis;
             if (promptInactivityTimeoutMillis !== undefined) {
               context.inactivityWatchdog = yield* watchPromptInactivity(
@@ -9591,9 +9613,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const compactSession = isCompactionMessage(turnInput.message)
               ? flavor.compactSession
               : undefined;
-            yield* (
+            const promptFiber = yield* (
               compactSession === undefined
-                ? runtime.prompt({ prompt: promptParts!.prompt }, promptOptions)
+                ? promptRuntime.prompt({ prompt: promptParts!.prompt }, promptOptions)
                 : Deferred.succeed(context.promptDispatched, undefined).pipe(
                     Effect.andThen(compactSession(runtime, requestedSessionId)),
                     Effect.as({ stopReason: "end_turn" } satisfies EffectAcpSchema.PromptResponse),
@@ -9768,11 +9790,30 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         }),
                       ),
                     );
+                    if (
+                      Result.isSuccess(error) &&
+                      error.success._tag === "AcpPromptAdmissionError"
+                    ) {
+                      return yield* error.success;
+                    }
                   }),
                 ).pipe(Effect.asVoid),
               ),
               Effect.forkIn(sessionScope),
             );
+            if (requiredConfigOptions.length > 0 && compactSession === undefined) {
+              yield* Effect.raceFirst(
+                Deferred.await(context.promptDispatched),
+                Fiber.join(promptFiber),
+              ).pipe(
+                Effect.catchTags({
+                  AcpPromptAdmissionError: (cause) =>
+                    Effect.fail(
+                      new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
+                    ),
+                }),
+              );
+            }
           },
           (effect, turnInput) =>
             effect.pipe(
@@ -9946,12 +9987,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     const previousItemIdentityVersion = itemIdentityVersion;
                     itemIdentityVersion = 2;
                     prepareTerminalEnvironment(yield* readMcpContext(threadInput.threadId));
-                    yield* startReplacementAcpRuntime(threadInput.threadId, (candidate) =>
-                      commitReplacementSession(
-                        threadInput.threadId,
-                        candidate,
-                        threadInput.runtimePolicy,
-                      ),
+                    yield* startReplacementAcpRuntime(
+                      threadInput.threadId,
+                      threadInput.runtimePolicy,
+                      (candidate) =>
+                        commitReplacementSession(
+                          threadInput.threadId,
+                          candidate,
+                          threadInput.runtimePolicy,
+                        ),
                     ).pipe(
                       Effect.tapError(() =>
                         Effect.sync(() => {
@@ -10683,6 +10727,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   );
                   const replacement = yield* startReplacementAcpRuntime(
                     rollbackInput.providerThread.appThreadId,
+                    latestRuntimePolicy,
                     (candidate) =>
                       commitReplacementSession(rollbackInput.providerThread.appThreadId, candidate),
                   ).pipe(Effect.retry({ times: 1 }));
