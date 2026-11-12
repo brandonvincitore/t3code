@@ -274,3 +274,11 @@ Focused free tests use scripted ACP pipes and synthetic persistence. They do
 not execute native Kiro, an account, classifier or title model. Client proof,
 independent review and publication remain the parent's responsibility. All
 previous ledger bytes, source pins, PR rows and author credits are retained.
+
+The bounded review corrections make explicit manual T3 ownership authoritative
+also for names spelled New thread, preserve every observed nonempty native
+name without candidate filtering, and exclude remotely delegated children.
+Native naming now requires a meaningful existing T3 title; unavailable title
+seeds are skipped because provider-facing text may already contain handoffs.
+Normal client first-message seeds remain available before model work. The
+initial external-rename race and creation-only limit remain unchanged.

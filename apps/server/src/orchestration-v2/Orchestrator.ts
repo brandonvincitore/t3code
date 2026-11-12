@@ -5911,6 +5911,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
     if (
       !isNativeMaintenanceCommand(command) &&
+      projection.thread.titleManuallySet !== true &&
       (projection.thread.titleManuallySet === false || projection.thread.title === "New thread") &&
       ((command.titleSeed !== undefined &&
         (yield* projectionStore

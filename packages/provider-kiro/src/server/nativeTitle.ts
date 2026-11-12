@@ -2,7 +2,6 @@ import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type { AcpAdapterV2Flavor } from "@t3tools/provider-acp/server/adapter";
-import { isAttachmentOnlyBootstrapPrompt } from "@t3tools/shared/composerContextReferences";
 
 const decodeMethods = Schema.decodeUnknownOption(
   Schema.Struct({ kiro: Schema.Struct({ extensionMethods: Schema.Array(Schema.String) }) }),
@@ -39,17 +38,8 @@ export const initializeKiroThreadTitle: NonNullable<AcpAdapterV2Flavor["initiali
     const meta = Option.getOrUndefined(decodeSession(session.sessionSetupResult._meta));
     const sources = [meta?.source, meta?.kiro?.source].filter((source) => source !== undefined);
     if (sources.length === 0 || sources.some((source) => source !== "local")) return;
-    if (
-      normalizeTitle(meta?.title) ||
-      normalizeTitle(meta?.kiro?.title) ||
-      normalizeTitle(observedTitle)
-    )
-      return;
-    const text = turn.message.text;
-    const seed = isAttachmentOnlyBootstrapPrompt(text)
-      ? undefined
-      : text.split(/\r?\n/u).find((line) => line.trim().length > 0);
-    const title = normalizeTitle(turn.appThread.title) ?? normalizeTitle(seed);
+    if (meta?.title?.trim() || meta?.kiro?.title?.trim() || observedTitle?.trim()) return;
+    const title = normalizeTitle(turn.appThread.title);
     if (title === undefined) return;
     const result = yield* runtime
       .request("_kiro/session/rename", {

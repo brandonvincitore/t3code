@@ -47,6 +47,7 @@ import * as ContextHandoffService from "./ContextHandoffService.ts";
 import { withInlineContext } from "./ContextHandoffDelivery.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { initializeKiroThreadTitle } from "@t3tools/provider-kiro/testing";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { AcpSessionConfigError } from "@t3tools/provider-acp/server/AcpSessionRuntime";
@@ -1894,10 +1895,14 @@ effectIt.effect.each([
   "failed resume",
   "uncertain delivery",
   "fresh session",
+  "fresh unnamed title",
+  "fresh named title",
   "Edit from here",
   "native fork",
 ] as const)("continues imported native history: %s", (scenario) =>
   Effect.gen(function* () {
+    const checksNativeTitle =
+      scenario === "fresh unnamed title" || scenario === "fresh named title";
     const harness = makeLocalCommandHarness({ text: "Continue", useRealHandoffs: true });
     const before = harness.projection();
     const run = before.runs[0]!;
@@ -1975,7 +1980,13 @@ effectIt.effect.each([
     }).pipe(Effect.provide(ContextHandoffService.layer.pipe(Layer.provide(IdAllocator.layer))));
     harness.setProjection({
       ...before,
-      thread: { ...before.thread, historyOrigin: "v1_import" },
+      thread: {
+        ...before.thread,
+        historyOrigin: "v1_import",
+        ...(checksNativeTitle
+          ? { title: scenario === "fresh named title" ? "Continue" : "New thread" }
+          : {}),
+      },
       runs: [
         ...(scenario === "Edit from here"
           ? [
@@ -2004,7 +2015,10 @@ effectIt.effect.each([
         },
       ],
       providerThreads: [
-        { ...native, ...(scenario === "fresh session" ? { nativeThreadRef: null } : {}) },
+        {
+          ...native,
+          ...(scenario === "fresh session" || checksNativeTitle ? { nativeThreadRef: null } : {}),
+        },
       ],
       turnItems: importedItems,
     });
@@ -2025,7 +2039,34 @@ effectIt.effect.each([
       ...native,
       nativeThreadRef: { ...nativeThreadRef, nativeId: "fresh-native" },
     };
-    const startTurn = vi.fn((_turn: ProviderAdapter.ProviderAdapterV2TurnInput) => Effect.void);
+    const nativeRename = vi.fn((_method: string, _params: unknown) =>
+      Effect.succeed({ success: true }),
+    );
+    const startTurn = vi.fn((turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+      checksNativeTitle
+        ? initializeKiroThreadTitle({
+            runtime: { request: nativeRename } as unknown as Parameters<
+              typeof initializeKiroThreadTitle
+            >[0]["runtime"],
+            session: {
+              sessionId: turn.providerThread.nativeThreadRef!.nativeId!,
+              initializeResult: {
+                protocolVersion: 1,
+                agentCapabilities: {
+                  _meta: { kiro: { extensionMethods: ["_kiro/session/rename"] } },
+                },
+              },
+              sessionSetupResult: {
+                sessionId: turn.providerThread.nativeThreadRef!.nativeId!,
+                _meta: { source: "local" },
+              },
+              modelConfigId: undefined,
+            },
+            turn,
+            observedTitle: undefined,
+          })
+        : Effect.void,
+    );
     const ensureThread = vi.fn(() => Effect.succeed(replacement));
     const resumeThread = vi.fn<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>(
       () =>
@@ -2077,6 +2118,22 @@ effectIt.effect.each([
     expect(prompt).not.toContain("NATIVE THOUGHT");
     expect(prompt.split("Continue").length - 1).toBe(1);
     if (scenario === "same native session") expect(prompt).toBe("Continue");
+    if (checksNativeTitle) {
+      expect(harness.startRootRun.mock.calls[0]?.[0].message.text).toBe("Continue");
+      expect(prompt).toMatch(/^Context handoff /);
+      expect(prompt).toContain("User message:\nContinue");
+      expect(nativeRename.mock.calls).toEqual(
+        scenario === "fresh named title"
+          ? [
+              [
+                "_kiro/session/rename",
+                { sessionId: "fresh-native", title: "Continue", sessionSource: "local" },
+              ],
+            ]
+          : [],
+      );
+      return;
+    }
     // Re-entering startup on the accepted native identity must not deliver the handoff twice.
     const after = harness.projection();
     harness.setProjection({

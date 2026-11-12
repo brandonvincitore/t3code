@@ -120,6 +120,7 @@ function createThread(input: {
   readonly command: string;
   readonly thread: string;
   readonly worktreePath?: string;
+  readonly title?: string;
 }) {
   return Effect.gen(function* () {
     const threads = yield* ThreadManagement.ThreadManagementService;
@@ -129,7 +130,7 @@ function createThread(input: {
       commandId: CommandId.make(input.command),
       threadId,
       projectId,
-      title: "Seed title",
+      title: input.title ?? "Seed title",
       modelSelection,
       runtimeMode: "full-access",
       interactionMode: "default",
@@ -323,82 +324,146 @@ describe("ThreadTitleRegenerationService", () => {
       }),
   );
 
-  it.effect("arms and clears the regeneration marker through metadata commands", () =>
-    Effect.gen(function* () {
-      const harness = makeHarness();
-      yield* Effect.gen(function* () {
-        const threads = yield* ThreadManagement.ThreadManagementService;
-        const outbox = yield* EffectOutbox.EffectOutboxV2;
-        const threadId = yield* createThread({
-          command: "command:title:arm:create",
-          thread: "thread:title:arm",
-        });
+  it.effect.each([
+    { action: "rename", manualTitle: "Manual title", maintenance: false },
+    { action: "rename", manualTitle: "New thread", maintenance: false },
+    { action: "cancel", manualTitle: "New thread", maintenance: false },
+    { action: "rename", manualTitle: "New thread", maintenance: true },
+    { action: "cancel", manualTitle: "New thread", maintenance: true },
+  ])(
+    "arms and clears the regeneration marker through metadata commands: $action $manualTitle maintenance=$maintenance",
+    ({ action, manualTitle, maintenance }) =>
+      Effect.gen(function* () {
+        const harness = makeHarness();
+        yield* Effect.gen(function* () {
+          const threads = yield* ThreadManagement.ThreadManagementService;
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const threadId = yield* createThread({
+            command: "command:title:arm:create",
+            thread: "thread:title:arm",
+            ...(action === "cancel" ? { title: "New thread" } : {}),
+          });
 
-        const firstRequest = yield* armRegeneration({ command: "command:title:arm:1", threadId });
-        const armed = yield* threads.getThreadProjection(threadId);
-        assert.equal(armed.thread.titleRegeneration?.requestId, firstRequest);
-        assert.deepEqual(
-          (yield* outbox.listByCommandId(firstRequest)).map((effect) => effect.request),
-          [{ type: "thread-title.generate", kind: { type: "regenerate" } }],
-        );
+          const firstRequest = yield* armRegeneration({ command: "command:title:arm:1", threadId });
+          const armed = yield* threads.getThreadProjection(threadId);
+          assert.equal(armed.thread.titleRegeneration?.requestId, firstRequest);
+          assert.deepEqual(
+            (yield* outbox.listByCommandId(firstRequest)).map((effect) => effect.request),
+            [{ type: "thread-title.generate", kind: { type: "regenerate" } }],
+          );
 
-        yield* threads.dispatch({
-          type: "thread.metadata.update",
-          commandId: CommandId.make("command:title:arm:abandon"),
-          threadId,
-          regenerateTitle: false,
-        });
-        const abandoned = yield* threads.getThreadProjection(threadId);
-        assert.isNotOk(abandoned.thread.titleRegeneration);
+          yield* threads.dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make("command:title:arm:abandon"),
+            threadId,
+            regenerateTitle: false,
+          });
+          const abandoned = yield* threads.getThreadProjection(threadId);
+          assert.isNotOk(abandoned.thread.titleRegeneration);
 
-        yield* armRegeneration({ command: "command:title:arm:2", threadId });
-        yield* threads.dispatch({
-          type: "thread.metadata.update",
-          commandId: CommandId.make("command:title:arm:rename"),
-          threadId,
-          title: "Manual title",
-        });
-        const renamed = yield* threads.getThreadProjection(threadId);
-        assert.equal(renamed.thread.title, "Manual title");
-        assert.isNotOk(renamed.thread.titleRegeneration);
-        yield* threads.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make("command:title:manual:first-message"),
-          threadId,
-          messageId: MessageId.make("message:title:manual:first-message"),
-          text: "Fix login",
-          titleSeed: "Fix login",
-          attachments: [],
-          modelSelection,
-          dispatchMode: { type: "defer_start" },
-          createdBy: "user",
-          creationSource: "web",
-        });
-        const afterFirstMessage = yield* threads.getThreadProjection(threadId);
-        assert.equal(afterFirstMessage.thread.title, "Manual title");
-        assert.equal(afterFirstMessage.thread.titleManuallySet, true);
-        assert.isNotOk(afterFirstMessage.thread.titleRegeneration);
-        yield* threads.dispatch({
-          type: "thread.title.regeneration.complete",
-          commandId: CommandId.make("command:title:manual:late-complete"),
-          requestId: firstRequest,
-          threadId,
-          title: "Late generated title",
-        });
-        assert.equal((yield* threads.getThreadProjection(threadId)).thread.title, "Manual title");
-        const createdName = yield* createThread({
-          command: "command:title:chosen:create",
-          thread: "thread:title:chosen",
-        });
-        yield* dispatchUserMessage({
-          command: "command:title:chosen:message",
-          threadId: createdName,
-          text: "Fix login",
-          titleSeed: "Fix login",
-        });
-        assert.equal((yield* threads.getThreadProjection(createdName)).thread.title, "Seed title");
-      }).pipe(Effect.provide(harness.layer));
-    }),
+          const pendingRequest = yield* armRegeneration({
+            command: "command:title:arm:2",
+            threadId,
+          });
+          yield* threads.dispatch({
+            type: "thread.metadata.update",
+            commandId: CommandId.make("command:title:arm:rename"),
+            threadId,
+            ...(action === "cancel" ? { regenerateTitle: false } : { title: manualTitle }),
+          });
+          const renamed = yield* threads.getThreadProjection(threadId);
+          assert.equal(renamed.thread.title, manualTitle);
+          assert.isNotOk(renamed.thread.titleRegeneration);
+          if (maintenance)
+            yield* dispatchUserMessage({
+              command: "command:title:manual:maintenance",
+              threadId,
+              text: "/compact",
+            });
+          yield* threads.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make("command:title:manual:first-message"),
+            threadId,
+            messageId: MessageId.make("message:title:manual:first-message"),
+            text: "Fix login",
+            titleSeed: "Fix login",
+            attachments: [],
+            modelSelection,
+            dispatchMode: { type: "defer_start" },
+            createdBy: "user",
+            creationSource: "web",
+          });
+          const afterFirstMessage = yield* threads.getThreadProjection(threadId);
+          assert.equal(afterFirstMessage.thread.title, manualTitle);
+          assert.equal(afterFirstMessage.thread.titleManuallySet, true);
+          assert.isNotOk(afterFirstMessage.thread.titleRegeneration);
+          assert.isFalse(
+            (yield* outbox.listByCommandId(
+              CommandId.make("command:title:manual:first-message"),
+            )).some((effect) => effect.request.type === "thread-title.generate"),
+          );
+          const service = yield* ThreadTitleRegeneration.ThreadTitleRegenerationService;
+          yield* service.execute({
+            threadId,
+            requestId: pendingRequest,
+            kind: { type: "regenerate" },
+          });
+          assert.equal(harness.generateThreadTitle.mock.calls.length, 0);
+          const lateCommand = {
+            type: "thread.title.regeneration.complete" as const,
+            commandId: CommandId.make("command:title:manual:late-complete"),
+            requestId: firstRequest,
+            threadId,
+            title: "Late generated title",
+          };
+          yield* threads.dispatch(lateCommand);
+          const replay = yield* threads.dispatch(lateCommand);
+          assert.isTrue(replay.replayed);
+          assert.isNotOk((yield* threads.getThreadProjection(threadId)).thread.titleRegeneration);
+          assert.equal((yield* threads.getThreadProjection(threadId)).thread.title, manualTitle);
+          const released = yield* armRegeneration({
+            command: "command:title:explicit:release",
+            threadId,
+          });
+          assert.equal(
+            (yield* threads.getThreadProjection(threadId)).thread.titleManuallySet,
+            false,
+          );
+          yield* service.execute({ threadId, requestId: released, kind: { type: "regenerate" } });
+          const regenerated = yield* threads.getThreadProjection(threadId);
+          assert.equal(regenerated.thread.title, "Generated title");
+          assert.isNotOk(regenerated.thread.titleRegeneration);
+          assert.equal(harness.generateThreadTitle.mock.calls.length, 1);
+          const createdName = yield* createThread({
+            command: "command:title:chosen:create",
+            thread: "thread:title:chosen",
+          });
+          yield* dispatchUserMessage({
+            command: "command:title:chosen:message",
+            threadId: createdName,
+            text: "Fix login",
+            titleSeed: "Fix login",
+          });
+          assert.equal(
+            (yield* threads.getThreadProjection(createdName)).thread.title,
+            "Seed title",
+          );
+          const automatic = yield* createThread({
+            command: "command:title:automatic:create",
+            thread: "thread:title:automatic",
+            title: "New thread",
+          });
+          yield* dispatchUserMessage({
+            command: "command:title:automatic:first",
+            threadId: automatic,
+            text: "Fix login",
+            titleSeed: "Fix login",
+          });
+          const seeded = yield* threads.getThreadProjection(automatic);
+          assert.equal(seeded.thread.title, "Fix login");
+          assert.isOk(seeded.thread.titleRegeneration);
+        }).pipe(Effect.provide(harness.layer));
+      }),
   );
 
   it.effect("skips execution when the marker was superseded by a newer request", () =>

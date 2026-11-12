@@ -33,6 +33,7 @@ import {
   type ThreadTokenUsageSnapshot,
   type ThreadId,
   isRuntimeModeAbove,
+  isDelegatedAppThread,
   isOrchestrationV2WorkActive,
   type TurnTokenUsage,
 } from "@t3tools/contracts";
@@ -9338,6 +9339,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 requestedSessionId === started.sessionId &&
                 turnInput.threadId === input.threadId &&
                 turnInput.appThread.id === input.threadId &&
+                !isDelegatedAppThread(turnInput.appThread) &&
                 turnInput.appThread.lineage.parentThreadId === null &&
                 turnInput.appThread.forkedFrom === null &&
                 turnInput.providerThread.appThreadId === input.threadId &&
