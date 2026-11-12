@@ -166,9 +166,24 @@ export interface AcpSessionRequestLogEvent {
   readonly cause?: Cause.Cause<EffectAcpErrors.AcpError>;
 }
 
+export class AcpSessionConfigError extends Schema.TaggedError<AcpSessionConfigError>()(
+  "AcpSessionConfigError",
+  {
+    configId: Schema.String,
+    reason: Schema.Literals(["unavailable", "rejected", "restricted"]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message() {
+    return this.reason === "restricted"
+      ? "Native session configuration cannot enforce this runtime policy."
+      : `Native ${this.configId} is ${this.reason === "unavailable" ? "unavailable" : "rejected"}.`;
+  }
+}
+
 export class AcpPromptAdmissionError extends Schema.TaggedError<AcpPromptAdmissionError>()(
   "AcpPromptAdmissionError",
-  {},
+  { configId: Schema.optional(Schema.String) },
 ) {
   override get message() {
     return "The native session or required configuration changed before prompt dispatch.";
@@ -2635,7 +2650,13 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
                     return option?.type !== "boolean" || option.currentValue !== required.value;
                   })
                 ) {
-                  return yield* new AcpPromptAdmissionError();
+                  return yield* new AcpPromptAdmissionError({
+                    configId:
+                      promptOptions.admission.configOptions.find((required) => {
+                        const option = findSessionConfigOption(configOptions, required.id);
+                        return option?.type !== "boolean" || option.currentValue !== required.value;
+                      })?.id ?? promptOptions.admission.configOptions[0]?.id,
+                  });
                 }
               }
               yield* closeActiveAssistantSegment({ queue: eventQueue, assistantSegmentRef });

@@ -39,9 +39,13 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import { makeAssistantStreamingFilter } from "../assistantStreaming.ts";
 import { makeProviderEventRoutingState, routeProviderEvent } from "../RunExecutionService.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
-import { refusedBeforePrompt } from "@t3tools/provider-core/server/failure";
+import {
+  knownProviderFailureMessage,
+  refusedBeforePrompt,
+} from "@t3tools/provider-core/server/failure";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
@@ -631,8 +635,12 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     if (input.expectedOpenFailure !== undefined) {
       const result = yield* Effect.exit(open);
       assert.isTrue(Exit.isFailure(result));
-      if (Exit.isFailure(result))
+      if (Exit.isFailure(result)) {
         assert.include(Cause.pretty(result.cause), input.expectedOpenFailure);
+        const guidance = knownProviderFailureMessage(Cause.squash(result.cause));
+        assert.include(guidance ?? "", "Native Approve for Me");
+        assert.include(guidance ?? "", "Supervised");
+      }
       return;
     }
     const session = yield* open;
@@ -2105,6 +2113,79 @@ it.live("keeps native errors after Auto dispatch classified as sent", () =>
         assert.equal(terminalStatus(turn), "failed");
       }),
   }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live.each([false, true])(
+  "publishes held ACP text through paragraph filtering only at its boundary (%s)",
+  (paragraph) =>
+    Effect.gen(function* () {
+      const published = yield* Deferred.make<{
+        raw: ProviderAdapterV2Event;
+        delivered: ProviderAdapterV2Event | null;
+      }>();
+      const filter = makeAssistantStreamingFilter("paragraph");
+      const text = "SCRIPTED waiting for browser cancellation." + (paragraph ? "\n\n" : "");
+      yield* runKiroScript({
+        scenario: `held-single-chunk-${paragraph}`,
+        runtimeMode: "auto",
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", sessionSetup([approveForMeOption(false)])),
+          activateApproveForMe,
+          configResult([approveForMeOption(true)]),
+          activateApproveForMe,
+          configResult([approveForMeOption(true)]),
+          turnPrompt,
+          update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+          {
+            type: "expect_outbound",
+            label: "cancel",
+            frame: {
+              kind: "notification",
+              method: "session/cancel",
+              params: { sessionId: SESSION_ID },
+            },
+          },
+          update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "SCRIPTED browser cancellation received." },
+          }),
+          answer("session/prompt", { stopReason: "cancelled" }),
+          ...closeSession,
+        ],
+        drive: ({ startTurn, events, interrupt }) =>
+          Effect.gen(function* () {
+            const settled = yield* collectTurn(
+              events.pipe(
+                Stream.tap((event) =>
+                  event.type === "turn_item.updated" &&
+                  event.turnItem.type === "assistant_message" &&
+                  event.turnItem.streaming
+                    ? Deferred.succeed(published, { raw: event, delivered: filter(event, 0) })
+                    : Effect.void,
+                ),
+              ),
+            ).pipe(Effect.forkChild);
+            yield* startTurn;
+            const { raw: event, delivered } = yield* Deferred.await(published);
+            assert.equal(delivered !== null, paragraph);
+            if (
+              delivered?.type === "turn_item.updated" &&
+              delivered.turnItem.type === "assistant_message"
+            )
+              assert.equal(delivered.turnItem.text, text);
+            assert.equal(event.type, "turn_item.updated");
+            if (event.type === "turn_item.updated" && event.turnItem.type === "assistant_message") {
+              assert.equal(event.turnItem.text, text);
+              assert.equal(event.turnItem.status, "running");
+              yield* interrupt(event.turnItem.providerTurnId!);
+            }
+            assert.equal(terminalStatus(yield* Fiber.join(settled)), "interrupted");
+          }),
+      });
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
 );
 
 it.live("marks lost native Auto activation as unsent preparation before prompting", () =>

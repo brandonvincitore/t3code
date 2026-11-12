@@ -108,6 +108,60 @@ it("preserves actionable T3 errors wrapped by turn startup", () => {
   }
 });
 
+it("projects controlled native approval guidance through session-open and turn wrappers", () => {
+  const external = new Error(
+    "private provider reason https://account.test/auth?token=private-token",
+  );
+  for (const cause of [
+    {
+      _tag: "AcpSessionConfigError",
+      configId: "approveForMe",
+      reason: "unavailable",
+      cause: external,
+    },
+    {
+      _tag: "AcpSessionConfigError",
+      configId: "approveForMe",
+      reason: "rejected",
+      cause: external,
+    },
+    {
+      _tag: "AcpSessionConfigError",
+      configId: "approveForMe",
+      reason: "restricted",
+      cause: external,
+    },
+    { _tag: "AcpPromptAdmissionError", configId: "approveForMe", cause: external },
+  ]) {
+    const opened = new ProviderAdapter.ProviderAdapterOpenSessionError({
+      driver: ProviderDriverKind.make("kiro"),
+      providerSessionId: ProviderSessionId.make("private-session-id"),
+      cause,
+    });
+    const wrapped = { _tag: "ProviderSessionOpenError", cause: opened };
+    const failure = makeProviderFailure({
+      cause: wrapped,
+      message: knownProviderFailureMessage(wrapped) ?? opened.message,
+      class: "provider_error",
+    });
+    assert.include(failure.message, "Native Approve for Me");
+    assert.include(failure.message, "Supervised");
+    assert.notInclude(failure.message, "private");
+    assert.notInclude(failure.message, "account.test");
+    const turn = new ProviderAdapter.ProviderAdapterTurnStartError({
+      driver: ProviderDriverKind.make("kiro"),
+      threadId: ThreadId.make("t"),
+      providerThreadId: ProviderThreadId.make("p"),
+      runId: RunId.make("r"),
+      cause: new ProviderAdapter.ProviderAdapterTurnPreparationError({
+        driver: ProviderDriverKind.make("kiro"),
+        cause,
+      }),
+    });
+    assert.equal(makeProviderFailure({ cause: Cause.fail(turn) }).message, failure.message);
+  }
+});
+
 it("names how the provider process exited and the stage it failed in, without its output", () => {
   for (const [exit, status] of [
     [{ signal: "SIGILL" }, " after signal SIGILL"],
@@ -141,6 +195,24 @@ it("names how the provider process exited and the stage it failed in, without it
 
 it("keeps unrecognized reasons and provider text out of category messages", () => {
   for (const cause of [
+    {
+      _tag: "AcpRequestError",
+      code: -32602,
+      message: "private Approve for Me reason",
+      data: { configId: "approveForMe" },
+    },
+    {
+      _tag: "AcpSessionConfigError",
+      configId: "unknown",
+      reason: "unavailable",
+      message: "private",
+    },
+    {
+      _tag: "AcpSessionConfigError",
+      configId: "approveForMe",
+      reason: "unknown",
+      message: "private",
+    },
     "Private launch command",
     { _tag: "ProviderAdapterProtocolError", detail: "Pi model 'private-config' is invalid" },
     { _tag: "ProviderAdapterProtocolError", reason: "private-config" },

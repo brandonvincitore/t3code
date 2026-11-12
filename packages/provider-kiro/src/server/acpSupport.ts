@@ -8,7 +8,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import * as EffectAcpErrors from "effect-acp/errors";
+import type * as EffectAcpErrors from "effect-acp/errors";
 
 import {
   acpPermissionDisposition,
@@ -213,9 +213,10 @@ export const validateKiroRuntimePolicy = Effect.fn("KiroAcpSupport.validateRunti
           policy.maxRuntimeMode !== "auto" &&
           policy.maxRuntimeMode !== "full-access"))
     ) {
-      return yield* EffectAcpErrors.AcpRequestError.invalidParams(
-        "Kiro Approve for Me cannot enforce this approval, sandbox, Plan, or managed runtime restriction. Choose Supervised.",
-      );
+      return yield* new AcpSessionRuntime.AcpSessionConfigError({
+        configId: KIRO_APPROVE_FOR_ME_CONFIG_ID,
+        reason: "restricted",
+      });
     }
   },
 );

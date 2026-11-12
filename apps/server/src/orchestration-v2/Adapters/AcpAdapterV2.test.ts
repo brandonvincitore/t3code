@@ -571,9 +571,9 @@ function makeMockRuntime(input: {
     runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
     runtimeOrdinal: number,
   ) => AcpSessionRuntime.AcpSessionRuntime["Service"];
-}): AcpAdapterV2Flavor["makeRuntime"] {
+}) {
   let runtimeOrdinal = 0;
-  return (runtimeInput) =>
+  return (runtimeInput: AcpAdapterV2RuntimeInput) =>
     Effect.gen(function* () {
       runtimeOrdinal += 1;
       const protocolEvents = input.protocolEvents;

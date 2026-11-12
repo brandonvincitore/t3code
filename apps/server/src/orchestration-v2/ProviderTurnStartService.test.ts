@@ -49,6 +49,7 @@ import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { AcpSessionConfigError } from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
@@ -1634,11 +1635,31 @@ effectIt.effect("starts another provider in the same checkout while a turn is pe
   }),
 );
 
-effectIt.effect("terminalizes a starting run when its provider session cannot open", () =>
+effectIt.effect.each([
+  {
+    cause: new Error("DESCRIPTION is not valid ACP JSON"),
+    message: "DESCRIPTION is not valid ACP JSON",
+  },
+  ...(["unavailable", "rejected"] as const).map((reason) => ({
+    cause: new ProviderAdapter.ProviderAdapterOpenSessionError({
+      driver: ProviderDriverKind.make("kiro"),
+      providerSessionId: ProviderSessionId.make("native-approval-open"),
+      cause: new AcpSessionConfigError({
+        configId: "approveForMe",
+        reason,
+        cause: new Error("private native diagnostic"),
+      }),
+    }),
+    message:
+      reason === "unavailable"
+        ? "Native Approve for Me is unavailable or did not confirm activation. Choose Supervised to continue."
+        : "Native Approve for Me activation was rejected or failed. Choose Supervised to continue.",
+  })),
+])("terminalizes a starting run when its provider session cannot open (%j)", ({ cause, message }) =>
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
       text: "Continue",
-      openFailure: new Error("DESCRIPTION is not valid ACP JSON"),
+      openFailure: cause,
     });
 
     yield* harness.start;
@@ -1662,7 +1683,7 @@ effectIt.effect("terminalizes a starting run when its provider session cannot op
         status: "failed",
         failure: {
           class: "provider_error",
-          message: "DESCRIPTION is not valid ACP JSON",
+          message,
         },
       },
     ]);

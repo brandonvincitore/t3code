@@ -410,7 +410,7 @@ export interface AcpAdapterV2Flavor {
     input: AcpAdapterV2RuntimeInput,
   ) => Effect.Effect<
     AcpSessionRuntime.AcpSessionRuntime["Service"],
-    EffectAcpErrors.AcpError,
+    EffectAcpErrors.AcpError | AcpSessionRuntime.AcpSessionConfigError,
     ChildProcessSpawner.ChildProcessSpawner | SecureRandom.SecureRandom | Scope.Scope
   >;
   readonly customModels?: ReadonlyArray<string>;
@@ -463,7 +463,7 @@ export interface AcpAdapterV2Flavor {
   readonly runtimePolicyKey?: (policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy) => string;
   readonly validateRuntimePolicy?: (
     policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
-  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError | AcpSessionRuntime.AcpSessionConfigError>;
   /**
    * The runtime mode a native session mode grants, for flavors whose modes are permission levels.
    * Under a policy ceiling, a mode the user picks that this does not place under it is not applied.
@@ -2074,7 +2074,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const nativeBuildConfigurationBySessionId = new Map<string, AcpNativeBuildConfiguration>();
         const initialSessionActivationFailure = yield* Ref.make<{
           readonly sessionId: string;
-          readonly error: EffectAcpErrors.AcpError;
+          readonly error: EffectAcpErrors.AcpError | AcpSessionRuntime.AcpSessionConfigError;
         } | null>(null);
         const activeSessionSetup =
           yield* Ref.make<AcpSessionRuntime.AcpSessionRuntimeStartResult | null>(null);
@@ -8285,16 +8285,29 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             if (typeof selection.value === "boolean") {
               const unavailable = () =>
-                EffectAcpErrors.AcpRequestError.invalidParams(
-                  `Native ${flavor.runtimeHarness} ${selection.id} is unavailable: a boolean option and verified activation are required.`,
-                );
+                new AcpSessionRuntime.AcpSessionConfigError({
+                  configId: selection.id,
+                  reason: "unavailable",
+                });
               if (option?.type !== "boolean") {
                 if (selection.required) return yield* unavailable();
                 continue;
               }
-              const response = yield* runtime.setConfigOption(selection.id, selection.value, {
-                force: true,
-              });
+              const response = yield* runtime
+                .setConfigOption(selection.id, selection.value, {
+                  force: true,
+                })
+                .pipe(
+                  Effect.mapError((cause) =>
+                    selection.required
+                      ? new AcpSessionRuntime.AcpSessionConfigError({
+                          configId: selection.id,
+                          reason: "rejected",
+                          cause,
+                        })
+                      : cause,
+                  ),
+                );
               const echoed = response.configOptions.find(
                 (candidate) => candidate.id === selection.id,
               );

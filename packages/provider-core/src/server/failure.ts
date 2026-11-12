@@ -89,6 +89,15 @@ const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
   attachment_unreadable: "an attachment could not be read",
 };
 
+const NATIVE_APPROVAL_GUIDANCE = {
+  unavailable:
+    "Native Approve for Me is unavailable or did not confirm activation. Choose Supervised to continue.",
+  rejected:
+    "Native Approve for Me activation was rejected or failed. Choose Supervised to continue.",
+  restricted:
+    "Native Approve for Me cannot enforce this thread's approval, sandbox, Plan, or managed restrictions. Choose Supervised to continue.",
+} as const;
+
 /**
  * Walks a cause chain for curated text without reading arbitrary provider
  * defect text. `known` is the message of a domain error T3 raised itself;
@@ -117,6 +126,29 @@ function curatedCauseMessages(cause: unknown): {
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
+        case "AcpSessionConfigError": {
+          const config = cause as Record<string, unknown>;
+          if (
+            config.configId === "approveForMe" &&
+            typeof config.reason === "string" &&
+            Object.hasOwn(NATIVE_APPROVAL_GUIDANCE, config.reason)
+          ) {
+            return {
+              known:
+                NATIVE_APPROVAL_GUIDANCE[config.reason as keyof typeof NATIVE_APPROVAL_GUIDANCE],
+              category: categoryMessage(),
+            };
+          }
+          break;
+        }
+        case "AcpPromptAdmissionError":
+          if ((cause as Record<string, unknown>).configId === "approveForMe")
+            return {
+              known:
+                "Native Approve for Me changed before the prompt could be sent. Retry Auto or choose Supervised to continue.",
+              category: categoryMessage(),
+            };
+          break;
         case "ContextHandoffBudgetError":
           return { known: new ContextHandoffBudgetError().message, category: categoryMessage() };
         case "ContextHandoffBackgroundWorkError":
