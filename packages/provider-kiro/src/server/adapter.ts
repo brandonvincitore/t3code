@@ -19,6 +19,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpSchema from "effect-acp/compat";
+import { initializeKiroThreadTitle } from "./nativeTitle.ts";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
@@ -737,6 +738,7 @@ function makeKiroAcpAdapterFlavor(
     driver: KIRO_PROVIDER,
     runtimeHarness: "Kiro",
     capabilities: KiroProviderCapabilitiesV2,
+    initializeThreadTitle: initializeKiroThreadTitle,
     getModelContextWindow: kiroModelContextWindow,
     contextUsageFromSession: kiroContextUsageFromSession,
     contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,

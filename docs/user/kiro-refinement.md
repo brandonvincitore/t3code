@@ -41,6 +41,14 @@ not copy or synchronize them. Native Kiro sessions on the server can be imported
 Settings → Providers → Kiro → Sessions for a selected project. Imported conversations retain
 their existing T3 owner when one exists.
 
+New local Kiro conversations receive the T3 title, or a short seed from your first message,
+before that message runs when the CLI advertises native renaming. This does not call a title
+model. Existing native names and imported or resumed conversations are left alone. Later T3
+title generation and manual renaming change the T3 name only, so the two names can differ.
+Rename the native conversation in Kiro CLI when needed. An unsupported or failed native
+rename does not prevent your message from running. A simultaneous CLI rename during initial
+creation can still race with the initial name.
+
 ## Connect an organization's Kiro account
 
 Install and sign in to Kiro CLI on the **server machine**, using your organization's existing

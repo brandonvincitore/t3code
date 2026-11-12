@@ -112,7 +112,7 @@ function makeSourceProjection(sourceRun: OrchestrationV2Run): OrchestrationV2Thr
 const planFork = (
   sourceRun: OrchestrationV2Run,
   sourceProjection = makeSourceProjection(sourceRun),
-  options: { readonly sideChat?: boolean } = {},
+  options: { readonly sideChat?: boolean; readonly title?: string | null } = {},
 ) =>
   Effect.gen(function* () {
     const service = yield* ThreadForkService.ThreadForkServiceV2;
@@ -126,8 +126,8 @@ const planFork = (
       },
       transferId: ContextTransferId.make("context-transfer:fork-snoozed-source"),
       targetThreadId,
-      title: "Awake fork",
-      ...options,
+      ...(options.title === null ? {} : { title: options.title ?? "Awake fork" }),
+      ...(options.sideChat === undefined ? {} : { sideChat: options.sideChat }),
       createdBy: "user",
       creationSource: "mobile",
       createdAt: forkCreatedAt,
@@ -200,11 +200,13 @@ it.effect("starts a fork without the source thread's pending title regeneration"
     };
     const sourceProjection = {
       ...makeSourceProjection(sourceRun),
-      thread: { ...makeSourceThread(), titleRegeneration },
+      thread: { ...makeSourceThread(), titleRegeneration, titleManuallySet: true },
     };
-    const result = yield* planFork(sourceRun, sourceProjection);
+    const result = yield* planFork(sourceRun, sourceProjection, { title: null });
 
     assert.isNull(result.targetThread.titleRegeneration);
+    assert.equal(result.targetThread.titleManuallySet, false);
+    assert.equal(sourceProjection.thread.titleManuallySet, true);
     assert.deepEqual(sourceProjection.thread.titleRegeneration, titleRegeneration);
   }),
 );

@@ -22,6 +22,7 @@ import {
 import { resolveSelfInvocation } from "@t3tools/shared/nodeRuntime";
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
 import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -41,7 +42,7 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import { makeAssistantStreamingFilter } from "../assistantStreaming.ts";
 import { makeProviderEventRoutingState, routeProviderEvent } from "../RunExecutionService.ts";
-import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
   knownProviderFailureMessage,
   refusedBeforePrompt,
@@ -53,11 +54,13 @@ import {
   type ProviderAdapterV2Event,
   type ProviderAdapterV2ThreadSnapshot,
   ProviderAdapterV2RuntimePolicy,
+  type ProviderAdapterV2TurnInput,
 } from "@t3tools/provider-core/server/ProviderAdapter";
 import {
   decodeAcpReplayTranscript,
   makeAcpReplayCompletenessAssertion,
   makeAcpReplayRuntime,
+  makeTurnInput,
 } from "./AcpAdapterV2.testkit.ts";
 import {
   makeProviderReplayGate,
@@ -482,6 +485,8 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   ) => AcpSessionRuntime.AcpSessionRuntime["Service"]["prompt"];
   /** The user's message text for every turn. */
   readonly text?: string;
+  readonly title?: string;
+  readonly transformTurn?: (turn: ProviderAdapterV2TurnInput) => ProviderAdapterV2TurnInput;
   /** Where the adapter records advertised skills. */
   readonly skills?: KiroSkills;
   readonly drive: (session: {
@@ -516,6 +521,8 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly rollbackToStart: Effect.Effect<void, ProviderAdapterV2Error>;
     readonly disconnect: Effect.Effect<void>;
+    readonly ensureTitle: (title: string) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly resume: Effect.Effect<void, ProviderAdapterV2Error>;
 
     readonly hasPendingBackgroundWork: Effect.Effect<boolean>;
     readonly stopWorkflow: (taskId: string) => Effect.Effect<void, ProviderAdapterV2Error>;
@@ -644,18 +651,22 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       return;
     }
     const session = yield* open;
-    let providerThread = yield* session.ensureThread({ threadId, modelSelection, runtimePolicy });
+    let providerThread = yield* session.ensureThread({
+      threadId,
+      modelSelection,
+      runtimePolicy,
+    });
     const now = yield* DateTime.now;
     const startTurnOn = (ordinal: number, model: string, options?: ModelSelection["options"]) => {
       const suffix = `${threadId}:${ordinal}`;
       const turnSelection = { instanceId, model, ...(options === undefined ? {} : { options }) };
-      return session.startTurn({
+      const turn: ProviderAdapterV2TurnInput = {
         appThread: {
           createdBy: "user",
           creationSource: "web",
           id: threadId,
           projectId: ProjectId.make(`project:${threadId}`),
-          title: "Kiro adapter test",
+          title: input.title ?? "Kiro adapter test",
           providerInstanceId: instanceId,
           modelSelection: turnSelection,
           runtimeMode: runtimePolicy.runtimeMode,
@@ -689,7 +700,8 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
         },
         modelSelection: turnSelection,
         runtimePolicy,
-      });
+      };
+      return session.startTurn(input.transformTurn?.(turn) ?? turn);
     };
     yield* input.drive({
       events: session.events,
@@ -718,6 +730,13 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
           ...(answers === undefined ? {} : { answers }),
         }),
       disconnect: Effect.suspend(() => disconnect),
+      ensureTitle: (title) =>
+        session
+          .ensureThread({ threadId, modelSelection, runtimePolicy, title })
+          .pipe(Effect.asVoid),
+      resume: Effect.suspend(() =>
+        session.resumeThread({ providerThread, modelSelection, runtimePolicy }),
+      ).pipe(Effect.asVoid),
       forceReplacement: (overrides) =>
         Effect.gen(function* () {
           const nextPolicy = { ...runtimePolicy, ...overrides };
@@ -764,6 +783,487 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     { discard: true },
   );
 });
+
+const nativeTitleInitialize = {
+  ...KIRO_V3_INITIALIZE,
+  agentCapabilities: {
+    ...KIRO_V3_INITIALIZE.agentCapabilities,
+    sessionCapabilities: {},
+    _meta: { kiro: { extensionMethods: ["_kiro/session/rename"] } },
+  },
+};
+
+it.effect.each([
+  { title: "  My deliberate name  ", text: "Fix login", expected: "My deliberate name" },
+  { title: "New thread", text: "\n Fix login\nMore details", expected: "Fix login" },
+  { title: "x".repeat(76) + "😀abcdef", text: "Fix login", expected: "x".repeat(76) + "..." },
+])("initial native title is meaningful and precedes the first prompt: $expected", (row) =>
+  runKiroScript({
+    scenario: "initial-native-title",
+    ...row,
+    frames: [
+      ...openSessionFrames({
+        initialize: nativeTitleInitialize,
+        configOptions: [autopilotOption("on")],
+      }),
+      outbound("_kiro/session/rename", {
+        sessionId: SESSION_ID,
+        title: row.expected,
+        sessionSource: "local",
+      }),
+      answer("_kiro/session/rename", { success: true }),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+    ],
+    drive: ({ events, startTurn, startTurnOn, ensureTitle }) =>
+      Effect.gen(function* () {
+        yield* startTurn;
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        yield* ensureTitle("A later generated or manual T3 title");
+        yield* startTurnOn(2, "default");
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.effect.each([false, "error", "gone", "malformed"] as const)(
+  "initial native title failure %s preserves the prompt without retrying rename",
+  (outcome) =>
+    runKiroScript({
+      scenario: `native-title-${outcome}`,
+      title: "Keep task",
+      frames: [
+        ...openSessionFrames({
+          initialize: nativeTitleInitialize,
+          configOptions: [autopilotOption("on")],
+        }),
+        outbound("_kiro/session/rename", {
+          sessionId: SESSION_ID,
+          title: "Keep task",
+          sessionSource: "local",
+        }),
+        typeof outcome === "boolean" || outcome === "malformed"
+          ? answer("_kiro/session/rename", outcome === "malformed" ? {} : { success: outcome })
+          : {
+              type: "emit_inbound",
+              label: "rename.error",
+              frame: {
+                kind: "response",
+                method: "_kiro/session/rename",
+                error: {
+                  code: outcome === "gone" ? -32601 : -32603,
+                  message: "Synthetic rename failure",
+                },
+              },
+            },
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+      ],
+      drive: ({ events, startTurn, startTurnOn }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          yield* startTurnOn(2, "default");
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.effect("initial native title timeout preserves one prompt", () =>
+  Effect.gen(function* () {
+    const received = yield* Deferred.make<void>();
+    yield* runKiroScript({
+      scenario: "native-title-timeout",
+      title: "Keep task",
+      frames: [
+        ...openSessionFrames({
+          initialize: nativeTitleInitialize,
+          configOptions: [autopilotOption("on")],
+        }),
+        outbound("_kiro/session/rename", {
+          sessionId: SESSION_ID,
+          title: "Keep task",
+          sessionSource: "local",
+        }),
+        update({ sessionUpdate: "session_info_update", _meta: { fixtureRenameReceived: true } }),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+      ],
+      onSessionUpdate: (notification) =>
+        notification.update.sessionUpdate === "session_info_update"
+          ? Deferred.succeed(received, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      drive: ({ events, startTurn }) =>
+        Effect.gen(function* () {
+          const starting = yield* startTurn.pipe(Effect.forkScoped);
+          yield* Deferred.await(received);
+          yield* TestClock.adjust("5 seconds");
+          yield* Fiber.join(starting);
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }).pipe(Effect.scoped),
+    });
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.effect.each([
+  "unadvertised",
+  "native-title",
+  "native-event",
+  "unknown-source",
+  "remote",
+  "blank",
+] as const)("initial native title preserves %s sessions", (state) => {
+  const frames = openSessionFrames({
+    initialize: state === "unadvertised" ? KIRO_V3_INITIALIZE : nativeTitleInitialize,
+    configOptions: [autopilotOption("on")],
+  }).map((entry) => {
+    const frame = entry.frame as { method?: string; result?: ReturnType<typeof sessionSetup> };
+    if (frame.method !== "session/new" || frame.result === undefined) return entry;
+    return {
+      ...entry,
+      frame: {
+        ...frame,
+        result: {
+          ...frame.result,
+          _meta: {
+            ...frame.result._meta,
+            ...(state === "native-title" ? { title: "CLI manual name" } : {}),
+            ...(state === "unknown-source"
+              ? { source: undefined }
+              : state === "remote"
+                ? { source: "remote" }
+                : {}),
+          },
+        },
+      },
+    };
+  });
+  return Effect.gen(function* () {
+    const observed = yield* Deferred.make<void>();
+    yield* runKiroScript({
+      scenario: `native-title-preserve-${state}`,
+      onSessionUpdate: (notification) =>
+        notification.update.sessionUpdate === "session_info_update"
+          ? Deferred.succeed(observed, undefined).pipe(Effect.asVoid)
+          : Effect.void,
+      title: state === "blank" ? "New thread" : "App title",
+      text: state === "blank" ? "  " : "Fix login",
+      frames: [
+        ...frames,
+        ...(state === "native-event"
+          ? [update({ sessionUpdate: "session_info_update", title: "CLI manual name" })]
+          : []),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...(state === "unadvertised" ? closeSession : []),
+      ],
+      drive: ({ events, startTurn }) =>
+        Effect.gen(function* () {
+          if (state === "native-event") yield* Deferred.await(observed);
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    });
+  }).pipe(Effect.provide(testLayer), Effect.scoped);
+});
+
+it.effect.each([
+  "resume",
+  "child",
+  "foreign-instance",
+  "sibling",
+  "history",
+  "fork",
+  "replacement",
+  "rollback",
+] as const)("initial native title permission is withdrawn for %s", (scope) =>
+  runKiroScript({
+    scenario: `native-title-scope-${scope}`,
+    title: "App title",
+    frames: [
+      ...openSessionFrames({
+        initialize: nativeTitleInitialize,
+        configOptions: [autopilotOption("on")],
+      }),
+      ...(scope === "replacement" || scope === "rollback"
+        ? []
+        : scope === "sibling"
+          ? [
+              outbound("session/load", {
+                sessionId: "sibling-native",
+                cwd: "<workspace>",
+                mcpServers: "<any>",
+              }),
+              answer("session/load", {
+                configOptions: [],
+                _meta: { source: "local", title: "CLI sibling name" },
+              }),
+              outbound("session/prompt", { sessionId: "sibling-native", prompt: "<any>" }),
+              answer("session/prompt", { stopReason: "end_turn" }),
+            ]
+          : [turnPrompt, answer("session/prompt", { stopReason: "end_turn" })]),
+    ],
+    ...(scope === "replacement" || scope === "rollback"
+      ? {
+          replacementFrames: [
+            ...openSessionFrames({
+              initialize: nativeTitleInitialize,
+              configOptions: [autopilotOption("on")],
+            }),
+            turnPrompt,
+            answer("session/prompt", { stopReason: "end_turn" }),
+          ],
+        }
+      : {}),
+    transformTurn: (turn) => ({
+      ...turn,
+      ...(scope === "history" ? { nativeThreadHasTurns: true } : {}),
+      appThread:
+        scope !== "child"
+          ? turn.appThread
+          : {
+              ...turn.appThread,
+              lineage: { ...turn.appThread.lineage, parentThreadId: ThreadId.make("parent") },
+            },
+      providerThread: {
+        ...turn.providerThread,
+        ...(scope === "foreign-instance"
+          ? { providerInstanceId: ProviderInstanceId.make("other-kiro") }
+          : {}),
+        ...(scope === "sibling"
+          ? {
+              nativeThreadRef: {
+                driver: KIRO_PROVIDER,
+                nativeId: "sibling-native",
+                strength: "strong" as const,
+              },
+            }
+          : {}),
+        ...(scope === "fork" ? { forkedFrom: { providerThreadId: turn.providerThread.id } } : {}),
+      },
+    }),
+    drive: ({ events, startTurn, resume, forceReplacement, rollbackToStart }) =>
+      Effect.gen(function* () {
+        if (scope === "resume") yield* resume;
+        if (scope === "replacement") yield* forceReplacement({});
+        if (scope === "rollback") yield* rollbackToStart;
+        yield* startTurn;
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.effect("initial native title never renames an imported or reconnected native session", () =>
+  runKiroScript({
+    scenario: "native-title-import",
+    initialNativeThreadId: SESSION_ID,
+    title: "Different T3 name",
+    frames: [
+      outbound("initialize"),
+      answer("initialize", nativeTitleInitialize),
+      outbound("session/load", { sessionId: SESSION_ID, cwd: "<workspace>", mcpServers: "<any>" }),
+      answer("session/load", {
+        ...sessionSetup([]),
+        _meta: { source: "local", title: "CLI manual name" },
+      }),
+      turnPrompt,
+      answer("session/prompt", { stopReason: "end_turn" }),
+    ],
+    drive: ({ events, startTurn }) =>
+      Effect.gen(function* () {
+        yield* startTurn;
+        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+      }),
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
+
+it.live("initial native title persists through list, CLI manual rename and process reload", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-title-persistence-" });
+    const script = path.join(root, "peer.mjs");
+    const statePath = path.join(root, "state.json");
+    const wirePath = path.join(root, "wire.jsonl");
+    yield* fs.writeFileString(
+      script,
+      `
+import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { createInterface } from 'node:readline';
+const statePath = process.env.TITLE_FIXTURE_STATE;
+const wirePath = process.env.TITLE_FIXTURE_WIRE;
+const read = () => JSON.parse(readFileSync(statePath, 'utf8'));
+const save = state => writeFileSync(statePath, JSON.stringify(state));
+const sessionId = 'native-fresh-root';
+createInterface({ input: process.stdin }).on('line', line => {
+  const { id, method, params } = JSON.parse(line);
+  if (id === undefined) return;
+  appendFileSync(wirePath, JSON.stringify({ method,
+    ...(method === '_kiro/session/rename' ? { params } : {}),
+    ...(method === 'session/prompt' ? { sessionId: params.sessionId,
+      promptHash: createHash('sha256').update(JSON.stringify(params.prompt)).digest('hex'),
+      hasDisplayText: Object.hasOwn(params, 'displayText') } : {})
+  }) + '\\n');
+  let result = {};
+  if (method === 'initialize') result = { protocolVersion: 1, agentCapabilities: {
+    loadSession: true, sessionCapabilities: { list: {} },
+    _meta: { kiro: { extensionMethods: ['_kiro/session/rename'] } }
+  } };
+  else if (method === 'session/new') {
+    save({ sessionId, title: null, titleSetByUser: false, promptCount: 0 });
+    result = { sessionId, _meta: { source: 'local', title: null }, configOptions: [] };
+  } else if (method === '_kiro/session/rename') {
+    if (params.sessionId !== sessionId || params.sessionSource !== 'local') throw Error('Wrong binding');
+    const state = read();
+    if (state.promptCount !== 0) throw Error('Rename after prompt');
+    save({ ...state, title: params.title, titleSetByUser: true });
+    result = { success: true };
+  } else if (method === 'session/prompt') {
+    const state = read();
+    const fallback = params.prompt.filter(block => block.type === 'text').map(block => block.text).join('').split('\\n').find(line => line.trim());
+    save({ ...state, promptCount: state.promptCount + 1,
+      title: state.titleSetByUser ? state.title : fallback });
+    result = { stopReason: 'end_turn' };
+  } else if (method === 'session/list') {
+    result = { sessions: [{ sessionId, cwd: process.cwd(), title: read().title }] };
+  } else if (method === 'session/load') {
+    result = { _meta: { source: 'local', title: read().title }, configOptions: [] };
+  } else if (method === '_fixture/user-rename') {
+    save({ ...read(), title: 'CLI deliberate name', titleSetByUser: true });
+  }
+  process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\\n');
+});
+`,
+    );
+    const instanceId = ProviderInstanceId.make("kiro-title-persistence");
+    const threadId = ThreadId.make("title-persistence");
+    const modelSelection = { instanceId, model: "default" };
+    const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+      cwd: root,
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+    });
+    let peer: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+    const adapter = yield* makeKiroAdapterV2({
+      instanceId,
+      settings: ENABLED_KIRO_SETTINGS,
+      environment: {},
+      selfInvocation: yield* resolveSelfInvocation(),
+      makeRuntime: (input) =>
+        AcpSessionRuntime.make({
+          ...input,
+          spawn: {
+            command: process.execPath,
+            args: [script],
+            cwd: root,
+            env: { TITLE_FIXTURE_STATE: statePath, TITLE_FIXTURE_WIRE: wirePath },
+          },
+        }).pipe(
+          Effect.tap((runtime) =>
+            Effect.sync(() => {
+              peer = runtime;
+            }),
+          ),
+        ),
+    });
+    const now = yield* DateTime.now;
+    for (const reloaded of [false, true]) {
+      yield* Effect.gen(function* () {
+        const session = yield* adapter.openSession({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+          providerSessionId: ProviderSessionId.make(`title-process-${reloaded}`),
+          ...(reloaded ? { initialNativeThreadId: "native-fresh-root" } : {}),
+        });
+        const providerThread = yield* session.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+          title: "New thread",
+        });
+        const request = peer!.request;
+        const send = (ordinal: number, title: string) => {
+          const turn = makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now,
+            ordinal,
+            messageText: "Fix login\nDetails",
+          });
+          return session.startTurn({ ...turn, appThread: { ...turn.appThread, title } }).pipe(
+            Effect.andThen(collectTurn(session.events)),
+            Effect.tap((events) =>
+              Effect.sync(() => assert.equal(terminalStatus(events), "completed")),
+            ),
+          );
+        };
+        yield* send(1, reloaded ? "Different T3 title" : "New thread");
+        const list = yield* request("session/list", {});
+        assert.deepEqual(list, {
+          sessions: [
+            {
+              sessionId: "native-fresh-root",
+              cwd: root,
+              title: reloaded ? "CLI deliberate name" : "Fix login",
+            },
+          ],
+        });
+        if (!reloaded) {
+          yield* request("_fixture/user-rename", {});
+          yield* send(2, "Later generated T3 title");
+          yield* session.resumeThread({ providerThread, modelSelection, runtimePolicy });
+          yield* send(3, "Later manual T3 title");
+        }
+      }).pipe(Effect.scoped);
+    }
+    const saved = JSON.parse(yield* fs.readFileString(statePath));
+    const wire = (yield* fs.readFileString(wirePath))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(saved.title, "CLI deliberate name");
+    assert.equal(saved.titleSetByUser, true);
+    assert.equal(saved.promptCount, 4);
+    assert.deepEqual(
+      wire.filter((event) => event.method === "_kiro/session/rename"),
+      [
+        {
+          method: "_kiro/session/rename",
+          params: { sessionId: "native-fresh-root", title: "Fix login", sessionSource: "local" },
+        },
+      ],
+    );
+    assert.isTrue(
+      wire
+        .filter((event) => event.method === "session/prompt")
+        .every(
+          (event) => event.sessionId === "native-fresh-root" && event.hasDisplayText === false,
+        ),
+    );
+    yield* Effect.logInfo("Synthetic native title persistence evidence", { saved, wire });
+    const evidenceDir = Option.getOrUndefined(
+      yield* Config.option(Config.String("T3_KIRO_TITLE_TEST_EVIDENCE_DIR")),
+    );
+    if (evidenceDir) {
+      yield* fs.makeDirectory(evidenceDir, { recursive: true });
+      for (const [source, name] of [
+        [script, "synthetic-peer.mjs"],
+        [statePath, "synthetic-final-state.json"],
+        [wirePath, "actual-wire.jsonl"],
+      ] as const) {
+        yield* fs.copyFile(source, path.join(evidenceDir, name));
+      }
+    }
+  }).pipe(Effect.provide(testLayer), Effect.scoped),
+);
 
 it.live.each(["startup", "switch"] as const)(
   "keeps native Kiro history replay during %s load",

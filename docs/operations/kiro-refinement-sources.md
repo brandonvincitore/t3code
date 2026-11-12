@@ -241,3 +241,36 @@ Verification uses the free scripted ACP peer and focused tests. Native backend
 availability, plan charges, and live organization behavior remain unprobed.
 Client integration and independent review belong to the parent task. Earlier
 ledger bytes and all 131 unique source pins remain intact.
+
+## November 12 fork-owned initial native titles
+
+This is fork-owned Brandon work implemented with Codex (gpt-6.1-sol), based on
+`80914d275609d5797d3912cf4ab7b88ae34888cd`; it adopts no upstream PR or author.
+The parent's source-only Kiro 3.2 ACP audit uses bundle SHA256
+`fdcf34835ff8b8f9c536c1480e938734850917b9958d47ab4741c6f3585a1d90`, report
+`83cb52e8dca417e36f433cab2066d594cee971c1c7e5415c76b4d1d8c6ed6bf6` and
+40-extract evidence `63d179ed38d4767eb5d3a207e091a312b9dd462d8d211cd159016314fad638d9`.
+The ownership supplement report is
+`5ce9398d87c79745d005fc7d98aed90d441a9f59425badb9688048e8d2b9c3b7`, with
+18-extract evidence `2dcf37d221f3d45f8014dae8c4843a60aaf7a51aaad50d7b84d0bbbe36f7e8fa`.
+These supplied hashes are source references, not independent native execution.
+The public [ACP migration guide](https://kiro.dev/docs/cli/v3/acp-migration/)
+documents the optional rename extension; advertisement is required, regardless
+of version or compiled handler presence.
+
+One native rename attempt precedes the first prompt only for a demonstrably
+fresh local root. It reuses the meaningful T3 name or a clean request seed,
+without changing prompt content or invoking a title model. Observed native
+names, imported sessions and all later native lifetimes remain untouched.
+Kiro's rename API marks even this initial seed as user-set. Native title events
+and load/list responses do not expose reliable manual ownership, list entries
+can be stale, and rename has no compare-and-set: later T3 titles deliberately
+do not synchronize. A simultaneous external rename during the initial write
+remains an unavoidable race. Failure is nonessential and is not retried.
+T3 records deliberate names in its existing event-sourced thread metadata so
+first-message seeds preserve them; a new fork starts its own title ownership.
+
+Focused free tests use scripted ACP pipes and synthetic persistence. They do
+not execute native Kiro, an account, classifier or title model. Client proof,
+independent review and publication remain the parent's responsibility. All
+previous ledger bytes, source pins, PR rows and author credits are retained.

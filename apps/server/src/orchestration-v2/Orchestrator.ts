@@ -3064,6 +3064,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
+      titleManuallySet: command.titleManuallySet ?? command.title !== "New thread",
       providerInstanceId: command.modelSelection.instanceId,
       modelSelection: command.modelSelection,
       runtimeMode: command.runtimeMode,
@@ -4003,9 +4004,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                   ],
                 }),
             ...(command.regenerateTitle === true
-              ? { titleRegeneration: { requestId: command.commandId, startedAt: now } }
+              ? {
+                  titleRegeneration: { requestId: command.commandId, startedAt: now },
+                  titleManuallySet: false,
+                }
               : command.regenerateTitle === false || command.title !== undefined
-                ? { titleRegeneration: null }
+                ? { titleRegeneration: null, titleManuallySet: true }
                 : {}),
             updatedAt: now,
           };
@@ -5907,6 +5911,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       userMessages.length > 0 && userMessages.every(isNativeMaintenanceCommand);
     if (
       !isNativeMaintenanceCommand(command) &&
+      (projection.thread.titleManuallySet === false || projection.thread.title === "New thread") &&
       ((command.titleSeed !== undefined &&
         (yield* projectionStore
           .getMessageCount(command.threadId)

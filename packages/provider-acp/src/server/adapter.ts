@@ -421,6 +421,13 @@ export interface AcpAdapterV2Flavor {
    * is not inferred from the setup result.
    */
   readonly modelOptionArrivesLate?: boolean;
+  /** One attempt before a newly created root's first prompt; never restored by loading a session. */
+  readonly initializeThreadTitle?: (input: {
+    readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
+    readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
+    readonly turn: ProviderAdapter.ProviderAdapterV2TurnInput;
+    readonly observedTitle: string | null | undefined;
+  }) => Effect.Effect<void>;
   readonly getModelContextWindow?: (
     selection: ModelSelection,
     session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
@@ -1811,6 +1818,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
     openSession: Effect.fn("AcpAdapterV2.openSession")(
       function* (input: ProviderAdapter.ProviderAdapterV2OpenSessionInput) {
         const sessionScope = yield* Effect.scope;
+        let initialThreadTitlePending = false;
         let itemIdentityVersion: 2 | undefined =
           input.initialProviderItemIdentityVersion ??
           (input.initialNativeThreadId === undefined ? 2 : undefined);
@@ -7942,6 +7950,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         });
 
         const restartAcpRuntime = Effect.fnUntraced(function* (threadId: ThreadId | null) {
+          initialThreadTitlePending = false;
           yield* spawnAcpRuntime(threadId);
           yield* wireAcpRuntimeHandlers(runtime, yield* Ref.get(runtimeCallbackGeneration));
         });
@@ -7953,6 +7962,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             replacement: AcpSessionRuntime.AcpSessionRuntimeStartResult,
           ) => Effect.Effect<void>,
         ) {
+          initialThreadTitlePending = false;
           yield* flavor.validateRuntimePolicy?.(replacementPolicy) ?? Effect.void;
           const previousScope = runtimeScope;
           const previousGeneration = yield* Ref.get(runtimeCallbackGeneration);
@@ -8203,6 +8213,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           yield* setActiveSessionSetup(started);
         }
         rememberTerminalEnvironment(started.sessionId, yield* readMcpContext(input.threadId));
+        const initialTitleRuntime = runtime;
+        const initialTitleGeneration = yield* Ref.get(runtimeCallbackGeneration);
+        initialThreadTitlePending =
+          flavor.initializeThreadTitle !== undefined &&
+          input.initialNativeThreadId === undefined &&
+          input.resumeFromSession === undefined;
         const capabilities = negotiatedCapabilities(
           flavor.capabilities,
           started,
@@ -8222,6 +8238,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           sessionId: string,
           threadId: ThreadId | null,
         ) {
+          initialThreadTitlePending = false;
           const initialFailure = yield* Ref.modify(initialSessionActivationFailure, (failure) =>
             failure?.sessionId === sessionId ? [failure.error, null] : [undefined, failure],
           );
@@ -9313,6 +9330,33 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
               ),
             );
+            if (initialThreadTitlePending) {
+              initialThreadTitlePending = false;
+              if (
+                runtime === initialTitleRuntime &&
+                (yield* Ref.get(runtimeCallbackGeneration)) === initialTitleGeneration &&
+                requestedSessionId === started.sessionId &&
+                turnInput.threadId === input.threadId &&
+                turnInput.appThread.id === input.threadId &&
+                turnInput.appThread.lineage.parentThreadId === null &&
+                turnInput.appThread.forkedFrom === null &&
+                turnInput.providerThread.appThreadId === input.threadId &&
+                turnInput.providerThread.providerInstanceId === options.instanceId &&
+                turnInput.providerThread.forkedFrom === null &&
+                turnInput.nativeThreadHasTurns !== true
+              ) {
+                yield* (
+                  flavor.initializeThreadTitle?.({
+                    runtime,
+                    session: started,
+                    turn: turnInput,
+                    observedTitle: (yield* Ref.get(nativeMetadataBySessionId)).get(
+                      requestedSessionId,
+                    )?.title,
+                  }) ?? Effect.void
+                );
+              }
+            }
             yield* Ref.set(lastTurnRoute, {
               threadId: turnInput.threadId,
               providerThreadId: turnInput.providerThread.id,
@@ -10066,6 +10110,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }) {
               return yield* runtimeTransitionPermit.withPermit(
                 Effect.gen(function* () {
+                  initialThreadTitlePending = false;
                   yield* awaitRuntimeTeardown();
                   const sessionId = yield* nativeThreadId(driver, threadInput.providerThread);
                   yield* Ref.update(nativeMetadataBySessionId, (current) =>
@@ -10676,6 +10721,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                           snapshotInput.providerThread.appThreadId,
                         );
                         prepareTerminalEnvironment(mcpContext, sessionId);
+                        initialThreadTitlePending = false;
                         const activated = yield* withLoadingSession(
                           sessionId,
                           runtime.loadSession(sessionId, acpMcpActivation(mcpContext)),
@@ -10783,6 +10829,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             function* (forkInput) {
               return yield* runtimeTransitionPermit.withPermit(
                 Effect.gen(function* () {
+                  initialThreadTitlePending = false;
                   yield* awaitRuntimeTeardown();
                   useProviderThreadIdentity(forkInput.sourceProviderThread);
                   yield* restartRuntimeAfterTeardownIfRequired(

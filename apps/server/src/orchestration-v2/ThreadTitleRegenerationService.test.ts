@@ -146,6 +146,7 @@ function dispatchUserMessage(input: {
   readonly command: string;
   readonly threadId: ThreadId;
   readonly text: string;
+  readonly titleSeed?: string;
   readonly attachments?: ReadonlyArray<ChatAttachment>;
 }) {
   return Effect.gen(function* () {
@@ -156,6 +157,7 @@ function dispatchUserMessage(input: {
       threadId: input.threadId,
       messageId: MessageId.make(`${input.command}:message`),
       text: input.text,
+      ...(input.titleSeed === undefined ? {} : { titleSeed: input.titleSeed }),
       attachments: input.attachments ?? [],
       modelSelection,
       dispatchMode: { type: "defer_start" },
@@ -359,6 +361,42 @@ describe("ThreadTitleRegenerationService", () => {
         const renamed = yield* threads.getThreadProjection(threadId);
         assert.equal(renamed.thread.title, "Manual title");
         assert.isNotOk(renamed.thread.titleRegeneration);
+        yield* threads.dispatch({
+          type: "message.dispatch",
+          commandId: CommandId.make("command:title:manual:first-message"),
+          threadId,
+          messageId: MessageId.make("message:title:manual:first-message"),
+          text: "Fix login",
+          titleSeed: "Fix login",
+          attachments: [],
+          modelSelection,
+          dispatchMode: { type: "defer_start" },
+          createdBy: "user",
+          creationSource: "web",
+        });
+        const afterFirstMessage = yield* threads.getThreadProjection(threadId);
+        assert.equal(afterFirstMessage.thread.title, "Manual title");
+        assert.equal(afterFirstMessage.thread.titleManuallySet, true);
+        assert.isNotOk(afterFirstMessage.thread.titleRegeneration);
+        yield* threads.dispatch({
+          type: "thread.title.regeneration.complete",
+          commandId: CommandId.make("command:title:manual:late-complete"),
+          requestId: firstRequest,
+          threadId,
+          title: "Late generated title",
+        });
+        assert.equal((yield* threads.getThreadProjection(threadId)).thread.title, "Manual title");
+        const createdName = yield* createThread({
+          command: "command:title:chosen:create",
+          thread: "thread:title:chosen",
+        });
+        yield* dispatchUserMessage({
+          command: "command:title:chosen:message",
+          threadId: createdName,
+          text: "Fix login",
+          titleSeed: "Fix login",
+        });
+        assert.equal((yield* threads.getThreadProjection(createdName)).thread.title, "Seed title");
       }).pipe(Effect.provide(harness.layer));
     }),
   );

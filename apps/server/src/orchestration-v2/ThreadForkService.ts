@@ -111,6 +111,7 @@ export const layer: Layer.Layer<ThreadForkServiceV2> = Layer.succeed(
         creationSource: input.creationSource,
         id: input.targetThreadId,
         title: input.title ?? `${input.sourceProjection.thread.title} fork`,
+        titleManuallySet: input.title !== undefined,
         // The source's title job completes only on the source thread.
         titleRegeneration: null,
         activeProviderThreadId: null,
