@@ -34,7 +34,9 @@ const decodeSnapshot = Schema.decodeUnknownOption(
     ),
   }),
 );
-const decodeUrl = Schema.decodeUnknownOption(Schema.Struct({ url: Schema.String }));
+const decodeUrl = Schema.decodeUnknownOption(
+  Schema.Struct({ url: Schema.String, serverName: Schema.optionalKey(Schema.String) }),
+);
 
 type Runtime = Pick<
   AcpSessionRuntime.AcpSessionRuntime["Service"],
@@ -174,7 +176,8 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
     yield* runtime.handleExtRequest("_kiro/openExternalUrl", Schema.Unknown, (payload) =>
       Effect.gen(function* () {
         const attempt = state.attempt;
-        const url = Option.getOrUndefined(decodeUrl(payload))?.url;
+        const callback = Option.getOrUndefined(decodeUrl(payload));
+        const url = callback?.url;
         if (
           !attempt ||
           attempt.cancelled ||
@@ -184,6 +187,7 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
           !state.context ||
           (yield* state.context.currentSessionId) !== attempt.sessionId ||
           !url ||
+          (callback?.serverName !== undefined && callback.serverName !== attempt.serverName) ||
           !safeUrl(url)
         ) {
           return yield* new AcpErrors.AcpRequestError({
@@ -272,7 +276,7 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
         delivered: false,
         url: undefined,
       };
-      // No yield between checking and claiming: a URL has no session or server attribution.
+      // URL callbacks have no attempt identity; keep one owner until reset settles.
       if (state.attempt) return yield* new KiroMcpError({ code: "busy" });
       state.attempt = attempt;
       yield* state.runtime

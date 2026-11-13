@@ -131,7 +131,19 @@ describe("Kiro MCP sessions", () => {
           .pipe(Effect.flip);
         assert.equal(wrong.code, "attempt_unavailable");
         const url = "https://login.example.test/authorize?state=private-value";
-        yield* h.emit("_kiro/openExternalUrl", { url });
+        const foreignCallback = yield* Effect.exit(
+          h.emit("_kiro/openExternalUrl", {
+            url,
+            serverName: "another-server",
+            oauthCompletion: "connection-status",
+          }),
+        );
+        assert.isTrue(Exit.isFailure(foreignCallback));
+        yield* h.emit("_kiro/openExternalUrl", {
+          url,
+          serverName: "company",
+          oauthCompletion: "connection-status",
+        });
         assert.ok(
           !JSON.stringify(yield* h.support.getStatus("first", "owner")).includes("private-value"),
         );
