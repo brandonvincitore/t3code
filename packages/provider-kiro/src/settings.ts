@@ -31,6 +31,7 @@ export const KiroSettings = makeProviderSettingsSchema(
         description:
           "Use Kiro's default, disable memory, allow recall only, or allow learning. Applies to new or reopened sessions.",
         providerSettingsForm: {
+          control: "select",
           options: [
             { value: "default", label: "Kiro default" },
             { value: "disabled", label: "Off" },

@@ -2,6 +2,8 @@ import { RegistryContext } from "@effect/atom-react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   EnvironmentId,
+  ProjectId,
+  ThreadId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ProviderAuthState,
@@ -19,6 +21,15 @@ import { act, render } from "../../../test/render";
 
 const state = vi.hoisted(() => ({
   providers: null as unknown as Atom.Writable<ReadonlyArray<ServerProvider>>,
+  projects: [] as Array<{
+    id: ProjectId;
+    title: string;
+    workspaceRoot: string;
+    environmentId: EnvironmentId;
+  }>,
+  canOperate: false,
+  listSessions: vi.fn(),
+  importSession: vi.fn(),
   providerAuthQuery: null as unknown,
   providerAuth: null as ProviderAuthState | null,
   settings: null as unknown as UnifiedSettings,
@@ -48,6 +59,8 @@ vi.mock(import("../../state/server"), async (original) => {
   const providerAuth = Atom.make(null);
   state.providerAuthQuery = providerAuth;
   const commandLabels = {
+    listAcpRegistrySessions: "list-sessions",
+    importAcpRegistrySession: "import-session",
     refreshProviders: "refresh",
     updateProvider: "update",
     uninstallAcpRegistryManagedBinary: "uninstall",
@@ -75,6 +88,8 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
   ...(await original()),
   useAtomCommand: ((command: { label?: string }) =>
     ({
+      "list-sessions": state.listSessions,
+      "import-session": state.importSession,
       refresh: state.refresh,
       update: state.updateProvider,
       uninstall: state.uninstall,
@@ -122,7 +137,9 @@ vi.mock(import("../../state/session"), async (original) => {
       ? state.canManageProviders
       : requested === "settings:write"
         ? state.canWriteSettings
-        : requested === "orchestration:read");
+        : requested === "orchestration:operate"
+          ? state.canOperate
+          : requested === "orchestration:read");
   return {
     ...(await original()),
     useEnvironmentScope: scope as never,
@@ -131,7 +148,7 @@ vi.mock(import("../../state/session"), async (original) => {
 });
 vi.mock(import("../../state/entities"), async (original) => ({
   ...(await original()),
-  useProjects: (() => []) as never,
+  useProjects: (() => state.projects) as never,
 }));
 vi.mock(import("./settingsLayout"), async (original) => ({
   ...(await original()),
@@ -229,6 +246,10 @@ function panel(options?: {
 async function setup() {
   await page.viewport(1280, 900);
   state.settings = DEFAULT_UNIFIED_SETTINGS;
+  state.projects = [];
+  state.canOperate = false;
+  state.listSessions.mockReset();
+  state.importSession.mockReset();
   state.canManageProviders = true;
   state.canWriteSettings = true;
   state.searchTargetId = null;
@@ -249,6 +270,76 @@ async function setup() {
 }
 
 describe("EnvironmentProviderSettings routing", () => {
+  it.each(["kiro", "acpRegistry"])(
+    "routes %s native session actions through the selected environment's projects",
+    async (driver) => {
+      await setup();
+      const instanceId = ProviderInstanceId.make(driver);
+      const projectId = ProjectId.make("remote-project");
+      state.projects = [
+        {
+          id: ProjectId.make("local-project"),
+          title: "Other device project",
+          workspaceRoot: "/other",
+          environmentId: EnvironmentId.make("local-device"),
+        },
+        { id: projectId, title: "Remote project", workspaceRoot: "/work", environmentId },
+      ];
+      state.canOperate = true;
+      state.settings = {
+        ...DEFAULT_UNIFIED_SETTINGS,
+        providerInstances: {
+          [instanceId]: { driver: ProviderDriverKind.make(driver), enabled: true },
+        },
+      };
+      await setProviders([
+        {
+          ...provider(),
+          instanceId,
+          driver: ProviderDriverKind.make(driver),
+          nativeSessions: { canList: true, canLoad: true, canResume: true, canDelete: false },
+        },
+      ]);
+      const session = {
+        sessionId: "native-session",
+        cwd: "/work",
+        title: "Native conversation",
+        updatedAt: "2026-11-12T00:00:00Z",
+        importedThreadId: null,
+      };
+      state.listSessions.mockResolvedValue(
+        AsyncResult.success({ sessions: [session], nextCursor: null }),
+      );
+      state.importSession.mockResolvedValue(
+        AsyncResult.success({ imported: true, threadId: ThreadId.make("imported") }),
+      );
+      await using _screen = await render(panel({ targetInstanceId: instanceId }));
+      const project = page.getByRole("combobox", { name: "Project for ACP sessions" });
+      await userEvent.click(project);
+      await expect.element(page.getByRole("option", { name: "Remote project" })).toBeVisible();
+      await expect
+        .element(page.getByRole("option", { name: "Other device project" }))
+        .not.toBeInTheDocument();
+      await userEvent.keyboard("{Escape}");
+      await userEvent.click(page.getByRole("button", { name: "List sessions", exact: true }));
+      expect(state.listSessions).toHaveBeenCalledWith({
+        environmentId,
+        input: { instanceId, projectId },
+      });
+      await userEvent.click(page.getByRole("button", { name: "Import", exact: true }));
+      expect(state.importSession).toHaveBeenCalledWith({
+        environmentId,
+        input: {
+          instanceId,
+          projectId,
+          sessionId: session.sessionId,
+          title: session.title,
+          updatedAt: session.updatedAt,
+        },
+      });
+    },
+  );
+
   it("does not substitute another account when the requested instance was removed", async () => {
     await setup();
     await setProviders([provider()]);
