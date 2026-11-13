@@ -10,7 +10,11 @@ import * as ChildProcess from "effect/process/ChildProcess";
 
 import { createMuseSdkHost, makeMuseEnvironment } from "./sdk.ts";
 import { parseMuseVersion } from "./maintenance.ts";
-import { discoverMuseModels, museModelCapabilities } from "./modelCatalog.ts";
+import {
+  discoverMuseModels,
+  museModelCapabilities,
+  resolveMuseStartupTimeoutMs,
+} from "./modelCatalog.ts";
 import {
   buildServerProvider,
   COMPACT_SLASH_COMMAND,
@@ -120,13 +124,18 @@ export const checkMuseProviderStatus = Effect.fn("checkMuseProviderStatus")(func
       version,
       status: "error",
       auth: { status: "unknown" },
-      message: "Muse Code CLI is installed but failed to run.",
+      // T3 runs Muse with MUSE_NO_AUTO_UPDATE=1, so a launcher whose runtime was never fetched
+      // (common after a mise upgrade) refuses to install it; a manual run completes setup.
+      message: versionOutput.stderr.includes("installed binary is missing")
+        ? "Muse Code has not finished installing. Run `muse --version` on this T3 server host, then refresh its status."
+        : "Muse Code CLI is installed but failed to run.",
     });
   }
 
   const catalog = yield* discoverMuseModels(settings, museEnvironment, cwd, createHost).pipe(
     Effect.scoped,
-    Effect.timeoutOption(resolveProviderProbeTimeoutMs("muse", 12_000, museEnvironment)),
+    // Startup shares the override, so the catalog keeps its 4 seconds on top of it.
+    Effect.timeoutOption(resolveMuseStartupTimeoutMs(museEnvironment) + 4_000),
     Effect.result,
   );
   if (Result.isFailure(catalog) || Option.isNone(catalog.success)) {

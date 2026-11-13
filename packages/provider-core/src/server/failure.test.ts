@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 
 import {
   knownProviderFailureMessage,
+  refusedBeforePrompt,
   makeProviderFailure,
   makeProviderFailureTurnItem,
   MAX_PROVIDER_FAILURE_MESSAGE_LENGTH,
@@ -242,6 +243,23 @@ it("keeps unrecognized reasons and provider text out of category messages", () =
   );
 });
 
+it("names a managed Codex policy that refuses the thread's access mode", () => {
+  const message = makeProviderFailure({
+    cause: {
+      _tag: "ProviderAdapterTurnStartError",
+      cause: {
+        _tag: "CodexAppServerRequestError",
+        method: "turn/start",
+        code: -32600,
+        message:
+          "invalid thread settings override: invalid value for `sandbox_mode`: `DangerFullAccess` is not in the allowed set [ReadOnly, WorkspaceWrite] (set by /etc/codex/requirements.toml)",
+      },
+    },
+  }).message;
+  assert.notInclude(message, "Retry the turn");
+  assert.match(message, /requirements|policy/iu);
+});
+
 it("uses the innermost category without carrying an outer reason into it", () => {
   assert.equal(
     makeProviderFailure({
@@ -368,4 +386,39 @@ it.effect("keys terminal failure items by provider turn across retries and fallb
     assert.equal(firstAttempt.id, ingestorFallback.id);
     assert.equal(firstAttempt.ordinal, 101);
   }).pipe(Effect.provide(IdAllocator.layer)),
+);
+
+it.each([
+  {
+    driver: "claudeAgent",
+    detail: "Claude provider query ended before the turn could start.",
+    expected: true,
+  },
+  {
+    driver: "codex",
+    detail: "Claude provider query ended before the turn could start.",
+    expected: false,
+  },
+  {
+    driver: "claudeAgent",
+    detail: "Claude provider query ended after the turn started.",
+    expected: false,
+  },
+])(
+  "classifies exact pre-prompt Claude refusal ($driver, $expected)",
+  ({ driver, detail, expected }) => {
+    const cause = new ProviderAdapter.ProviderAdapterProtocolError({
+      driver: ProviderDriverKind.make(driver),
+      detail,
+    });
+    assert.equal(refusedBeforePrompt(cause), expected);
+    assert.equal(refusedBeforePrompt({ cause }), expected);
+    assert.isFalse(
+      refusedBeforePrompt({
+        _tag: "CodexAppServerRequestError",
+        method: "thread/goal/set",
+        code: -32600,
+      }),
+    );
+  },
 );

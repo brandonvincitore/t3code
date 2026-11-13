@@ -55,9 +55,11 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
+  ProviderAdapterTurnStartError,
   type ProviderAdapterV2Error,
   type ProviderAdapterV2Event,
   type ProviderAdapterV2ThreadSnapshot,
+  ProviderCompactionUnsupportedError,
   ProviderAdapterV2RuntimePolicy,
   type ProviderAdapterV2TurnInput,
 } from "@t3tools/provider-core/server/ProviderAdapter";
@@ -517,6 +519,8 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       model: string,
       options?: ModelSelection["options"],
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
+    /** Runs T3's compact action as turn `ordinal`. */
+    readonly compact: (ordinal: number) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly interrupt: (
       providerTurnId: ProviderTurnId,
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
@@ -672,7 +676,12 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       runtimePolicy,
     });
     const now = yield* DateTime.now;
-    const startTurnOn = (ordinal: number, model: string, options?: ModelSelection["options"]) => {
+    const turnInput = (
+      ordinal: number,
+      model: string,
+      options?: ModelSelection["options"],
+      text = input.text ?? "Say hello",
+    ): ProviderAdapterV2TurnInput => {
       const suffix = `${threadId}:${ordinal}`;
       const turnSelection = { instanceId, model, ...(options === undefined ? {} : { options }) };
       const turn: ProviderAdapterV2TurnInput = {
@@ -710,14 +719,22 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
           createdBy: "user",
           creationSource: "web",
           messageId: MessageId.make(`message:${suffix}`),
-          text: input.text ?? "Say hello",
+          text,
           attachments: [],
         },
         modelSelection: turnSelection,
         runtimePolicy,
       };
-      return session.startTurn(input.transformTurn?.(turn) ?? turn);
+      return input.transformTurn?.(turn) ?? turn;
     };
+    const startTurnOn = (ordinal: number, model: string, options?: ModelSelection["options"]) =>
+      session.startTurn(turnInput(ordinal, model, options));
+    const compact = (ordinal: number) =>
+      session.compactThread === undefined
+        ? Effect.die("Kiro adapter does not offer compactThread")
+        : session.compactThread(
+            turnInput(ordinal, modelSelection.model, input.options, "/compact"),
+          );
     yield* input.drive({
       events: session.events,
       readSnapshot: (nativeId) =>
@@ -737,6 +754,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
           runtimePolicy = { ...runtimePolicy, runtimeMode: mode };
           return startTurnOn(ordinal, modelSelection.model, input.options);
         }),
+      compact,
       interrupt: (providerTurnId) => session.interruptTurn({ providerThread, providerTurnId }),
       respond: (requestId, decision) => session.respondToRuntimeRequest({ requestId, decision }),
       answerQuestion: (requestId, answers) =>
@@ -2557,7 +2575,7 @@ createInterface({input: process.stdin}).on('line', line => {
           });
           assert.deepEqual(ignored, { configOptions: yield* runtime.getConfigOptions });
           assert.equal((yield* runtime.getConfigOptions)[0]?.currentValue, "files");
-          yield* runtime.setConfigOption("approveForMe", "on", { force: true });
+          yield* runtime.setConfigOption("approveForMe", "on", { resendCurrentValue: true });
           assert.equal((yield* runtime.getConfigOptions)[0]?.currentValue, "on");
           yield* runtime.prompt(
             { prompt: [{ type: "text", text: "Synthetic contract check" }] },
@@ -4260,7 +4278,7 @@ describe("KiroAdapterV2", () => {
     },
   );
 
-  it.effect("opens a session on a deployment that advertises no Kiro extensions", () =>
+  it.effect("opens a session and refuses compaction on a deployment with no Kiro extensions", () =>
     runKiroScript({
       scenario: "no-extensions",
       frames: [
@@ -4276,10 +4294,18 @@ describe("KiroAdapterV2", () => {
         }),
         answer("session/prompt", { stopReason: "end_turn" }),
       ],
-      drive: ({ events, startTurn }) =>
+      drive: ({ events, startTurn, compact }) =>
         Effect.gen(function* () {
           yield* startTurn;
           assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          // `_kiro/session/compact` is not advertised, so T3 must not send it.
+          const compacted = yield* Effect.exit(compact(2));
+          const error = Exit.isFailure(compacted) ? Cause.squash(compacted.cause) : undefined;
+          assert.instanceOf(error, ProviderAdapterTurnStartError);
+          assert.instanceOf(
+            (error as ProviderAdapterTurnStartError).cause,
+            ProviderCompactionUnsupportedError,
+          );
         }),
     }).pipe(Effect.provide(testLayer), Effect.scoped),
   );

@@ -7,18 +7,23 @@ import type {
 import * as Schema from "effect/Schema";
 
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
+import { mergeUsageCopies } from "./usageAggregation.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-const USAGE_SCAN_CACHE_VERSION = 12 as const;
+const USAGE_SCAN_CACHE_VERSION = 16 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
  * An older server sharing that directory cannot read a newer cache and would
  * replace it, dropping saved usage for deleted transcripts. Separate files keep
- * both.
+ * the newer one; older files are removed once it is saved.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v12.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v16.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v15.json",
+  "usage-scan-cache-v14.json",
+  "usage-scan-cache-v13.json",
+  "usage-scan-cache-v12.json",
   "usage-scan-cache-v11.json",
   "usage-scan-cache-v10.json",
   "usage-scan-cache-v9.json",
@@ -59,6 +64,7 @@ type SerializedRecord = readonly [
   speed: number,
   rateModelIndex?: number | null,
   unresolvedServiceTierTurnId?: string | null,
+  cacheCreation1hTokens?: number,
   credits?: number,
 ];
 
@@ -119,6 +125,7 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
       ? null
       : intern(tables.models, tables.modelIndex, record.rateModel),
     record.unresolvedServiceTierTurnId ?? null,
+    record.cacheCreation1hTokens ?? 0,
     ...(record.credits === undefined ? ([] as const) : ([record.credits] as const)),
   ];
   return {
@@ -135,32 +142,28 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
   };
 }
 
-/** Memoizes immutable entries by identity; growing intern tables preserve indexes, retaining unused strings until restart. */
+/** Yields the document in pieces so large caches never become one string; growing intern tables preserve indexes, retaining unused strings until restart. */
 export function makeScanCacheWriter(): (
   cache: ScanCache,
   extra: Readonly<Record<string, unknown>>,
-) => string {
+) => Iterable<string> {
   const tables = makeInternTables();
-  const fragments = new WeakMap<CachedFile, string>();
-  return (cache, extra) => {
-    const files: string[] = [];
-    for (const [path, entry] of cache) {
-      let fragment = fragments.get(entry);
-      if (fragment === undefined) {
-        fragment = JSON.stringify(serializeFile(entry, tables));
-        fragments.set(entry, fragment);
-      }
-      files.push(`${JSON.stringify(path)}:${fragment}`);
+  function* encode(entries: readonly (readonly [string, CachedFile])[], extra: object) {
+    yield '{"files":{';
+    for (const [index, [path, entry]] of entries.entries()) {
+      yield `${index === 0 ? "" : ","}${JSON.stringify(path)}:${JSON.stringify(serializeFile(entry, tables))}`;
     }
     // Encoded after the files, which may have added to the intern tables.
-    const head = JSON.stringify({
+    const tail = JSON.stringify({
       ...extra,
       version: USAGE_SCAN_CACHE_VERSION,
       models: tables.models,
       sessions: tables.sessions,
     });
-    return `${head.slice(0, -1)},"files":{${files.join(",")}}}`;
-  };
+    yield `},${tail.slice(1)}`;
+  }
+  // Snapshot now: the encoding runs later, while the file is written.
+  return (cache, extra) => encode([...cache], extra);
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
@@ -214,8 +217,17 @@ export function decodeScanCache(
         speedIndex,
         rateModelIndex,
         unresolvedServiceTierTurnId,
-        credits,
+        cacheCreationOrLegacyCredits,
+        currentCredits,
       ] = row as SerializedRecord;
+      // Fork v12 used this slot for Kiro credits before upstream added Claude cache tokens.
+      const legacyKiroCredits = version === 12 && provider === "kiro";
+      const credits = legacyKiroCredits
+        ? cacheCreationOrLegacyCredits
+        : version >= 16
+          ? currentCredits
+          : undefined;
+      const cacheCreation1h = legacyKiroCredits ? 0 : (cacheCreationOrLegacyCredits ?? 0);
       const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -225,6 +237,7 @@ export function decodeScanCache(
         !Number.isFinite(timestampMs) ||
         model === undefined ||
         (unresolvedServiceTierTurnId != null && typeof unresolvedServiceTierTurnId !== "string") ||
+        !Number.isFinite(cacheCreation1h) ||
         (rateModelIndex != null && rateModel === undefined) ||
         !Number.isFinite(uncached) ||
         !Number.isFinite(cached) ||
@@ -255,10 +268,11 @@ export function decodeScanCache(
           outputTokens: output,
           reasoningTokens: reasoning,
         },
+        ...(cacheCreation1h > 0 ? { cacheCreation1hTokens: cacheCreation1h } : {}),
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         speed,
-        ...(version >= 12 && typeof credits === "number" ? { credits } : {}),
-        ...(version >= 7 && typeof unresolvedServiceTierTurnId === "string"
+        ...(typeof credits === "number" ? { credits } : {}),
+        ...(version >= 7 && unresolvedServiceTierTurnId != null
           ? { unresolvedServiceTierTurnId }
           : {}),
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
@@ -296,19 +310,19 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
-    // v9 and v11 repair skipped Codex requests; clean v8+ entries stay served while unchanged.
-    // v10 adds Claude advisor calls, which no older Claude entry holds.
+    // v13 adds Claude 1-hour cache writes; v14 uses Codex request ledgers.
+    // v15 repairs skipped Codex requests whose counters rewound; clean v14 entries stay served.
     const legacy =
-      (entry.p === "claude" && version < 10) ||
+      (entry.p === "claude" && version < 13) ||
       (format.state !== undefined &&
         (version < 6 ||
-          (entry.p === "codex" && (version < 8 || (version < 11 && malformedRecords > 0)))));
+          (entry.p === "codex" && (version < 14 || (version < 15 && malformedRecords > 0)))));
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
-    // Before v11 a clean scan could end past an interrupted request whose usage its state dropped,
-    // so a grown file re-parses whole instead of resuming.
-    const resumable = !legacy && !(entry.p === "codex" && version < 11);
+    // Before v15 the state lacks the latest snapshot time that keeps a re-emitted older snapshot
+    // from billing twice, so a grown file re-parses whole instead of resuming.
+    const resumable = !legacy && !(entry.p === "codex" && version < 15);
 
     const provider = entry.p;
     const records = decodeRecords(entry.r, provider);
@@ -361,16 +375,18 @@ export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): num
   return removed;
 }
 
-/** Mutates seen; share it across incremental line/tail batches to deduplicate the whole file. */
-export function dedupeWithinFile(
-  records: readonly UsageRecord[],
-  seen: Set<string> = new Set(),
-): readonly UsageRecord[] {
+/** Pass only newline-terminated records: an unterminated tail can still change, so the aggregator merges it per scan. */
+export function dedupeWithinFile(records: readonly UsageRecord[]): readonly UsageRecord[] {
   const kept: UsageRecord[] = [];
+  const firstIndex = new Map<string, number>();
   for (const record of records) {
     if (record.dedupeKey !== null) {
-      if (seen.has(record.dedupeKey)) continue;
-      seen.add(record.dedupeKey);
+      const index = firstIndex.get(record.dedupeKey);
+      if (index !== undefined) {
+        kept[index] = mergeUsageCopies(kept[index]!, record);
+        continue;
+      }
+      firstIndex.set(record.dedupeKey, kept.length);
     }
     kept.push(record);
   }

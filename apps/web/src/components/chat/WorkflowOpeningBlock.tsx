@@ -23,7 +23,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
 import { AgentElapsed } from "./AgentElapsed";
 import { findRevealRef } from "./markdownFindContext";
-import { shouldCollapseUserMessage } from "./MessagesTimeline.logic";
+import { useTallEnoughToFold } from "./useTallEnoughToFold";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 
@@ -207,7 +207,7 @@ function WorkflowScript(props: {
 }) {
   const [expanded, setExpanded] = useState(false);
   const revealRef = findRevealRef(() => setExpanded(true));
-  const canFold = shouldCollapseUserMessage(props.script);
+  const { ref: contentRef, tallEnough: canFold } = useTallEnoughToFold();
   const folded = canFold && !expanded;
   return (
     <div>
@@ -222,7 +222,9 @@ function WorkflowScript(props: {
             : undefined
         }
       >
-        <ChatMarkdown text={scriptMarkdown(props.script, props.language)} cwd={undefined} />
+        <div ref={contentRef}>
+          <ChatMarkdown text={scriptMarkdown(props.script, props.language)} cwd={undefined} />
+        </div>
       </div>
       {canFold ? (
         <div className="-ms-1">

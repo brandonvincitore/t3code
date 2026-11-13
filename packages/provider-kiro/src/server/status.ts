@@ -36,13 +36,12 @@ import { kiroWorkflowPreferenceDescriptor } from "./workflowPreferences.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
-  COMPACT_SLASH_COMMAND,
   isCommandMissingCause,
   parseCliVersionResult,
-  providerProbeEnvironment,
   type ProviderProbeResult,
   providerModelsFromSettings,
   type ServerProviderDraft,
+  providerProbeEnvironment,
   spawnAndCollect,
 } from "@t3tools/provider-core/server/snapshotProbe";
 

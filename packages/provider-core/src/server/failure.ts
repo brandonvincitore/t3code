@@ -36,6 +36,9 @@ export class ContextHandoffBackgroundWorkError extends Schema.TaggedError<Contex
   }
 }
 
+export const CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL =
+  "Claude provider query ended before the turn could start.";
+
 // These Claude refusals happen before the process reads the prompt.
 const PROMPT_REFUSAL_TAGS = [
   "ClaudeBackgroundWorkBlocksQueryReplacementError",
@@ -52,6 +55,11 @@ export const refusedBeforePrompt = (error: unknown): boolean =>
   (Predicate.isTagged(error, "ProviderAdapterProtocolError") &&
     Predicate.hasProperty(error, "reason") &&
     error.reason === "attachment_unreadable") ||
+  (Predicate.isTagged(error, "ProviderAdapterProtocolError") &&
+    Predicate.hasProperty(error, "driver") &&
+    error.driver === "claudeAgent" &&
+    Predicate.hasProperty(error, "detail") &&
+    error.detail === CLAUDE_QUERY_ENDED_BEFORE_TURN_DETAIL) ||
   (Predicate.hasProperty(error, "cause") && refusedBeforePrompt(error.cause));
 
 export const MAX_PROVIDER_FAILURE_MESSAGE_LENGTH = 4_096;
@@ -83,6 +91,10 @@ const PROVIDER_FAILURE_CATEGORIES: Partial<
 // codex_protocol::protocol::validate_thread_goal_objective
 const CODEX_GOAL_VALIDATION_MESSAGE =
   /^goal objective must (?:not be empty|be at most \d{1,6} characters)$/u;
+
+// codex_config::ConstraintError::InvalidValue for a managed requirements.toml or cloud policy.
+const CODEX_ACCESS_REQUIREMENT_REJECTION =
+  /invalid value for `(approval_policy|sandbox_mode)`: `([A-Za-z]{1,32})` is not in the allowed set /u;
 
 const PROVIDER_FAILURE_REASONS: Record<ProviderAdapterFailureReason, string> = {
   previous_turn_active: "the previous turn is still running",
@@ -167,10 +179,11 @@ function curatedCauseMessages(cause: unknown): {
         case "CodexGoalObjectiveTooLongError":
         case "ProviderSetupError":
         case "ProviderAdapterThreadInUseError":
+        case "ProviderCompactionUnsupportedError":
           return { known: stringField(cause, "message"), category: categoryMessage() };
         case "CodexAppServerRequestError": {
-          // Only Codex's fixed-shape goal validation text is actionable and
-          // safe to show; other request error text stays hidden.
+          // Only Codex's fixed-shape goal validation and managed-requirements
+          // text is actionable and safe to show; other request error text stays hidden.
           const rejection = stringField(cause, "message");
           if (
             (cause as Record<string, unknown>).method === "thread/goal/set" &&
@@ -178,6 +191,14 @@ function curatedCauseMessages(cause: unknown): {
             CODEX_GOAL_VALIDATION_MESSAGE.test(rejection)
           ) {
             return { known: `Codex rejected the goal: ${rejection}.`, category: categoryMessage() };
+          }
+          const access =
+            rejection === undefined ? null : CODEX_ACCESS_REQUIREMENT_REJECTION.exec(rejection);
+          if (access !== null) {
+            return {
+              known: `Codex's managed requirements do not allow \`${access[1]}\` \`${access[2]}\`, which this thread's access mode uses. Switch the thread to an access mode the policy allows.`,
+              category: categoryMessage(),
+            };
           }
           break;
         }

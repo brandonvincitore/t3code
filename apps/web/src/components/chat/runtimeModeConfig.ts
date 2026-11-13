@@ -3,7 +3,13 @@ import {
   type ManagedPolicySummary,
   type RuntimeMode,
 } from "@t3tools/contracts";
-import { type LucideIcon, LockIcon, PenLineIcon, ShieldOffIcon, SparklesIcon } from "lucide-react";
+import {
+  type LucideIcon,
+  LockIcon,
+  PenLineIcon,
+  ShieldCheckIcon,
+  ShieldOffIcon,
+} from "lucide-react";
 
 export const runtimeModeConfig: Record<
   RuntimeMode,
@@ -23,7 +29,7 @@ export const runtimeModeConfig: Record<
     label: "Auto",
     description:
       "Native approval for routine actions. Kiro: Approve for Me uses your Kiro plan; uncertain actions still ask.",
-    icon: SparklesIcon,
+    icon: ShieldCheckIcon,
   },
   "full-access": {
     label: "Full access",

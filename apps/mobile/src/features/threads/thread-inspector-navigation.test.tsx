@@ -90,7 +90,7 @@ vi.mock("@t3tools/shared/orchestrationTiming", () => ({
   formatDuration: () => "",
 }));
 vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
-  useAdaptiveWorkspaceLayout: () => ({ fileInspector: { supported: true } }),
+  useWorkspacePaneState: () => ({ fileInspector: { supported: true } }),
 }));
 vi.mock("@react-navigation/native", async () => {
   const { createRequire } = await import("node:module");
