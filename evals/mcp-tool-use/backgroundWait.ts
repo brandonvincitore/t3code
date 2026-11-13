@@ -34,6 +34,7 @@ import * as CommandReceiptStore from "../../apps/server/src/orchestration-v2/Com
 import * as Orchestrator from "../../apps/server/src/orchestration-v2/Orchestrator.ts";
 import * as ProviderSessionManager from "../../apps/server/src/orchestration-v2/ProviderSessionManager.ts";
 import * as ThreadManagementService from "../../apps/server/src/orchestration-v2/ThreadManagementService.ts";
+import * as RunExecutionService from "../../apps/server/src/orchestration-v2/RunExecutionService.ts";
 import * as PeerForwarding from "../../apps/server/src/peer/PeerForwarding.ts";
 import * as PeerLinkRequests from "../../apps/server/src/peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../../apps/server/src/peer/PeerLinks.ts";
@@ -83,6 +84,7 @@ export const makeBackgroundWait = Effect.fn("evaluateMcpToolUse.makeBackgroundWa
           Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
             get: () => Effect.succeedSome(runtime),
           }),
+          Layer.mock(RunExecutionService.RunExecutionServiceV2)({}),
           ServerSettings.layerTest(),
           CommandReceiptStore.layer.pipe(Layer.provide(SqlitePersistence.layerMemory)),
         ),
