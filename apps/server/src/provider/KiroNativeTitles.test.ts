@@ -203,6 +203,9 @@ it.effect(
         assert.equal(yield* h.title, h.turn.appThread.title);
         yield* h.sync("Generated title");
         assert.equal(yield* h.title, "Generated title");
+        yield* h.sync("Manual T3 title", { manual: true });
+        assert.equal(yield* h.title, "Generated title");
+        assert.equal(h.renames(), 2);
         const restarted = yield* makeKiroNativeTitles(h.turn.providerThread.providerInstanceId);
         yield* h.bind(restarted);
         yield* Scope.close(h.scope, Exit.void);
@@ -275,7 +278,7 @@ it.effect(
       yield* h.sync("Closed runtime");
       assert.equal(h.renames(), 3);
       yield* h.sync("Manual T3 title", { manual: true });
-      yield* h.sync("Generated after observed relinquishment");
+      yield* h.sync("Generated while runtime remains closed");
       assert.equal(yield* h.title, "Retry confirmed");
 
       const racing = yield* fixture();

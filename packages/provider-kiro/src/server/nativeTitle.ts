@@ -463,7 +463,7 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
     const owner = ownerFor(input.runtime, input.providerThread);
     yield* lock.withPermit(
       Effect.gen(function* () {
-        if (input.appThread.titleManuallySet === true) owner.retired = true;
+        if (input.appThread.titleManuallySet === true) return;
         const filePath = yield* location(input.appThread, input.providerThread);
         if (owner.retired) return yield* retire(filePath, owner);
         const receipt = yield* readReceipt(filePath);
