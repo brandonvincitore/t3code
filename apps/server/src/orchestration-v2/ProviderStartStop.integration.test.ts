@@ -669,26 +669,26 @@ it.effect.each([
           return originalWrite(input);
         });
         const originalConsume = sink.consumeProviderEvents;
+        const consumePending: typeof originalConsume = (source, process, after, canBatch) =>
+          originalConsume(
+            source.pipe(
+              Stream.tap((event) =>
+                event.type === "provider_turn.updated" &&
+                "providerTurn" in event &&
+                event.providerTurn === active
+                  ? Deferred.succeed(ingestionHeld, undefined).pipe(
+                      Effect.andThen(Deferred.await(releaseIngestion)),
+                    )
+                  : Effect.void,
+              ),
+            ),
+            process,
+            after,
+            canBatch,
+          );
         using _pendingIngestion =
           scenario === "pending-ingestion"
-            ? vi
-                .spyOn(sink, "consumeProviderEvents")
-                .mockImplementation((source, ...args) =>
-                  originalConsume(
-                    source.pipe(
-                      Stream.tap((event) =>
-                        event.type === "provider_turn.updated" &&
-                        "providerTurn" in event &&
-                        event.providerTurn === active
-                          ? Deferred.succeed(ingestionHeld, undefined).pipe(
-                              Effect.andThen(Deferred.await(releaseIngestion)),
-                            )
-                          : Effect.void,
-                      ),
-                    ),
-                    ...args,
-                  ),
-                )
+            ? vi.spyOn(sink, "consumeProviderEvents").mockImplementation(consumePending)
             : undefined;
         yield* send("first");
         if (handoff) {
