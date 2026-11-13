@@ -7379,6 +7379,7 @@ it.layer(layerSharedApplicationDataPlaneTest)("snooze projection", (it) => {
         threadId,
         projectId,
         title: "Snoozed thread",
+        titleManuallySet: false,
         modelSelection,
         runtimeMode: "full-access",
         interactionMode: "default",

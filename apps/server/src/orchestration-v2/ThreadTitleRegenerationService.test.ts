@@ -103,6 +103,7 @@ function makeHarness(
         NodeServices.layer,
       ),
     ),
+    Layer.provide(layerOrchestrator),
   );
   return {
     layer: Layer.mergeAll(
@@ -516,6 +517,22 @@ describe("ThreadTitleRegenerationService", () => {
             thread: `thread:title:landing:${testCase.name}`,
             worktreePath: testCase.worktreePath,
           });
+          const original = yield* threads.getThreadProjection(threadId);
+          const eventSink = yield* EventSink.EventSinkV2;
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`${threadId}:native-bound`),
+                type: "thread.metadata-updated",
+                threadId,
+                occurredAt: original.thread.updatedAt,
+                payload: {
+                  ...original.thread,
+                  activeProviderThreadId: ProviderThreadId.make(`${threadId}:provider`),
+                },
+              },
+            ],
+          });
           yield* dispatchUserMessage({
             command: `command:title:landing:${testCase.name}:message`,
             threadId,
@@ -535,6 +552,14 @@ describe("ThreadTitleRegenerationService", () => {
           const projection = yield* threads.getThreadProjection(threadId);
           assert.equal(projection.thread.title, "Fresh title");
           assert.isNotOk(projection.thread.titleRegeneration);
+          const outbox = yield* EffectOutbox.EffectOutboxV2;
+          const effects = yield* outbox.listByCommandId(
+            CommandId.make(`${requestId}:title-complete`),
+          );
+          assert.deepEqual(
+            effects.map((effect) => effect.request.type),
+            ["thread-title.sync"],
+          );
         }
       }).pipe(Effect.provide(harness.layer));
     }).pipe(Effect.provide(NodeServices.layer)),

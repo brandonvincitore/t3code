@@ -273,6 +273,7 @@ function makeHarness(options: HarnessOptions = {}) {
         NodeServices.layer,
       ),
     ),
+    Layer.provide(layerOrchestrator),
   );
   return {
     layer: Layer.mergeAll(

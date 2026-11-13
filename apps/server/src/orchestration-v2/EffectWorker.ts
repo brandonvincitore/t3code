@@ -584,6 +584,11 @@ export const layerExecutor: Layer.Layer<
                   }),
               ),
             );
+          case "thread-title.sync":
+            return threadTitleRegeneration.synchronize({
+              threadId: effect.threadId,
+              ...effect.request,
+            });
           case "thread-title.generate":
             return threadTitleRegeneration
               .execute({

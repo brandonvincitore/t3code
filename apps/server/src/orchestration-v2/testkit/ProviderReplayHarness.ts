@@ -472,6 +472,7 @@ export function layerWithRegistry<Error>(
   const layerThreadTitleRegenerationTest = Layer.succeed(
     ThreadTitleRegenerationService.ThreadTitleRegenerationService,
     ThreadTitleRegenerationService.ThreadTitleRegenerationService.of({
+      synchronize: () => Effect.void,
       execute: Effect.fn("ThreadTitleRegenerationService.execute")(function () {
         return Effect.void;
       }),

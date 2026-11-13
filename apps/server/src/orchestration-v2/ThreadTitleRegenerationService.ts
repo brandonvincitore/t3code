@@ -9,9 +9,11 @@ import {
   type RunId,
   type ServerSettingsError,
   type ThreadId,
+  type ProviderThreadId,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -22,6 +24,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
 import type { OrchestratorV2Error } from "./Orchestrator.ts";
 import * as ProjectStore from "./ProjectStore.ts";
+import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 
 import { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTitleContext";
@@ -30,6 +33,12 @@ export { formatThreadTitleContext } from "@t3tools/provider-core/server/threadTi
 export class ThreadTitleRegenerationService extends Context.Service<
   ThreadTitleRegenerationService,
   {
+    readonly synchronize: (input: {
+      readonly threadId: ThreadId;
+      readonly title: string;
+      readonly updatedAt: string;
+      readonly providerThreadId: ProviderThreadId;
+    }) => Effect.Effect<void>;
     readonly execute: (input: {
       readonly threadId: ThreadId;
       readonly requestId: CommandId;
@@ -52,6 +61,62 @@ const make = Effect.gen(function* () {
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const textGeneration = yield* TextGeneration.TextGeneration;
   const fileSystem = yield* FileSystem.FileSystem;
+  const providerSessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+  const synchronize: ThreadTitleRegenerationService["Service"]["synchronize"] = Effect.fn(
+    "ThreadTitleRegenerationService.synchronize",
+  )(
+    function* (input) {
+      const read = threads.getThreadRecords(input.threadId, [
+        "providerThreads",
+        "providerSessions",
+      ]);
+      const projection = yield* read;
+      const thread = projection.thread;
+      const providerThread = projection.providerThreads.find(
+        (entry) => entry.id === input.providerThreadId,
+      );
+      if (
+        !providerThread ||
+        !providerThread.providerSessionId ||
+        providerThread.ownerNodeId !== null ||
+        providerThread.appThreadId !== thread.id ||
+        providerThread.providerInstanceId !== thread.providerInstanceId ||
+        providerThread.forkedFrom !== null ||
+        thread.forkedFrom !== null ||
+        thread.lineage.parentThreadId !== null ||
+        thread.delegatedFrom != null ||
+        thread.activeProviderThreadId !== providerThread.id
+      )
+        return;
+      const runtime = yield* providerSessions.get(providerThread.providerSessionId);
+      if (
+        Option.isNone(runtime) ||
+        !runtime.value.syncGeneratedTitle ||
+        runtime.value.instanceId !== providerThread.providerInstanceId
+      )
+        return;
+      const isCurrent = Effect.gen(function* () {
+        const current = yield* read;
+        const bound = current.providerThreads.find((entry) => entry.id === input.providerThreadId);
+        const activeRuntime = yield* providerSessions.get(providerThread.providerSessionId!);
+        return (
+          Option.isSome(activeRuntime) &&
+          activeRuntime.value === runtime.value &&
+          current.thread.activeProviderThreadId === providerThread.id &&
+          current.thread.providerInstanceId === providerThread.providerInstanceId &&
+          current.thread.title === input.title &&
+          current.thread.titleManuallySet !== true &&
+          current.thread.titleRegeneration == null &&
+          DateTime.formatIso(current.thread.updatedAt) === input.updatedAt &&
+          bound?.providerSessionId === providerThread.providerSessionId &&
+          bound?.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId
+        );
+      }).pipe(Effect.orElseSucceed(() => false));
+      if (thread.titleManuallySet !== true && !(yield* isCurrent)) return;
+      yield* runtime.value.syncGeneratedTitle({ appThread: thread, providerThread, isCurrent });
+    },
+    Effect.orElseSucceed(() => undefined),
+  );
 
   const complete = (input: {
     readonly threadId: ThreadId;
@@ -207,7 +272,7 @@ const make = Effect.gen(function* () {
     });
   });
 
-  return ThreadTitleRegenerationService.of({ execute });
+  return ThreadTitleRegenerationService.of({ execute, synchronize });
 });
 
 export const layer = Layer.effect(ThreadTitleRegenerationService, make);

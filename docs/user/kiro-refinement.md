@@ -44,11 +44,14 @@ their existing T3 owner when one exists.
 New local Kiro conversations receive a meaningful existing T3 title before the first message
 runs when the CLI advertises native renaming. Normal first-message title seeds are available
 immediately; this does not wait for or call a title model. If no meaningful T3 title is available,
-native naming is skipped. Provider-facing handoff or setup text is never used as a title. Existing native names and imported or resumed conversations are left alone. Later T3
-title generation and manual renaming change the T3 name only, so the two names can differ.
-Rename the native conversation in Kiro CLI when needed. An unsupported or failed native
-rename does not prevent your message from running. A simultaneous CLI rename during initial
-creation can still race with the initial name.
+native naming is skipped. Provider-facing handoff or setup text is never used as a title. Existing native names and unclaimed imported or resumed conversations are left alone.
+Later successful T3-generated titles can follow into the original live Kiro session after a
+confirmed initial T3 write and a fresh matching native metadata check. Manual T3 names are
+not forwarded. A detected native title change stops further automatic forwarding; regenerating
+the T3 title does not reclaim native ownership. Missing metadata or an unavailable runtime skips
+the update without opening a session or affecting your message. The persisted metadata check
+cannot detect an unpersisted native edit, a simultaneous CLI rename, or a same-title rename
+between checks; those edits can still race with a T3 write.
 
 ## Connect an organization's Kiro account
 

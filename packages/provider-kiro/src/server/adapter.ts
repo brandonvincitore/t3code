@@ -19,7 +19,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import type * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpSchema from "effect-acp/compat";
-import { initializeKiroThreadTitle } from "./nativeTitle.ts";
+import { makeKiroNativeTitles } from "./nativeTitle.ts";
 import * as EffectAcpErrors from "effect-acp/errors";
 
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
@@ -722,6 +722,7 @@ function makeKiroAcpAdapterFlavor(
   options: KiroAdapterV2Options,
   secretStorage: Effect.Success<ReturnType<typeof makeKiroSecretStorage>>,
   skills: KiroSkills,
+  nativeTitles: Effect.Success<ReturnType<typeof makeKiroNativeTitles>>,
 ): AcpAdapterV2Flavor {
   const makeNativeRuntime =
     options.makeRuntime ??
@@ -747,6 +748,13 @@ function makeKiroAcpAdapterFlavor(
           clientCapabilities: kiroClientCapabilities(input.clientCapabilities),
         }),
       ),
+      Effect.tap((runtime) =>
+        nativeTitles.bindRuntime(
+          runtime,
+          { ...options.environment, ...input.processEnvironment },
+          input.cwd,
+        ),
+      ),
       Effect.tap(secretStorage.installHandlers),
       Effect.tap((runtime) => options.mcp?.installHandlers(runtime) ?? Effect.void),
     );
@@ -756,7 +764,8 @@ function makeKiroAcpAdapterFlavor(
     driver: KIRO_PROVIDER,
     runtimeHarness: "Kiro",
     capabilities: KiroProviderCapabilitiesV2,
-    initializeThreadTitle: initializeKiroThreadTitle,
+    initializeThreadTitle: nativeTitles.initialize,
+    syncGeneratedTitle: nativeTitles.synchronize,
     getModelContextWindow: kiroModelContextWindow,
     contextUsageFromSession: kiroContextUsageFromSession,
     contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,
@@ -857,6 +866,7 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       options,
       secretStorage,
       options.skills ?? (yield* makeKiroSkills()),
+      yield* makeKiroNativeTitles(options.instanceId),
     ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),

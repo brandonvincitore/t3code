@@ -653,6 +653,11 @@ export interface ProviderAdapterV2SessionRuntime {
     cwd?: string | null,
   ) => number | undefined;
   readonly canReuseContextUsage?: (previous: ModelSelection, next: ModelSelection) => boolean;
+  readonly syncGeneratedTitle?: (input: {
+    readonly appThread: OrchestrationV2AppThread;
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly isCurrent: Effect.Effect<boolean>;
+  }) => Effect.Effect<void>;
   readonly ensureThread: (
     input: ProviderAdapterV2EnsureThreadInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;

@@ -1,4 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as Digest from "effect/crypto/Digest";
+import * as Hex from "effect/encoding/Hex";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import {
@@ -571,7 +573,10 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   const adapter = yield* makeKiroAdapterV2({
     instanceId,
     settings: { ...ENABLED_KIRO_SETTINGS, ...input.settings },
-    environment: input.environment ?? {},
+    environment: input.environment ?? {
+      HOME: path.join(replayDir, "home"),
+      KIRO_HOME: path.join(replayDir, "kiro"),
+    },
     selfInvocation: yield* resolveSelfInvocation(),
     ...(input.defaultModel === undefined
       ? {}
@@ -1196,18 +1201,30 @@ it.live.each(["confirmed", "rejected"] as const)(
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-title-persistence-" });
       const script = path.join(root, "peer.mjs");
-      const statePath = path.join(root, "state.json");
+      const digest = yield* Digest.Digest;
+      const bucket = Hex.encode(
+        yield* digest.digest(Digest.sha256, new TextEncoder().encode(root)),
+      ).slice(0, 16);
+      const statePath = path.join(
+        root,
+        "kiro",
+        "sessions",
+        bucket,
+        "native-fresh-root",
+        "session.json",
+      );
+      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
       const wirePath = path.join(root, "wire.jsonl");
       yield* fs.writeFileString(
         script,
         `
-import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, renameSync, appendFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 const statePath = process.env.TITLE_FIXTURE_STATE;
 const wirePath = process.env.TITLE_FIXTURE_WIRE;
 const read = () => JSON.parse(readFileSync(statePath, 'utf8'));
-const save = state => writeFileSync(statePath, JSON.stringify(state));
+const save = state => { writeFileSync(statePath + '.tmp', JSON.stringify(state)); renameSync(statePath + '.tmp', statePath); };
 const sessionId = 'native-fresh-root';
 let hasReceivedPrompt = false;
 const reply = message => {
@@ -1230,13 +1247,12 @@ createInterface({ input: process.stdin }).on('line', line => {
   } };
   else if (method === 'session/new') {
     hasReceivedPrompt = false;
-    save({ sessionId, title: 'New Session', promptCount: 0, titleModelAttempts: 0 });
+    save({ schemaVersion:'1.0.0', id:sessionId, sessionId, title: 'New Session', workspacePaths:[process.cwd()], createdAt:'2026-11-13T00:00:00.000Z', lastModifiedAt:'2026-11-13T00:00:00.000Z', promptCount: 0, titleModelAttempts: 0 });
     result = { sessionId, _meta: { schemaVersion:'1.0.0', id:sessionId, source:'local', title:'New Session',
       createdAt:'2026-11-13T00:00:00.000Z', lastModifiedAt:'2026-11-13T00:00:00.000Z' }, configOptions: [] };
   } else if (method === '_kiro/session/rename') {
     if (params.sessionId !== sessionId || params.sessionSource !== 'local') throw Error('Wrong binding');
     const state = read();
-    if (state.promptCount !== 0) throw Error('Rename after prompt');
     const previous = hasReceivedPrompt;
     hasReceivedPrompt = true;
     if (process.env.TITLE_FIXTURE_RENAME === 'rejected') {
@@ -1278,7 +1294,7 @@ createInterface({ input: process.stdin }).on('line', line => {
       const adapter = yield* makeKiroAdapterV2({
         instanceId,
         settings: ENABLED_KIRO_SETTINGS,
-        environment: {},
+        environment: { HOME: `${root}/home`, KIRO_HOME: `${root}/kiro` },
         selfInvocation: yield* resolveSelfInvocation(),
         makeRuntime: (input) =>
           AcpSessionRuntime.make({
@@ -1288,6 +1304,8 @@ createInterface({ input: process.stdin }).on('line', line => {
               args: [script],
               cwd: root,
               env: {
+                HOME: `${root}/home`,
+                KIRO_HOME: `${root}/kiro`,
                 TITLE_FIXTURE_STATE: statePath,
                 TITLE_FIXTURE_WIRE: wirePath,
                 TITLE_FIXTURE_RENAME: renameOutcome,
@@ -1354,7 +1372,29 @@ createInterface({ input: process.stdin }).on('line', line => {
             const first = JSON.parse(yield* fs.readFileString(statePath));
             assert.equal(first.titleSetByUser === true, renameOutcome === "confirmed");
             assert.equal(first.titleModelAttempts, renameOutcome === "confirmed" ? 0 : 1);
+            const generated = makeTurnInput({
+              threadId,
+              providerThread,
+              instanceId,
+              runtimePolicy,
+              now,
+            });
+            const synchronize = (title: string) =>
+              session.syncGeneratedTitle?.({
+                appThread: { ...generated.appThread, title },
+                providerThread,
+                isCurrent: Effect.succeed(true),
+              }) ?? Effect.void;
+            yield* synchronize("Later generated T3 title");
+            const afterGenerated = JSON.parse(yield* fs.readFileString(statePath));
+            assert.equal(
+              afterGenerated.title,
+              renameOutcome === "confirmed"
+                ? "Later generated T3 title"
+                : "Framework/setup-derived fallback",
+            );
             yield* request("_fixture/user-rename", {});
+            yield* synchronize("Generated after CLI edit");
             yield* send(2, "Later generated T3 title");
             yield* session.resumeThread({ providerThread, modelSelection, runtimePolicy });
             yield* send(3, "Later manual T3 title");
@@ -1392,6 +1432,18 @@ createInterface({ input: process.stdin }).on('line', line => {
             method: "_kiro/session/rename",
             params: { sessionId: "native-fresh-root", title: "Fix login", sessionSource: "local" },
           },
+          ...(renameOutcome === "confirmed"
+            ? [
+                {
+                  method: "_kiro/session/rename",
+                  params: {
+                    sessionId: "native-fresh-root",
+                    title: "Later generated T3 title",
+                    sessionSource: "local",
+                  },
+                },
+              ]
+            : []),
         ],
       );
       assert.isTrue(

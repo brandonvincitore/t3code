@@ -430,6 +430,14 @@ export interface AcpAdapterV2Flavor {
     readonly turn: ProviderAdapter.ProviderAdapterV2TurnInput;
     readonly observedTitle: string | null | undefined;
   }) => Effect.Effect<void>;
+  readonly syncGeneratedTitle?: (
+    input: Parameters<
+      NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["syncGeneratedTitle"]>
+    >[0] & {
+      readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
+      readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
+    },
+  ) => Effect.Effect<void>;
   readonly getModelContextWindow?: (
     selection: ModelSelection,
     session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
@@ -9962,6 +9970,57 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           providerSession,
           canResumeAfterRestart: canLoadSession || canResumeSession,
           events: Stream.fromEffectRepeat(Queue.take(events)),
+          ...(flavor.syncGeneratedTitle === undefined
+            ? {}
+            : {
+                syncGeneratedTitle: Effect.fn("AcpAdapterV2.syncGeneratedTitle")(
+                  function* (titleInput) {
+                    yield* runtimeTransitionPermit.withPermit(
+                      Effect.gen(function* () {
+                        const titleRuntime = runtime;
+                        const generation = yield* Ref.get(runtimeCallbackGeneration);
+                        const session = yield* Ref.get(activeSessionSetup);
+                        const nativeId = titleInput.providerThread.nativeThreadRef?.nativeId;
+                        if (
+                          !session ||
+                          !nativeId ||
+                          session.sessionId !== nativeId ||
+                          titleInput.providerThread.providerSessionId !== input.providerSessionId ||
+                          titleInput.providerThread.providerInstanceId !== options.instanceId ||
+                          titleInput.providerThread.appThreadId !== titleInput.appThread.id ||
+                          titleInput.appThread.id !== input.threadId ||
+                          titleInput.providerThread.ownerNodeId !== null ||
+                          titleInput.providerThread.forkedFrom !== null ||
+                          titleInput.appThread.forkedFrom !== null ||
+                          titleInput.appThread.lineage.parentThreadId !== null ||
+                          isDelegatedAppThread(titleInput.appThread)
+                        )
+                          return;
+                        const isCurrent = Effect.gen(function* () {
+                          return (
+                            runtime === titleRuntime &&
+                            generation === (yield* Ref.get(runtimeCallbackGeneration)) &&
+                            !(yield* Ref.get(runtimeRestartRequired)) &&
+                            (yield* Ref.get(activeSessionSetup))?.sessionId === nativeId &&
+                            (yield* Ref.get(activeSessionId)) === nativeId &&
+                            (yield* titleInput.isCurrent)
+                          );
+                        });
+                        if (titleInput.appThread.titleManuallySet !== true && !(yield* isCurrent))
+                          return;
+                        yield* (
+                          flavor.syncGeneratedTitle?.({
+                            ...titleInput,
+                            runtime: titleRuntime,
+                            session,
+                            isCurrent,
+                          }) ?? Effect.void
+                        );
+                      }),
+                    );
+                  },
+                ),
+              }),
           ...(flavor.getModelContextWindow === undefined
             ? {}
             : {

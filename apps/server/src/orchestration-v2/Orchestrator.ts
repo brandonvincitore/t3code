@@ -4335,6 +4335,30 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     // Archiving ends the guest share, so its waiting files go too.
     yield* releaseGuestAttachments(command, thread.guestShare, updatedThread.guestShare, effects);
 
+    const titleProviderThreadId = updatedThread.activeProviderThreadId;
+    if (
+      command.type === "thread.title.regeneration.complete" &&
+      thread.titleRegeneration?.requestId === command.requestId &&
+      command.title !== undefined &&
+      updatedThread.titleManuallySet !== true &&
+      titleProviderThreadId !== null
+    ) {
+      yield* Ref.update(effects, (existing) => [
+        ...existing,
+        {
+          id: `effect:${command.commandId}:thread-title.sync`,
+          commandId: command.commandId,
+          threadId: command.threadId,
+          request: {
+            type: "thread-title.sync" as const,
+            title: updatedThread.title,
+            updatedAt: DateTime.formatIso(updatedThread.updatedAt),
+            providerThreadId: titleProviderThreadId,
+          },
+        },
+      ]);
+    }
+
     if (command.type === "thread.metadata.update" && command.regenerateTitle === true) {
       yield* Ref.update(effects, (existing) => [
         ...existing,

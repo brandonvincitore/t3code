@@ -13,7 +13,7 @@ export {
   makeKiroAcpRuntime,
 } from "./server/acpSupport.ts";
 export { type KiroSkills, makeKiroSkills } from "./server/skills.ts";
-export { initializeKiroThreadTitle } from "./server/nativeTitle.ts";
+export { initializeKiroThreadTitle, makeKiroNativeTitles } from "./server/nativeTitle.ts";
 export {
   checkKiroProviderStatus,
   kiroAgentDescriptor,

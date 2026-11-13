@@ -156,6 +156,7 @@ function layerExecutorFor(input: {
     Layer.succeed(
       ThreadTitleRegenerationService.ThreadTitleRegenerationService,
       ThreadTitleRegenerationService.ThreadTitleRegenerationService.of({
+        synchronize: () => Effect.void,
         execute: () => Effect.void,
       }),
     ),
