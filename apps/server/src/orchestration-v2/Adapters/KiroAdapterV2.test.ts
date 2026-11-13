@@ -4310,7 +4310,7 @@ describe("KiroAdapterV2", () => {
             ProviderCompactionUnsupportedError,
           );
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("switches back to Kiro's default model after a named one", () =>
@@ -4358,7 +4358,7 @@ describe("KiroAdapterV2", () => {
             assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
           }
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("sets the thread's effort once the model write advertises it, and after a switch", () =>
@@ -4439,7 +4439,7 @@ describe("KiroAdapterV2", () => {
             assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
           }
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.live.each([
@@ -4539,7 +4539,7 @@ describe("KiroAdapterV2", () => {
           yield* startTurnOn(1, "claude-opus-5.5", reasoning("high"));
           assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("never sends an effort level the model does not offer", () =>
@@ -4595,7 +4595,7 @@ describe("KiroAdapterV2", () => {
             assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
           }
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("answers a stale 'this session' approval with Kiro's allow_once", () =>
@@ -4656,7 +4656,7 @@ describe("KiroAdapterV2", () => {
           yield* respond(yield* Deferred.await(pending), "acceptForSession");
           assert.equal(terminalStatus(yield* Fiber.join(turn)), "completed");
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("advertises secret storage without importing native credentials", () =>
@@ -4809,7 +4809,7 @@ describe("KiroAdapterV2", () => {
           }
           assert.include(terminal.failure.message, "'claude-opus-9' is not available");
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 });
 
@@ -4990,7 +4990,7 @@ describe("KiroAdapterV2 agents", () => {
           yield* startTurnOn(2, "claude-opus-5.5", agent("spec"));
           assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("puts Kiro default back after an agent switch moved the session off it", () =>
@@ -5026,7 +5026,7 @@ describe("KiroAdapterV2 agents", () => {
           yield* startTurn;
           assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("keeps the session's agent when the thread's agent no longer exists", () =>
@@ -5053,7 +5053,7 @@ describe("KiroAdapterV2 agents", () => {
           yield* startTurn;
           assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
         }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 });
 
@@ -5417,7 +5417,7 @@ describe("KiroAdapterV2 MCP tools", () => {
             );
           }),
       });
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 });
 
@@ -5551,7 +5551,7 @@ describe("KiroAdapterV2 unknown model", () => {
             assert.equal(terminal.failure.code, "-32000");
           }),
       });
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
+    }).pipe(Effect.provide(testLayer)),
   );
 });
 

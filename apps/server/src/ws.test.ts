@@ -242,7 +242,7 @@ it.effect("resends a reveal kind and remote targets that outlast the snapshot ti
       assert.deepEqual(remote.config.remoteOpenTargets, targets);
       assert.equal(remote.config.shellRevealInFileManagerKind, "file-explorer");
     }
-  }).pipe(Effect.scoped),
+  }),
 );
 
 it.effect("runs editor, remote open target and direct endpoint discovery side by side", () =>
@@ -1152,7 +1152,6 @@ it.effect.each([
           Layer.mock(ServerBrowser.ServerBrowser)({}),
         ),
       ),
-      Effect.scoped,
     ),
 );
 
@@ -1264,7 +1263,6 @@ it.effect("access changes made while the snapshot loads reach the client after i
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
-    Effect.scoped,
   ),
 );
 
@@ -1619,7 +1617,6 @@ it.effect("on-demand clients get provider config without workspace snapshots", (
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
-    Effect.scoped,
   ),
 );
 
@@ -1791,7 +1788,6 @@ it.effect("a missing thread worktree gets its project's skills in the cwd snapsh
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
-    Effect.scoped,
   ),
 );
 
@@ -1865,7 +1861,6 @@ it.effect("a git action that fails partway still refreshes the repository status
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
-    Effect.scoped,
   ),
 );
 
@@ -1953,7 +1948,6 @@ it.effect("a publish whose push fails still refreshes the new remote", () =>
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
-    Effect.scoped,
   ),
 );
 
@@ -2497,6 +2491,5 @@ it.effect("ACP session RPCs list a thread missing its history and repair it on i
         Layer.mock(ServerBrowser.ServerBrowser)({}),
       ),
     ),
-    Effect.scoped,
   ),
 );
