@@ -50,6 +50,59 @@ const effort = {
 };
 
 describe("Kiro workspace configuration", () => {
+  it.effect(
+    "keeps per-thread Reflection editable on cold snapshots without borrowing another session's selection",
+    () =>
+      Effect.gen(function* () {
+        const settings = yield* decodeSettings({ enabled: true });
+        const draft = yield* buildInitialKiroProviderSnapshot(settings);
+        const base = ServerProvider.make({
+          ...draft,
+          driver: ProviderDriverKind.make("kiro"),
+          instanceId: ProviderInstanceId.make("kiro-cold"),
+        });
+        const reflection = (snapshot: ServerProvider) =>
+          snapshot.models[0]?.capabilities?.optionDescriptors?.find(
+            (option) => option.id === "memoryReflection",
+          );
+        assert.equal(reflection(base)?.type, "select");
+        assert.isUndefined(reflection(base)?.currentValue);
+        const configurations = yield* makeKiroConfigurations();
+        yield* recordKiroConfiguration(configurations, "/work", [
+          {
+            id: "memoryReflection",
+            name: "Memory reflection",
+            type: "select",
+            currentValue: "on",
+            options: [
+              { value: "on", name: "On" },
+              { value: "off", name: "Off" },
+            ],
+          },
+          {
+            id: "contentCollection",
+            name: "Content collection",
+            type: "select",
+            currentValue: "enabled",
+            options: [
+              { value: "enabled", name: "Enabled" },
+              { value: "disabled", name: "Disabled" },
+            ],
+          },
+        ]);
+        const live = yield* applyKiroConfiguration(configurations, "/work", base);
+        assert.isUndefined(reflection(live)?.currentValue);
+        assert.isFalse(
+          live.models.some((model) =>
+            model.capabilities?.optionDescriptors?.some(
+              (option) => option.id === "contentCollection",
+            ),
+          ),
+        );
+        const cold = yield* applyKiroConfiguration(yield* makeKiroConfigurations(), "/work", base);
+        assert.deepEqual(reflection(cold), reflection(base));
+      }),
+  );
   it.effect.each(["denial", "withdrawal"])("scopes %s by workspace and model", (change) =>
     Effect.gen(function* () {
       const configurations = yield* makeKiroConfigurations();
@@ -92,8 +145,10 @@ describe("Kiro workspace configuration", () => {
         "Claude Sonnet 5.5",
       );
       assert.equal(
-        late.models.find((entry) => entry.slug === "claude-sonnet-5.5")?.capabilities
-          ?.optionDescriptors?.[0]?.currentValue,
+        late.models
+          .find((entry) => entry.slug === "claude-sonnet-5.5")
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort")
+          ?.currentValue,
         "high",
       );
       yield* recordKiroConfiguration(configurations, "/work/a", [
@@ -117,16 +172,20 @@ describe("Kiro workspace configuration", () => {
         false,
       );
       assert.equal(
-        a.models.find((entry) => entry.slug === "other-model")?.capabilities?.optionDescriptors
-          ?.length,
+        a.models
+          .find((entry) => entry.slug === "other-model")
+          ?.capabilities?.optionDescriptors?.filter((option) => option.id !== "memoryReflection")
+          .length,
         0,
       );
       assert.strictEqual(yield* applyKiroConfiguration(configurations, "/work/b", base), base);
       yield* recordKiroConfiguration(configurations, "/work/a", [model("future-model")]);
       const pending = yield* applyKiroConfiguration(configurations, "/work/a", base);
       assert.equal(
-        pending.models.find((entry) => entry.slug === "future-model")?.capabilities
-          ?.optionDescriptors?.[0]?.currentValue,
+        pending.models
+          .find((entry) => entry.slug === "future-model")
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort")
+          ?.currentValue,
         "medium",
       );
       assert.equal(
@@ -134,21 +193,27 @@ describe("Kiro workspace configuration", () => {
         "Claude Sonnet 5.5",
       );
       assert.equal(
-        pending.models.find((entry) => entry.slug === "claude-sonnet-5.5")?.capabilities
-          ?.optionDescriptors?.[0]?.currentValue,
+        pending.models
+          .find((entry) => entry.slug === "claude-sonnet-5.5")
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort")
+          ?.currentValue,
         "high",
       );
       assert.equal(
-        pending.models.find((entry) => entry.slug === "gpt-6.1-luna")?.capabilities
-          ?.optionDescriptors?.[0]?.currentValue,
+        pending.models
+          .find((entry) => entry.slug === "gpt-6.1-luna")
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort")
+          ?.currentValue,
         "high",
       );
       assert.equal(pending.models.filter((entry) => entry.slug === "default").length, 1);
       yield* recordKiroConfiguration(configurations, "/work/a", []);
       const partial = yield* applyKiroConfiguration(configurations, "/work/a", base);
       assert.equal(
-        partial.models.find((entry) => entry.slug === "gpt-6.1-luna")?.capabilities
-          ?.optionDescriptors?.[0]?.currentValue,
+        partial.models
+          .find((entry) => entry.slug === "gpt-6.1-luna")
+          ?.capabilities?.optionDescriptors?.find((option) => option.id === "reasoningEffort")
+          ?.currentValue,
         "high",
       );
       const reasoningFor = (snapshot: ServerProvider, slug: string) =>
@@ -241,8 +306,10 @@ describe("Kiro workspace configuration", () => {
       ]);
       const removed = yield* applyKiroConfiguration(configurations, "/work/a", base);
       assert.equal(
-        removed.models.find((entry) => entry.slug === "future-model")?.capabilities
-          ?.optionDescriptors?.length,
+        removed.models
+          .find((entry) => entry.slug === "future-model")
+          ?.capabilities?.optionDescriptors?.filter((option) => option.id !== "memoryReflection")
+          .length,
         0,
       );
       yield* recordKiroConfiguration(configurations, "/work/a", [
@@ -251,8 +318,10 @@ describe("Kiro workspace configuration", () => {
       ]);
       const internalOnly = yield* applyKiroConfiguration(configurations, "/work/a", base);
       assert.equal(
-        internalOnly.models.find((entry) => entry.slug === "future-model")?.capabilities
-          ?.optionDescriptors?.length,
+        internalOnly.models
+          .find((entry) => entry.slug === "future-model")
+          ?.capabilities?.optionDescriptors?.filter((option) => option.id !== "memoryReflection")
+          .length,
         0,
       );
       const agent = (currentValue: string) => ({

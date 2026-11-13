@@ -47,6 +47,7 @@ import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
   KIRO_APPROVE_FOR_ME_CONFIG_ID,
+  kiroContentCollectionConfig,
   kiroNativeAuto,
   kiroClientCapabilities,
   validateKiroRuntimePolicy,
@@ -485,7 +486,26 @@ const applyKiroModelSelection =
         applyKiroModel(runtime, modelSelection, defaultModel, agentSwitched),
       ),
       Effect.tap((appliedModel) => applyKiroEffort(runtime, modelSelection, appliedModel)),
+      Effect.tap(() => applyKiroReflection(runtime, modelSelection)),
     );
+
+const applyKiroReflection = Effect.fn("KiroAdapterV2.applyReflection")(function* (
+  runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+  modelSelection: ModelSelection,
+) {
+  const requested = getModelSelectionStringOptionValue(modelSelection, "memoryReflection");
+  if (requested !== "on" && requested !== "off") return;
+  const option = (yield* runtime.getConfigOptions).find(
+    (option) => option.id === "memoryReflection",
+  );
+  if (
+    option?.type !== "select" ||
+    !selectValues(option).includes(requested) ||
+    option.currentValue === requested
+  )
+    return;
+  yield* runtime.setConfigOption("memoryReflection", requested);
+});
 
 function selectValues(
   option: Extract<EffectAcpSchema.SessionConfigOption, { readonly type: "select" }>,
@@ -787,11 +807,18 @@ function makeKiroAcpAdapterFlavor(
     ),
     // The generic option loop runs after the model write, and an agent write
     // there would put the agent's own model back.
-    ownedModelOptionIds: ["reasoningEffort", KIRO_AGENT_CONFIG_ID, KIRO_APPROVE_FOR_ME_CONFIG_ID],
+    ownedModelOptionIds: [
+      "reasoningEffort",
+      KIRO_AGENT_CONFIG_ID,
+      KIRO_APPROVE_FOR_ME_CONFIG_ID,
+      "memoryReflection",
+      "contentCollection",
+    ],
     // With Autopilot off (Supervised) Kiro asks the user to accept a turn's
     // changes before it ends. T3's runtime policy answers its per-tool prompts
     // either way, and a runtime-mode change reopens the session to reapply it.
     sessionConfigForPolicy: (policy, configOptions) => [
+      ...kiroContentCollectionConfig(options.settings, configOptions),
       { id: KIRO_AUTOPILOT_CONFIG_ID, value: kiroAutopilotValue(policy) },
       ...(kiroNativeAuto(policy)
         ? [

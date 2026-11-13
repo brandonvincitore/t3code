@@ -459,6 +459,7 @@ const makeKiroHome = Effect.fn("makeKiroHome")(function* (secrets: Record<string
 
 const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   readonly scenario: string;
+  readonly settings?: Partial<typeof ENABLED_KIRO_SETTINGS>;
   readonly frames: ReadonlyArray<Frame>;
   /** Frames for the runtime a rollback starts, replayed by a second agent process. */
   readonly replacementFrames?: ReadonlyArray<Frame>;
@@ -569,7 +570,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   );
   const adapter = yield* makeKiroAdapterV2({
     instanceId,
-    settings: ENABLED_KIRO_SETTINGS,
+    settings: { ...ENABLED_KIRO_SETTINGS, ...input.settings },
     environment: input.environment ?? {},
     selfInvocation: yield* resolveSelfInvocation(),
     ...(input.defaultModel === undefined
@@ -3917,6 +3918,122 @@ describe("KiroAdapterV2", () => {
                   message.threadId !== parentReply?.threadId,
               ),
             );
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped);
+    },
+  );
+
+  it.effect.each(["supported", "withdrawn", "changed-type", "absent"])(
+    "revalidates per-chat Reflection and provider Content collection against %s native options",
+    (availability) => {
+      const reflection = {
+        id: "memoryReflection",
+        name: "Memory reflection",
+        type: "select" as const,
+        currentValue: "off",
+        options:
+          availability === "withdrawn"
+            ? []
+            : [
+                { value: "on", name: "On" },
+                { value: "off", name: "Off" },
+              ],
+      };
+      const collection = {
+        id: "contentCollection",
+        name: "Content collection",
+        type: "select" as const,
+        currentValue: "disabled",
+        options:
+          availability === "withdrawn"
+            ? []
+            : [
+                { value: "enabled", name: "Enabled" },
+                { value: "disabled", name: "Disabled" },
+              ],
+      };
+      const preferences =
+        availability === "absent"
+          ? []
+          : availability === "changed-type"
+            ? [reflection, collection].map((option) => ({
+                id: option.id,
+                name: option.name,
+                type: "boolean" as const,
+                currentValue: false,
+              }))
+            : [reflection, collection];
+      const configOptions = [modeOption, autopilotOption("on"), ...preferences];
+      return runKiroScript({
+        scenario: `session-preferences-${availability}`,
+        settings: { contentCollection: "enabled" },
+        options: [
+          { id: "memoryReflection", value: "on" },
+          { id: "contentCollection", value: "disabled" },
+        ],
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          ...kiroSessionNoise,
+          answer("session/new", sessionSetup(configOptions)),
+          ...(availability === "supported"
+            ? [
+                outbound("session/set_config_option", {
+                  sessionId: SESSION_ID,
+                  configId: "memoryReflection",
+                  value: "on",
+                }),
+                answer("session/set_config_option", {
+                  configOptions: [
+                    modeOption,
+                    autopilotOption("on"),
+                    { ...reflection, currentValue: "on" },
+                    collection,
+                  ],
+                }),
+                outbound("session/set_config_option", {
+                  sessionId: SESSION_ID,
+                  configId: "contentCollection",
+                  value: "enabled",
+                }),
+                answer("session/set_config_option", {
+                  configOptions: [
+                    modeOption,
+                    autopilotOption("on"),
+                    { ...reflection, currentValue: "on" },
+                    { ...collection, currentValue: "enabled" },
+                  ],
+                }),
+              ]
+            : []),
+          outbound("session/set_config_option", {
+            sessionId: SESSION_ID,
+            configId: "autopilot",
+            value: "off",
+          }),
+          answer("session/set_config_option", {
+            configOptions: [
+              modeOption,
+              autopilotOption("off"),
+              ...preferences.map((option) =>
+                availability === "supported"
+                  ? {
+                      ...option,
+                      currentValue: option.id === "contentCollection" ? "enabled" : "on",
+                    }
+                  : option,
+              ),
+            ],
+          }),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...closeSession,
+        ],
+        drive: ({ events, startTurn }) =>
+          Effect.gen(function* () {
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
           }),
       }).pipe(Effect.provide(testLayer), Effect.scoped);
     },

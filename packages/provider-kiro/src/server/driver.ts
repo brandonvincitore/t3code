@@ -39,6 +39,7 @@ import {
   kiroDefaultModelId,
 } from "./status.ts";
 import { getKiroSkills, makeKiroSkills } from "./skills.ts";
+import { kiroChatOptions } from "./models.ts";
 import { applyKiroConfiguration, makeKiroConfigurations } from "./configuration.ts";
 import { kiroDiscoveredAgentDescriptor, makeKiroDiscovery } from "./discovery.ts";
 import { deleteKiroSession, listKiroSessions } from "./nativeSessions.ts";
@@ -247,24 +248,24 @@ export const KiroDriver: ProviderDriver<KiroSettings, KiroDriverEnv, Path.Path> 
               const workspace = {
                 ...base,
                 skills: yield* getKiroSkills(skills, cwd, resources?.skills),
-                optionDescriptors: [
+                optionDescriptors: kiroChatOptions([
                   ...("optionDescriptors" in base ? base.optionDescriptors : []).filter(
                     (option) => option.id !== "mode",
                   ),
                   ...(agent === undefined ? [] : [agent]),
-                ],
+                ]),
                 models:
                   resources === undefined && agent === undefined
                     ? base.models
                     : base.models.map((model) => ({
                         ...model,
                         capabilities: createModelCapabilities({
-                          optionDescriptors: [
+                          optionDescriptors: kiroChatOptions([
                             ...(model.capabilities?.optionDescriptors ?? []).filter(
                               (option) => option.id !== "mode",
                             ),
                             ...(agent === undefined ? [] : [agent]),
-                          ],
+                          ]),
                         }),
                       })),
               };

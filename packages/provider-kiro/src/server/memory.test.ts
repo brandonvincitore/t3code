@@ -38,7 +38,13 @@ const setup = Effect.fn("test.memory.setup")(function* (advertised = methods) {
   let initializes = 0;
   let closes = 0;
   const controller = yield* makeKiroMemoryController({
-    settings: { binaryPath: "kiro-cli", enabled: true, customModels: [], memoryMode: "default" },
+    settings: {
+      binaryPath: "kiro-cli",
+      enabled: true,
+      customModels: [],
+      memoryMode: "default",
+      contentCollection: "default",
+    },
     environment: {},
     makeRuntime: (cwd) =>
       Effect.acquireRelease(

@@ -25,6 +25,7 @@ import {
   kiroWorkflowSessionMeta,
 } from "./acpSupport.ts";
 import {
+  kiroChatOptions,
   kiroConfigModels,
   kiroModelCapabilities,
   kiroModelName,
@@ -51,7 +52,9 @@ const KIRO_PRESENTATION = {
   showInteractionModeToggle: false,
   supportedRuntimeModes: KIRO_SUPPORTED_RUNTIME_MODES,
 } as const;
-const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({ optionDescriptors: [] });
+const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+  optionDescriptors: kiroChatOptions([]),
+});
 const KIRO_DEFAULT_MODEL_SLUG = "default";
 const KIRO_FALLBACK_DEFAULT_MODEL = "auto";
 const KIRO_BUILT_IN_MODELS: ReadonlyArray<ServerProviderModel> = [
@@ -79,14 +82,12 @@ const kiroModels = (
     const additions = options.filter(
       (option) => !descriptors.some((descriptor) => descriptor.id === option.id),
     );
-    return additions.length === 0
-      ? model
-      : {
-          ...model,
-          capabilities: createModelCapabilities({
-            optionDescriptors: [...descriptors, ...additions],
-          }),
-        };
+    return {
+      ...model,
+      capabilities: createModelCapabilities({
+        optionDescriptors: kiroChatOptions([...descriptors, ...additions]),
+      }),
+    };
   });
 
 const snapshot = (

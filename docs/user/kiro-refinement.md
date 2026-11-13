@@ -93,6 +93,13 @@ steps. This branch does not add a separate organization account or administratio
 - Open Memory to inspect, search, edit, delete, or explicitly synchronize native memories.
   Memory scopes are Kiro account scopes, not a separate T3 project database. Provider settings
   control whether conversations use Kiro's default, disabled, recall-only, or learning mode.
+  Memory reflection in each conversation is a separate On/Off choice for reflecting on new memory;
+  it is checked against Kiro's current options when the next session starts or reopens. An idle
+  or cold conversation retains that desired choice without claiming a live native update.
+- Set Content collection in Settings → Providers → Kiro. Kiro default leaves it unchanged;
+  an explicit choice is applied through Kiro's supported option on session start or reopen and
+  affects every conversation in that native process. T3 saves this provider preference; it does
+  not edit native account settings.
 - Inspect Kiro credits in Usage. Credits are separate from token counts and USD; token and
   dollar charts cannot describe credit-only usage.
 

@@ -427,6 +427,9 @@ describe("KiroProvider", () => {
         });
         const reasoning = snapshot.models.map((model) => {
           const descriptors = model.capabilities?.optionDescriptors ?? [];
+          const reflection = descriptors.find((descriptor) => descriptor.id === "memoryReflection");
+          assert.equal(reflection?.type, "select");
+          assert.isUndefined(reflection?.currentValue);
           const select = descriptors.find((descriptor) => descriptor.id === "reasoningEffort");
           return select?.type === "select"
             ? {
@@ -436,7 +439,11 @@ describe("KiroProvider", () => {
                 defaults: select.options.filter((choice) => choice.isDefault).map((c) => c.id),
                 currentValue: select.currentValue,
               }
-            : { slug: model.slug, descriptors: descriptors.length };
+            : {
+                slug: model.slug,
+                descriptors: descriptors.filter((descriptor) => descriptor.id === "reasoningEffort")
+                  .length,
+              };
         });
         const expected = [
           // Auto and models without effort get no Reasoning select.

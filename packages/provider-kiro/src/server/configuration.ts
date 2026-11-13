@@ -3,7 +3,12 @@ import { createModelCapabilities } from "@t3tools/shared/model";
 import { acpProviderOptionDescriptors } from "@t3tools/provider-acp/server/sessionConfig";
 import type { AcpSessionModeState } from "@t3tools/provider-acp/server/runtimeModel";
 import * as Effect from "effect/Effect";
-import { kiroConfigModels, mergeKiroConfigModels, type KiroConfigModel } from "./models.ts";
+import {
+  kiroChatOptions,
+  kiroConfigModels,
+  mergeKiroConfigModels,
+  type KiroConfigModel,
+} from "./models.ts";
 import * as SubscriptionRef from "effect/SubscriptionRef";
 import type * as Acp from "effect-acp/compat";
 import {
@@ -108,7 +113,7 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
     const incoming = {
       models: !hasModelCatalog && sameAgent ? (previous?.models ?? models) : models,
       agent: agent ?? previous?.agent,
-      options: descriptors.filter((option) => option.id !== KIRO_EFFORT_CONFIG_ID),
+      options: kiroChatOptions(descriptors.filter((option) => option.id !== KIRO_EFFORT_CONFIG_ID)),
       effortByModel,
     };
     const comparable = (configuration: KiroConfiguration) => ({
@@ -149,12 +154,12 @@ export const applyKiroConfiguration = Effect.fn("KiroConfiguration.apply")(funct
     return {
       ...model,
       capabilities: createModelCapabilities({
-        optionDescriptors: [
+        optionDescriptors: kiroChatOptions([
           ...(model.capabilities?.optionDescriptors ?? []).filter(
             (option) => !replaced.has(option.id),
           ),
           ...incoming,
-        ],
+        ]),
       }),
     };
   });

@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import { KiroSettings } from "../settings.ts";
 import {
   buildKiroAcpSpawnInput,
+  kiroContentCollectionConfig,
   kiroSessionMeta,
   kiroWorkflowSessionMeta,
   validateKiroRuntimePolicy,
@@ -59,6 +60,31 @@ describe("KiroDriver", () => {
         kiro: { settings: { workflows: { enabled: true } } },
       },
     );
+    const collection = {
+      id: "contentCollection",
+      name: "Content collection",
+      type: "select" as const,
+      currentValue: "disabled",
+      options: [
+        { value: "enabled", name: "Enabled" },
+        { value: "disabled", name: "Disabled" },
+      ],
+    };
+    assert.deepEqual(kiroContentCollectionConfig(decodeSettings({}), [collection]), []);
+    for (const value of ["enabled", "disabled"] as const) {
+      const settings = decodeSettings({ contentCollection: value });
+      assert.deepEqual(kiroContentCollectionConfig(settings, [collection]), [
+        { id: "contentCollection", value },
+      ]);
+      assert.deepEqual(kiroContentCollectionConfig(settings, []), []);
+      assert.deepEqual(kiroContentCollectionConfig(settings, [{ ...collection, options: [] }]), []);
+      assert.deepEqual(
+        kiroContentCollectionConfig(settings, [
+          { id: "contentCollection", name: "Changed type", type: "boolean", currentValue: false },
+        ]),
+        [],
+      );
+    }
     assert.isUndefined(kiroWorkflowSessionMeta(undefined));
     assert.isUndefined(
       kiroWorkflowSessionMeta({ kiro: { extensionMethods: ["_kiro/workflow/new"] } }),

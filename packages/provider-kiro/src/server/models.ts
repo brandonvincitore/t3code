@@ -8,7 +8,40 @@ import { createModelCapabilities, formatModelSlugName } from "@t3tools/shared/mo
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
-const EMPTY_CAPABILITIES = createModelCapabilities({ optionDescriptors: [] });
+const reflection: ProviderOptionDescriptor = {
+  id: "memoryReflection",
+  label: "Memory reflection",
+  type: "select",
+  description:
+    "Allow this conversation to reflect on new memory. Applied when its next session starts or reopens.",
+  options: [
+    { id: "off", label: "Off" },
+    { id: "on", label: "On" },
+  ],
+};
+
+export function kiroChatOptions(options: ReadonlyArray<ProviderOptionDescriptor>) {
+  const filtered = options
+    .filter((option) => option.id !== "contentCollection")
+    .map((option) => {
+      if (option.id !== "memoryReflection") return option;
+      const { currentValue: _currentValue, ...descriptor } = option;
+      return {
+        ...descriptor,
+        ...(descriptor.type === "select"
+          ? { options: descriptor.options.map(({ isDefault: _isDefault, ...choice }) => choice) }
+          : {}),
+      };
+    });
+  if (!filtered.some((option) => option.id === "memoryReflection")) filtered.push(reflection);
+  const rank = (id: string) =>
+    ["reasoningEffort", "effortLevel", "mode", "memoryReflection", "workflowLaunch"].indexOf(id);
+  return filtered.toSorted(
+    (a, b) => (rank(a.id) < 0 ? 99 : rank(a.id)) - (rank(b.id) < 0 ? 99 : rank(b.id)),
+  );
+}
+
+const EMPTY_CAPABILITIES = createModelCapabilities({ optionDescriptors: kiroChatOptions([]) });
 
 const CLAUDE_EFFORT_LEVELS = ["low", "medium", "high", "xhigh", "max"];
 const CLAUDE_4_6_EFFORT_LEVELS = ["low", "medium", "high", "max"];
@@ -51,7 +84,7 @@ export function kiroModelCapabilities(modelId: string): ModelCapabilities {
   const effort = KIRO_MODEL_EFFORT[modelId];
   if (effort === undefined) return EMPTY_CAPABILITIES;
   return createModelCapabilities({
-    optionDescriptors: [
+    optionDescriptors: kiroChatOptions([
       buildSelectOptionDescriptor({
         id: "reasoningEffort",
         label: "Reasoning",
@@ -61,7 +94,7 @@ export function kiroModelCapabilities(modelId: string): ModelCapabilities {
           isDefault: level === effort.defaultLevel,
         })),
       }),
-    ],
+    ]),
   });
 }
 

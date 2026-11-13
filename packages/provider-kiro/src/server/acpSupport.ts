@@ -105,6 +105,19 @@ export function kiroSessionMeta(
     : { kiro: { settings: { ...workflowSettings, ...(memory === undefined ? {} : { memory }) } } };
 }
 
+export function kiroContentCollectionConfig(
+  settings: KiroSettings,
+  configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
+) {
+  const value = settings.contentCollection;
+  const option = configOptions.find((option) => option.id === "contentCollection");
+  if (value === "default" || option?.type !== "select") return [];
+  const choices = option.options.flatMap((choice) =>
+    "value" in choice ? [choice.value] : choice.options.map((entry) => entry.value),
+  );
+  return choices.includes(value) ? [{ id: "contentCollection", value }] : [];
+}
+
 export function buildKiroAcpSpawnInput(
   settings: KiroAcpRuntimeSettings | null | undefined,
   cwd: string,
