@@ -115,7 +115,7 @@ export function ComposerPermissionsSection(props: {
     supervisedRuntimeModeOption;
   const descriptionId = useId();
   return (
-    <div data-composer-permissions className="grid w-72 gap-1.5 px-2 py-1.5">
+    <div data-composer-permissions className="grid w-72 max-w-full gap-1.5 px-2 py-1.5">
       <div className="font-medium text-muted-foreground text-xs">Permissions</div>
       <MenuPrimitive.RadioGroup
         aria-label="Permissions"
@@ -166,20 +166,30 @@ export function ComposerPermissionsSection(props: {
           {option.disabledReason ?? option.description}
         </span>
       ))}
-      <div className="grid gap-0.5" aria-hidden="true">
-        <span
-          className={
-            shownMode === props.runtimeMode
-              ? "text-foreground text-sm"
-              : "text-muted-foreground text-sm"
-          }
-        >
-          {shown.label}
-        </span>
-        {/* Two lines reserved so the menu does not shift while you preview modes. */}
-        <span className="min-h-8 text-muted-foreground text-xs leading-4">
-          {shown.disabledReason ?? shown.description}
-        </span>
+      <div className="grid" aria-hidden="true">
+        {/* Overlapping previews reserve the tallest available content without moving hover targets. */}
+        {props.runtimeModeOptions.map((option) => (
+          <div key={option.mode} className="invisible grid content-start gap-0.5 [grid-area:1/1]">
+            <span className="text-sm">{option.label}</span>
+            <span className="min-h-8 text-xs leading-4">
+              {option.disabledReason ?? option.description}
+            </span>
+          </div>
+        ))}
+        <div className="grid content-start gap-0.5 [grid-area:1/1]">
+          <span
+            className={
+              shownMode === props.runtimeMode
+                ? "text-foreground text-sm"
+                : "text-muted-foreground text-sm"
+            }
+          >
+            {shown.label}
+          </span>
+          <span className="min-h-8 text-muted-foreground text-xs leading-4">
+            {shown.disabledReason ?? shown.description}
+          </span>
+        </div>
       </div>
     </div>
   );
