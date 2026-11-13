@@ -40,6 +40,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
+import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import { makeAssistantStreamingFilter } from "../assistantStreaming.ts";
 import { makeProviderEventRoutingState, routeProviderEvent } from "../RunExecutionService.ts";
@@ -79,6 +80,7 @@ import {
   type KiroSkills,
   kiroPermissionDisposition,
   makeKiroAdapterV2,
+  makeKiroAcpRuntime,
   makeKiroSkills,
 } from "@t3tools/provider-kiro/testing";
 
@@ -93,7 +95,8 @@ const testLayer = Layer.mergeAll(
 );
 
 const SESSION_ID = "sess_abb5e0cf-d4a2-4360-9f03-2f8f0889a707";
-const ENABLED_KIRO_SETTINGS = Schema.decodeSync(KiroSettings)({ enabled: true });
+const decodeKiroTestSettings = Schema.decodeSync(KiroSettings);
+const ENABLED_KIRO_SETTINGS = decodeKiroTestSettings({ enabled: true });
 
 it("reports context windows only for explicit known Kiro models", () => {
   const selection = (model: string): ModelSelection => ({
@@ -2109,570 +2112,383 @@ describe("Kiro native question callbacks", () => {
   );
 });
 
-const approveForMeOption = (currentValue: boolean) => ({
-  id: "approveForMe",
-  name: "Approve for Me",
-  type: "boolean",
-  currentValue,
+it.live.each(["foreground-new", "foreground-load", "shared", "without-optin"] as const)(
+  "negotiates the strict Kiro 3.2.1 peer through %s stdio",
+  (entry) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-321-contract-" });
+      const wirePath = path.join(root, "wire.jsonl");
+      const capsPath = path.join(root, "capabilities.json");
+      const source = `
+import { appendFileSync, writeFileSync } from 'node:fs';
+import { createInterface } from 'node:readline';
+const wire = process.env.AFM_WIRE;
+const caps = process.env.AFM_CAPS;
+const sessionId = '${SESSION_ID}';
+let offered = false, currentValue = 'files', verified = false, pending;
+const config = () => offered ? [{ type: 'select', id: 'approveForMe', name: 'Approve for me', currentValue,
+  options: [{value:'files', name:'Follow permission files'}, {value:'on', name:'On'}, {value:'off', name:'Off'}],
+  _meta: {kiro: {approveForMe: {files: [], required: false}}} }] : [];
+const send = message => { appendFileSync(wire, JSON.stringify({direction:'peer', ...message}) + '\\n');
+  process.stdout.write(JSON.stringify({jsonrpc:'2.0', ...message}) + '\\n'); };
+createInterface({input: process.stdin}).on('line', line => {
+  const request = JSON.parse(line);
+  appendFileSync(wire, JSON.stringify({direction:'client', ...request}) + '\\n');
+  const {id, method, params} = request;
+  if (id === 'uncertain') {
+    if (request.result?.outcome?.optionId !== 'deny') throw Error('Original callback was not denied');
+    send({id:pending, result:{stopReason:'end_turn'}}); return;
+  }
+  if (id === undefined) return;
+  let result = {};
+  if (method === 'initialize') {
+    writeFileSync(caps, JSON.stringify(params.clientCapabilities));
+    offered = params.clientCapabilities?._meta?.kiro?.approveForMeOption === true && process.env.KIRO_TRUST_CLASSIFIER_MODE === 'enforce';
+    result = {protocolVersion:1, agentCapabilities:{loadSession:true, sessionCapabilities:{close:{}}}};
+  } else if (method === 'session/new' || method === 'session/load') {
+    verified = false;
+    result = {sessionId, configOptions:config()};
+  } else if (method === 'session/set_config_option') {
+    if (typeof params.value !== 'boolean') {
+      if (!offered || params.configId !== 'approveForMe' || !['files','on','off'].includes(params.value)) {
+        send({id, error:{code:-32602, message:'Invalid native selection'}}); return;
+      }
+      currentValue = params.value;
+      verified = currentValue === 'on';
+    }
+    result = {configOptions:config()};
+  } else if (method === 'session/prompt') {
+    if (!offered || !verified || currentValue !== 'on') throw Error('Prompt before verified native activation');
+    pending = id;
+    send({id:'uncertain', method:'session/request_permission', params:{sessionId,
+      toolCall:{toolCallId:'uncertain', title:'Uncertain native action', kind:'execute'},
+      options:[{optionId:'allow',name:'Allow once',kind:'allow_once'},{optionId:'deny',name:'Deny',kind:'reject_once'}]}});
+    return;
+  } else if (method !== 'session/close') throw Error('Unexpected request: ' + method);
+  send({id, result});
 });
-const activateApproveForMe = outbound("session/set_config_option", {
-  sessionId: SESSION_ID,
-  configId: "approveForMe",
-  type: "boolean",
-  value: true,
-});
-
-it.live.each(["new", "load"] as const)(
-  "verifies native Approve for Me on %s before prompting",
-  (activation) =>
-    runKiroScript({
-      scenario: `approve-for-me-${activation}`,
-      runtimeMode: "auto",
-      ...(activation === "load" ? { initialNativeThreadId: SESSION_ID } : {}),
-      inspectRuntime: (input) => {
-        assert.deepEqual(input.clientCapabilities?.session?.configOptions?.boolean, {});
-        assert.equal(input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE, "enforce");
-      },
-      frames: [
-        outbound("initialize"),
-        answer("initialize", KIRO_V3_INITIALIZE),
-        outbound(activation === "load" ? "session/load" : "session/new", {
-          ...(activation === "load" ? { sessionId: SESSION_ID } : {}),
-          cwd: "<workspace>",
-          mcpServers: "<any>",
-        }),
-        answer(
-          activation === "load" ? "session/load" : "session/new",
-          sessionSetup([approveForMeOption(false)]),
-        ),
-        activateApproveForMe,
-        configResult([approveForMeOption(true)]),
-        // Reverify even a previously true state before a subsequent prompt.
-        activateApproveForMe,
-        configResult([approveForMeOption(true)]),
-        turnPrompt,
-        answer("session/prompt", { stopReason: "end_turn" }),
-        ...closeSession,
-      ],
-      drive: ({ startTurn, events }) =>
-        Effect.gen(function* () {
-          yield* startTurn;
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
-
-it.live("routes native Auto uncertainty to the original user callback", () =>
-  runKiroScript({
-    scenario: "approve-for-me-uncertain",
-    runtimeMode: "auto",
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      turnPrompt,
-      update({
-        sessionUpdate: "tool_call",
-        toolCallId: "native-allowed",
-        title: "Synthetic native allowed action",
-        kind: "read",
-        status: "completed",
-      }),
-      update({
-        sessionUpdate: "tool_call",
-        toolCallId: "native-denied",
-        title: "Synthetic native denied action",
-        kind: "execute",
-        status: "failed",
-      }),
-      {
-        type: "emit_inbound",
-        label: "uncertain",
-        frame: {
-          kind: "request",
-          method: "session/request_permission",
-          params: {
-            sessionId: SESSION_ID,
-            toolCall: { toolCallId: "uncertain", title: "Uncertain command", kind: "execute" },
-            options: [
-              { optionId: "accept", name: "Allow once", kind: "allow_once" },
-              { optionId: "reject", name: "Deny", kind: "reject_once" },
-            ],
+`;
+      const binaryPath = writeFakeCli({ directory: root, name: "kiro-contract", source });
+      const settings = decodeKiroTestSettings({ enabled: true, binaryPath });
+      const environment = { AFM_WIRE: wirePath, AFM_CAPS: capsPath, HOME: root, KIRO_HOME: root };
+      const instanceId = ProviderInstanceId.make(`kiro-321-${entry}`);
+      const threadId = ThreadId.make(`kiro-321-${entry}`);
+      const modelSelection = { instanceId, model: "default" };
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        cwd: root,
+        runtimeMode: "auto",
+        interactionMode: "default",
+      });
+      let callbacks = 0;
+      if (entry === "shared" || entry === "without-optin") {
+        const clientCapabilities = {
+          session: { list: {}, configOptions: { boolean: { retained: true } } },
+          _meta: {
+            other: { retained: true },
+            kiro: {
+              hooks: { enabled: true, v2: true },
+              secretStorage: true,
+              userInput: true,
+              retained: true,
+            },
           },
-        },
-      },
-      {
-        type: "expect_outbound",
-        label: "original-callback-denied",
-        frame: {
-          kind: "response",
-          method: "session/request_permission",
-          result: { outcome: { outcome: "selected", optionId: "reject" } },
-        },
-      },
-      answer("session/prompt", { stopReason: "end_turn" }),
-      ...closeSession,
-    ],
-    drive: ({ events, startTurn, respond }) =>
-      Effect.gen(function* () {
-        const pending = yield* Deferred.make<RuntimeRequestId>();
-        const turn = yield* collectTurn(
-          events.pipe(
-            Stream.tap((event) =>
-              event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending"
-                ? Deferred.succeed(pending, event.runtimeRequest.id)
-                : Effect.void,
-            ),
+        };
+        const runtime = yield* entry === "shared"
+          ? makeKiroAcpRuntime({
+              cwd: root,
+              clientInfo: { name: "t3-code-test", version: "0" },
+              settings,
+              environment,
+              nativeAuto: true,
+              clientCapabilities,
+            })
+          : AcpSessionRuntime.make({
+              cwd: root,
+              clientInfo: { name: "t3-code-test", version: "0" },
+              clientCapabilities,
+              spawn: {
+                command: binaryPath,
+                args: [],
+                cwd: root,
+                env: { ...environment, KIRO_TRUST_CLASSIFIER_MODE: "enforce" },
+              },
+            });
+        yield* runtime.handleRequestPermission(() => {
+          callbacks++;
+          return Effect.succeed({ outcome: { outcome: "selected" as const, optionId: "deny" } });
+        });
+        yield* runtime.start();
+        if (entry === "without-optin") assert.deepEqual(yield* runtime.getConfigOptions, []);
+        else {
+          const ignored = yield* runtime.request("session/set_config_option", {
+            sessionId: SESSION_ID,
+            configId: "approveForMe",
+            type: "boolean",
+            value: true,
+          });
+          assert.deepEqual(ignored, { configOptions: yield* runtime.getConfigOptions });
+          assert.equal((yield* runtime.getConfigOptions)[0]?.currentValue, "files");
+          yield* runtime.setConfigOption("approveForMe", "on", { force: true });
+          assert.equal((yield* runtime.getConfigOptions)[0]?.currentValue, "on");
+          yield* runtime.prompt(
+            { prompt: [{ type: "text", text: "Synthetic contract check" }] },
+            {
+              admission: {
+                sessionId: SESSION_ID,
+                configOptions: [{ id: "approveForMe", value: "on" }],
+              },
+            },
+          );
+        }
+        const caps = JSON.parse(yield* fs.readFileString(capsPath));
+        assert.deepEqual(caps._meta, {
+          ...clientCapabilities._meta,
+          kiro: {
+            ...clientCapabilities._meta.kiro,
+            ...(entry === "shared" ? { approveForMeOption: true } : {}),
+          },
+        });
+        assert.deepEqual(caps.session, {
+          ...clientCapabilities.session,
+          notices: {},
+          compaction: {},
+        });
+      } else {
+        const adapter = yield* makeKiroAdapterV2({
+          instanceId,
+          settings,
+          environment,
+          selfInvocation: yield* resolveSelfInvocation(),
+        });
+        const session = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(`session-${entry}`),
+          modelSelection,
+          runtimePolicy,
+          ...(entry === "foreground-load" ? { initialNativeThreadId: SESSION_ID } : {}),
+        });
+        const providerThread = yield* session.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        const turn = makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+          ordinal: 1,
+          messageText: "Synthetic contract check",
+        });
+        const collected = yield* collectTurn(
+          session.events.pipe(
+            Stream.tap((event) => {
+              if (
+                event.type !== "runtime_request.updated" ||
+                event.runtimeRequest.status !== "pending"
+              )
+                return Effect.void;
+              callbacks++;
+              return session.respondToRuntimeRequest({
+                requestId: event.runtimeRequest.id,
+                decision: "decline",
+              });
+            }),
           ),
         ).pipe(Effect.forkChild);
-        yield* startTurn;
-        yield* respond(yield* Deferred.await(pending), "decline");
-        assert.equal(terminalStatus(yield* Fiber.join(turn)), "completed");
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped),
+        yield* session.startTurn(turn);
+        assert.equal(terminalStatus(yield* Fiber.join(collected)), "completed");
+        const caps = JSON.parse(yield* fs.readFileString(capsPath));
+        assert.deepEqual(caps._meta.kiro, {
+          hooks: { enabled: true, v2: true },
+          secretStorage: true,
+          openExternalUrl: true,
+          userInput: true,
+          approveForMeOption: true,
+        });
+        assert.deepEqual(caps.session.configOptions.boolean, {});
+      }
+      assert.equal(callbacks, entry === "without-optin" ? 0 : 1);
+      const wire = yield* fs.readFileString(wirePath);
+      yield* Effect.logInfo("Strict synthetic Kiro 3.2.1 ACP stdio", { entry, wire });
+      const evidenceDir = Option.getOrUndefined(
+        yield* Config.option(Config.String("T3_KIRO_AFM_TEST_EVIDENCE_DIR")),
+      );
+      if (evidenceDir) {
+        yield* fs.makeDirectory(evidenceDir, { recursive: true });
+        yield* fs.writeFileString(path.join(evidenceDir, `${entry}.jsonl`), wire);
+        yield* fs.copyFile(capsPath, path.join(evidenceDir, `${entry}-capabilities.json`));
+        yield* fs.writeFileString(path.join(evidenceDir, "strict-peer-source.mjs"), source);
+      }
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
 );
 
-it.live.each(["approval-required", "full-access"] as const)(
-  "reopens native Auto with classifier off when switching to %s",
-  (mode) =>
-    runKiroScript({
-      scenario: `approve-for-me-switch-${mode}`,
-      runtimeMode: "auto",
-      inspectRuntime: (input) =>
-        assert.equal(
-          input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
-          input.runtimePolicy.runtimeMode === "auto" ? "enforce" : "off",
-        ),
-      frames: [
-        outbound("initialize"),
-        answer("initialize", KIRO_V3_INITIALIZE),
-        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-        answer("session/new", sessionSetup([approveForMeOption(false)])),
-        activateApproveForMe,
-        configResult([approveForMeOption(true)]),
-        activateApproveForMe,
-        configResult([approveForMeOption(true)]),
-        turnPrompt,
-        answer("session/prompt", { stopReason: "end_turn" }),
-      ],
-      replacementFrames: [
-        outbound("initialize"),
-        answer("initialize", KIRO_V3_INITIALIZE),
-        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-        answer("session/new", sessionSetup([approveForMeOption(true)])),
-        outbound("session/load", {
+describe.each(["boolean", "select"] as const)("native Approve for Me %s contract", (contract) => {
+  const approveForMeOption = (currentValue: boolean) =>
+    contract === "select"
+      ? {
+          id: "approveForMe",
+          name: "Approve for me",
+          type: "select",
+          currentValue: currentValue ? "on" : "files",
+          options: [
+            {
+              group: "native",
+              name: "Native policy",
+              options: [
+                { value: "files", name: "Follow permission files" },
+                { value: "on", name: "On" },
+                { value: "off", name: "Off" },
+              ],
+            },
+          ],
+        }
+      : {
+          id: "approveForMe",
+          name: "Approve for Me",
+          type: "boolean",
+          currentValue,
+        };
+  const activateApproveForMe =
+    contract === "select"
+      ? setConfig("approveForMe", "on")
+      : outbound("session/set_config_option", {
           sessionId: SESSION_ID,
-          cwd: "<workspace>",
-          mcpServers: "<any>",
-        }),
-        answer("session/load", sessionSetup([approveForMeOption(true)])),
-        turnPrompt,
-        answer("session/prompt", { stopReason: "end_turn" }),
-        ...closeSession,
-      ],
-      drive: ({ startTurn, startTurnInMode, events }) =>
-        Effect.gen(function* () {
-          yield* startTurn;
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-          yield* startTurnInMode(2, mode);
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
+          configId: "approveForMe",
+          type: "boolean",
+          value: true,
+        });
 
-it.live.each(["approval-required", "full-access"] as const)(
-  "reserves forged native approveForMe options in %s",
-  (runtimeMode) =>
-    runKiroScript({
-      scenario: `approve-for-me-forged-${runtimeMode}`,
-      runtimeMode,
-      options: [{ id: "approveForMe", value: true }],
-      policyOverrides: {
-        maxRuntimeMode: "approval-required",
-        approvalPolicy: "on-request",
-        sandboxPolicy: { type: "readOnly" },
-      },
-      inspectRuntime: (input) =>
-        assert.equal(input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE, "off"),
-      frames: [
-        outbound("initialize"),
-        answer("initialize", KIRO_V3_INITIALIZE),
-        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-        answer("session/new", sessionSetup([approveForMeOption(true)])),
-        turnPrompt,
-        answer("session/prompt", { stopReason: "end_turn" }),
-        ...closeSession,
-      ],
-      drive: ({ startTurn, events }) =>
-        Effect.gen(function* () {
-          yield* startTurn;
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
-
-it.live.each(["approval-required", "full-access"] as const)(
-  "starts an enforce runtime when switching %s into native Auto",
-  (runtimeMode) =>
-    runKiroScript({
-      scenario: `approve-for-me-enter-${runtimeMode}`,
-      runtimeMode,
-      inspectRuntime: (input) =>
-        assert.equal(
-          input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
-          input.runtimePolicy.runtimeMode === "auto" ? "enforce" : "off",
-        ),
-      frames: [
-        outbound("initialize"),
-        answer("initialize", KIRO_V3_INITIALIZE),
-        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-        answer("session/new", sessionSetup([approveForMeOption(true)])),
-        turnPrompt,
-        answer("session/prompt", { stopReason: "end_turn" }),
-      ],
-      replacementFrames: [
-        outbound("initialize"),
-        answer("initialize", KIRO_V3_INITIALIZE),
-        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-        answer("session/new", sessionSetup([approveForMeOption(false)])),
-        outbound("session/load", {
-          sessionId: SESSION_ID,
-          cwd: "<workspace>",
-          mcpServers: "<any>",
-        }),
-        answer("session/load", sessionSetup([approveForMeOption(true)])),
-        activateApproveForMe,
-        configResult([approveForMeOption(true)]),
-        turnPrompt,
-        answer("session/prompt", { stopReason: "end_turn" }),
-        ...closeSession,
-      ],
-      drive: ({ startTurn, startTurnInMode, events }) =>
-        Effect.gen(function* () {
-          yield* startTurn;
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-          yield* startTurnInMode(2, "auto");
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        }),
-    }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
-
-it.live("verifies native Auto again on a rollback replacement", () =>
-  runKiroScript({
-    scenario: "approve-for-me-replacement",
-    runtimeMode: "auto",
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-    ],
-    replacementFrames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      turnPrompt,
-      answer("session/prompt", { stopReason: "end_turn" }),
-      ...closeSession,
-    ],
-    drive: ({ rollbackToStart, startTurn, events }) =>
-      Effect.gen(function* () {
-        yield* rollbackToStart;
-        yield* startTurn;
-        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
-
-it.live.each(["false", "missing", "true"] as const)(
-  "admits native Auto at dispatch after preparation observes %s",
-  (state) =>
-    Effect.gen(function* () {
-      const mcp = yield* McpProviderSessions.McpProviderSessions;
-      const preparing = yield* Deferred.make<void>();
-      const release = yield* Deferred.make<void>();
-      const observed = yield* Deferred.make<void>();
-      const gate = makeProviderReplayGate(["withdraw-during-preparation"]);
-      let writes = 0;
-      let held = false;
-      yield* runKiroScript({
-        scenario: `approve-dispatch-${state}`,
+  it.live.each(["new", "load"] as const)(
+    "verifies native Approve for Me on %s before prompting",
+    (activation) =>
+      runKiroScript({
+        scenario: `approve-for-me-${activation}`,
         runtimeMode: "auto",
-        replayGate: gate,
-        wrapRuntime: (runtime) => ({
-          ...runtime,
-          setConfigOption: (id, value, options) =>
-            runtime.setConfigOption(id, value, options).pipe(
-              Effect.tap(() =>
-                Effect.sync(() => {
-                  if (id === "approveForMe") writes++;
-                }),
-              ),
-            ),
-        }),
-        onSessionUpdate: ({ update }) =>
-          update.sessionUpdate === "config_option_update"
-            ? Deferred.succeed(observed, undefined).pipe(Effect.asVoid)
-            : Effect.void,
+        ...(activation === "load" ? { initialNativeThreadId: SESSION_ID } : {}),
+        inspectRuntime: (input) => {
+          assert.deepEqual(input.clientCapabilities?.session?.configOptions?.boolean, {});
+          assert.equal(input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE, "enforce");
+        },
         frames: [
           outbound("initialize"),
           answer("initialize", KIRO_V3_INITIALIZE),
-          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-          answer("session/new", sessionSetup([approveForMeOption(false)])),
+          outbound(activation === "load" ? "session/load" : "session/new", {
+            ...(activation === "load" ? { sessionId: SESSION_ID } : {}),
+            cwd: "<workspace>",
+            mcpServers: "<any>",
+          }),
+          answer(
+            activation === "load" ? "session/load" : "session/new",
+            sessionSetup([approveForMeOption(false)]),
+          ),
           activateApproveForMe,
           configResult([approveForMeOption(true)]),
+          // Reverify even a previously true state before a subsequent prompt.
           activateApproveForMe,
           configResult([approveForMeOption(true)]),
-          {
-            ...update({
-              sessionUpdate: "config_option_update",
-              configOptions: state === "missing" ? [] : [approveForMeOption(state === "true")],
-            }),
-            label: "withdraw-during-preparation",
-          },
-          ...(state === "true"
-            ? [turnPrompt, answer("session/prompt", { stopReason: "end_turn" })]
-            : []),
-          ...(state === "false"
-            ? [
-                activateApproveForMe,
-                configResult([approveForMeOption(true)]),
-                turnPrompt,
-                answer("session/prompt", { stopReason: "end_turn" }),
-              ]
-            : []),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
           ...closeSession,
         ],
-        drive: ({ startTurn, startTurnOn, events, hasPendingBackgroundWork }) =>
+        drive: ({ startTurn, events }) =>
           Effect.gen(function* () {
-            const terminal = yield* collectTurn(events).pipe(Effect.forkChild);
-            const started = yield* Effect.exit(startTurn).pipe(Effect.forkChild);
-            yield* Deferred.await(preparing);
-            assert.equal(writes, 2);
-            gate.release("withdraw-during-preparation");
-            yield* Deferred.await(observed);
-            yield* Deferred.succeed(release, undefined);
-            const result = yield* Fiber.join(started);
-            const settled = yield* Fiber.join(terminal);
-            assert.equal(terminalStatus(settled), state === "true" ? "completed" : "failed");
-            if (state === "true") assert.isTrue(Exit.isSuccess(result));
-            else {
-              assert.isTrue(Exit.isFailure(result));
-              if (Exit.isFailure(result)) {
-                const error = Cause.findError(result.cause);
-                assert.isTrue(error._tag === "Success" && refusedBeforePrompt(error.success));
-              }
-            }
-            assert.isFalse(yield* hasPendingBackgroundWork);
-            if (state === "false") {
-              yield* startTurnOn(2, "default");
-              assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-            }
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
           }),
-      }).pipe(
-        Effect.provideService(McpProviderSessions.McpProviderSessions, {
-          ...mcp,
-          read: (threadId) =>
-            Effect.suspend(() => {
-              if (writes !== 2 || held) return mcp.read(threadId);
-              held = true;
-              return Deferred.succeed(preparing, undefined).pipe(
-                Effect.andThen(Deferred.await(release)),
-                Effect.andThen(mcp.read(threadId)),
-              );
-            }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live("routes native Auto uncertainty to the original user callback", () =>
+    runKiroScript({
+      scenario: "approve-for-me-uncertain",
+      runtimeMode: "auto",
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        update({
+          sessionUpdate: "tool_call",
+          toolCallId: "native-allowed",
+          title: "Synthetic native allowed action",
+          kind: "read",
+          status: "completed",
         }),
-      );
+        update({
+          sessionUpdate: "tool_call",
+          toolCallId: "native-denied",
+          title: "Synthetic native denied action",
+          kind: "execute",
+          status: "failed",
+        }),
+        {
+          type: "emit_inbound",
+          label: "uncertain",
+          frame: {
+            kind: "request",
+            method: "session/request_permission",
+            params: {
+              sessionId: SESSION_ID,
+              toolCall: { toolCallId: "uncertain", title: "Uncertain command", kind: "execute" },
+              options: [
+                { optionId: "accept", name: "Allow once", kind: "allow_once" },
+                { optionId: "reject", name: "Deny", kind: "reject_once" },
+              ],
+            },
+          },
+        },
+        {
+          type: "expect_outbound",
+          label: "original-callback-denied",
+          frame: {
+            kind: "response",
+            method: "session/request_permission",
+            result: { outcome: { outcome: "selected", optionId: "reject" } },
+          },
+        },
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ events, startTurn, respond }) =>
+        Effect.gen(function* () {
+          const pending = yield* Deferred.make<RuntimeRequestId>();
+          const turn = yield* collectTurn(
+            events.pipe(
+              Stream.tap((event) =>
+                event.type === "runtime_request.updated" &&
+                event.runtimeRequest.status === "pending"
+                  ? Deferred.succeed(pending, event.runtimeRequest.id)
+                  : Effect.void,
+              ),
+            ),
+          ).pipe(Effect.forkChild);
+          yield* startTurn;
+          yield* respond(yield* Deferred.await(pending), "decline");
+          assert.equal(terminalStatus(yield* Fiber.join(turn)), "completed");
+        }),
     }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
+  );
 
-it.live("admits the incoming Supervised policy before forced native Auto replacement", () => {
-  let made = 0;
-  return runKiroScript({
-    scenario: "approve-replacement-supervised",
-    runtimeMode: "auto",
-    inspectRuntime: (input) => {
-      made++;
-      assert.equal(input.runtimePolicy.runtimeMode, made === 1 ? "auto" : "approval-required");
-      assert.equal(
-        input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
-        made === 1 ? "enforce" : "off",
-      );
-    },
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-    ],
-    replacementFrames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(true)])),
-      turnPrompt,
-      answer("session/prompt", { stopReason: "end_turn" }),
-      ...closeSession,
-    ],
-    drive: ({ forceReplacement, startTurnOn, events }) =>
-      Effect.gen(function* () {
-        yield* forceReplacement({ runtimeMode: "approval-required" });
-        yield* startTurnOn(1, "default");
-        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        assert.equal(made, 2);
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped);
-});
-
-it.live("retains native Auto ownership after a changed-policy candidate fails startup", () => {
-  let made = 0;
-  return runKiroScript({
-    scenario: "approve-replacement-startup-failure",
-    runtimeMode: "auto",
-    inspectRuntime: (input) => {
-      made++;
-      assert.equal(
-        input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
-        made === 1 ? "enforce" : "off",
-      );
-    },
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      turnPrompt,
-      answer("session/prompt", { stopReason: "end_turn" }),
-      ...closeSession,
-    ],
-    replacementFrames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      {
-        type: "emit_inbound",
-        label: "candidate-startup-error",
-        frame: {
-          kind: "response",
-          method: "session/new",
-          error: { code: -32603, message: "Synthetic candidate startup failure" },
-        },
-      },
-    ],
-    drive: ({ forceReplacement, startTurn, events }) =>
-      Effect.gen(function* () {
-        const failed = yield* Effect.exit(forceReplacement({ runtimeMode: "approval-required" }));
-        assert.isTrue(Exit.isFailure(failed));
-        yield* startTurn;
-        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        assert.equal(made, 2);
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped);
-});
-
-it.live.each([
-  { approvalPolicy: "on-request" },
-  { sandboxPolicy: { type: "readOnly" } },
-  { interactionMode: "plan" as const },
-  { maxRuntimeMode: "approval-required" as const },
-])("rejects forbidden replacement policy before candidate construction (%j)", (policy) => {
-  let made = 0;
-  return runKiroScript({
-    scenario: `approve-replacement-forbidden-${Object.keys(policy)[0]}`,
-    runtimeMode: "auto",
-    inspectRuntime: () => {
-      made++;
-    },
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      turnPrompt,
-      answer("session/prompt", { stopReason: "end_turn" }),
-      ...closeSession,
-    ],
-    drive: ({ forceReplacement, startTurn, events }) =>
-      Effect.gen(function* () {
-        const result = yield* Effect.exit(forceReplacement(policy));
-        assert.isTrue(Exit.isFailure(result));
-        assert.equal(made, 1);
-        if (Exit.isFailure(result)) assert.include(Cause.pretty(result.cause), "cannot enforce");
-        yield* startTurn;
-        assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
-        assert.equal(made, 1);
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped);
-});
-
-it.live("keeps native errors after Auto dispatch classified as sent", () =>
-  runKiroScript({
-    scenario: "approve-dispatched-native-error",
-    runtimeMode: "auto",
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(false)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      turnPrompt,
-      update({ sessionUpdate: "config_option_update", configOptions: [approveForMeOption(false)] }),
-      {
-        type: "emit_inbound",
-        label: "native-prompt-error",
-        frame: {
-          kind: "response",
-          method: "session/prompt",
-          error: { code: -32603, message: "Synthetic error after native acceptance" },
-        },
-      },
-      ...closeSession,
-    ],
-    drive: ({ startTurn, events }) =>
-      Effect.gen(function* () {
-        yield* startTurn;
-        const turn = yield* collectTurn(events);
-        assert.equal(terminalStatus(turn), "failed");
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
-
-it.live.each([false, true])(
-  "publishes held ACP text through paragraph filtering only at its boundary (%s)",
-  (paragraph) =>
-    Effect.gen(function* () {
-      const published = yield* Deferred.make<{
-        raw: ProviderAdapterV2Event;
-        delivered: ProviderAdapterV2Event | null;
-      }>();
-      const filter = makeAssistantStreamingFilter("paragraph");
-      const text = "SCRIPTED waiting for browser cancellation." + (paragraph ? "\n\n" : "");
-      yield* runKiroScript({
-        scenario: `held-single-chunk-${paragraph}`,
+  it.live.each(["approval-required", "full-access"] as const)(
+    "reopens native Auto with classifier off when switching to %s",
+    (mode) =>
+      runKiroScript({
+        scenario: `approve-for-me-switch-${mode}`,
         runtimeMode: "auto",
+        inspectRuntime: (input) =>
+          assert.equal(
+            input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+            input.runtimePolicy.runtimeMode === "auto" ? "enforce" : "off",
+          ),
         frames: [
           outbound("initialize"),
           answer("initialize", KIRO_V3_INITIALIZE),
@@ -2683,86 +2499,562 @@ it.live.each([false, true])(
           activateApproveForMe,
           configResult([approveForMeOption(true)]),
           turnPrompt,
-          update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
-          {
-            type: "expect_outbound",
-            label: "cancel",
-            frame: {
-              kind: "notification",
-              method: "session/cancel",
-              params: { sessionId: SESSION_ID },
-            },
-          },
-          update({
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: "SCRIPTED browser cancellation received." },
+          answer("session/prompt", { stopReason: "end_turn" }),
+        ],
+        replacementFrames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", sessionSetup([approveForMeOption(true)])),
+          outbound("session/load", {
+            sessionId: SESSION_ID,
+            cwd: "<workspace>",
+            mcpServers: "<any>",
           }),
-          answer("session/prompt", { stopReason: "cancelled" }),
+          answer("session/load", sessionSetup([approveForMeOption(true)])),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
           ...closeSession,
         ],
-        drive: ({ startTurn, events, interrupt }) =>
+        drive: ({ startTurn, startTurnInMode, events }) =>
           Effect.gen(function* () {
-            const settled = yield* collectTurn(
-              events.pipe(
-                Stream.tap((event) =>
-                  event.type === "turn_item.updated" &&
-                  event.turnItem.type === "assistant_message" &&
-                  event.turnItem.streaming
-                    ? Deferred.succeed(published, { raw: event, delivered: filter(event, 0) })
-                    : Effect.void,
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+            yield* startTurnInMode(2, mode);
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live.each(["approval-required", "full-access"] as const)(
+    "reserves forged native approveForMe options in %s",
+    (runtimeMode) =>
+      runKiroScript({
+        scenario: `approve-for-me-forged-${runtimeMode}`,
+        runtimeMode,
+        options: [{ id: "approveForMe", value: contract === "select" ? "on" : true }],
+        policyOverrides: {
+          maxRuntimeMode: "approval-required",
+          approvalPolicy: "on-request",
+          sandboxPolicy: { type: "readOnly" },
+        },
+        inspectRuntime: (input) =>
+          assert.equal(input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE, "off"),
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", sessionSetup([approveForMeOption(true)])),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...closeSession,
+        ],
+        drive: ({ startTurn, events }) =>
+          Effect.gen(function* () {
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live.each(["approval-required", "full-access"] as const)(
+    "starts an enforce runtime when switching %s into native Auto",
+    (runtimeMode) =>
+      runKiroScript({
+        scenario: `approve-for-me-enter-${runtimeMode}`,
+        runtimeMode,
+        inspectRuntime: (input) =>
+          assert.equal(
+            input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+            input.runtimePolicy.runtimeMode === "auto" ? "enforce" : "off",
+          ),
+        frames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", sessionSetup([approveForMeOption(true)])),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
+        ],
+        replacementFrames: [
+          outbound("initialize"),
+          answer("initialize", KIRO_V3_INITIALIZE),
+          outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+          answer("session/new", sessionSetup([approveForMeOption(false)])),
+          outbound("session/load", {
+            sessionId: SESSION_ID,
+            cwd: "<workspace>",
+            mcpServers: "<any>",
+          }),
+          answer("session/load", sessionSetup([approveForMeOption(true)])),
+          activateApproveForMe,
+          configResult([approveForMeOption(true)]),
+          turnPrompt,
+          answer("session/prompt", { stopReason: "end_turn" }),
+          ...closeSession,
+        ],
+        drive: ({ startTurn, startTurnInMode, events }) =>
+          Effect.gen(function* () {
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+            yield* startTurnInMode(2, "auto");
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          }),
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live("verifies native Auto again on a rollback replacement", () =>
+    runKiroScript({
+      scenario: "approve-for-me-replacement",
+      runtimeMode: "auto",
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+      ],
+      replacementFrames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ rollbackToStart, startTurn, events }) =>
+        Effect.gen(function* () {
+          yield* rollbackToStart;
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live.each(["false", "off", "missing", "type-flip", "choice-withdrawn", "true"] as const)(
+    "admits native Auto at dispatch after preparation observes %s",
+    (state) =>
+      Effect.gen(function* () {
+        const mcp = yield* McpProviderSessions.McpProviderSessions;
+        const preparing = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const observed = yield* Deferred.make<void>();
+        const gate = makeProviderReplayGate(["withdraw-during-preparation"]);
+        let writes = 0;
+        let held = false;
+        yield* runKiroScript({
+          scenario: `approve-dispatch-${state}`,
+          runtimeMode: "auto",
+          replayGate: gate,
+          wrapRuntime: (runtime) => ({
+            ...runtime,
+            setConfigOption: (id, value, options) =>
+              runtime.setConfigOption(id, value, options).pipe(
+                Effect.tap(() =>
+                  Effect.sync(() => {
+                    if (id === "approveForMe") writes++;
+                  }),
                 ),
               ),
-            ).pipe(Effect.forkChild);
-            yield* startTurn;
-            const { raw: event, delivered } = yield* Deferred.await(published);
-            assert.equal(delivered !== null, paragraph);
-            if (
-              delivered?.type === "turn_item.updated" &&
-              delivered.turnItem.type === "assistant_message"
-            )
-              assert.equal(delivered.turnItem.text, text);
-            assert.equal(event.type, "turn_item.updated");
-            if (event.type === "turn_item.updated" && event.turnItem.type === "assistant_message") {
-              assert.equal(event.turnItem.text, text);
-              assert.equal(event.turnItem.status, "running");
-              yield* interrupt(event.turnItem.providerTurnId!);
-            }
-            assert.equal(terminalStatus(yield* Fiber.join(settled)), "interrupted");
           }),
-      });
+          onSessionUpdate: ({ update }) =>
+            update.sessionUpdate === "config_option_update"
+              ? Deferred.succeed(observed, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+          frames: [
+            outbound("initialize"),
+            answer("initialize", KIRO_V3_INITIALIZE),
+            outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+            answer("session/new", sessionSetup([approveForMeOption(false)])),
+            activateApproveForMe,
+            configResult([approveForMeOption(true)]),
+            activateApproveForMe,
+            configResult([approveForMeOption(true)]),
+            {
+              ...update({
+                sessionUpdate: "config_option_update",
+                configOptions:
+                  state === "missing"
+                    ? []
+                    : [
+                        state === "type-flip"
+                          ? contract === "select"
+                            ? {
+                                id: "approveForMe",
+                                name: "Approve",
+                                type: "boolean",
+                                currentValue: true,
+                              }
+                            : {
+                                id: "approveForMe",
+                                name: "Approve",
+                                type: "select",
+                                currentValue: "on",
+                                options: [{ value: "on", name: "On" }],
+                              }
+                          : state === "choice-withdrawn" && contract === "select"
+                            ? {
+                                ...approveForMeOption(true),
+                                options: [{ value: "off", name: "Off" }],
+                              }
+                            : state === "off" && contract === "select"
+                              ? { ...approveForMeOption(false), currentValue: "off" }
+                              : approveForMeOption(
+                                  state === "true" ||
+                                    (state === "choice-withdrawn" && contract === "boolean"),
+                                ),
+                      ],
+              }),
+              label: "withdraw-during-preparation",
+            },
+            ...(state === "true" || (state === "choice-withdrawn" && contract === "boolean")
+              ? [turnPrompt, answer("session/prompt", { stopReason: "end_turn" })]
+              : []),
+            ...(state === "false"
+              ? [
+                  activateApproveForMe,
+                  configResult([approveForMeOption(true)]),
+                  turnPrompt,
+                  answer("session/prompt", { stopReason: "end_turn" }),
+                ]
+              : []),
+            ...closeSession,
+          ],
+          drive: ({ startTurn, startTurnOn, events, hasPendingBackgroundWork }) =>
+            Effect.gen(function* () {
+              const terminal = yield* collectTurn(events).pipe(Effect.forkChild);
+              const started = yield* Effect.exit(startTurn).pipe(Effect.forkChild);
+              yield* Deferred.await(preparing);
+              assert.equal(writes, 2);
+              gate.release("withdraw-during-preparation");
+              yield* Deferred.await(observed);
+              yield* Deferred.succeed(release, undefined);
+              const result = yield* Fiber.join(started);
+              const settled = yield* Fiber.join(terminal);
+              assert.equal(
+                terminalStatus(settled),
+                state === "true" || (state === "choice-withdrawn" && contract === "boolean")
+                  ? "completed"
+                  : "failed",
+              );
+              if (state === "true" || (state === "choice-withdrawn" && contract === "boolean"))
+                assert.isTrue(Exit.isSuccess(result));
+              else {
+                assert.isTrue(Exit.isFailure(result));
+                if (Exit.isFailure(result)) {
+                  const error = Cause.findError(result.cause);
+                  assert.isTrue(error._tag === "Success" && refusedBeforePrompt(error.success));
+                }
+              }
+              assert.isFalse(yield* hasPendingBackgroundWork);
+              if (state === "false") {
+                yield* startTurnOn(2, "default");
+                assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+              }
+            }),
+        }).pipe(
+          Effect.provideService(McpProviderSessions.McpProviderSessions, {
+            ...mcp,
+            read: (threadId) =>
+              Effect.suspend(() => {
+                if (writes !== 2 || held) return mcp.read(threadId);
+                held = true;
+                return Deferred.succeed(preparing, undefined).pipe(
+                  Effect.andThen(Deferred.await(release)),
+                  Effect.andThen(mcp.read(threadId)),
+                );
+              }),
+          }),
+        );
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live("admits the incoming Supervised policy before forced native Auto replacement", () => {
+    let made = 0;
+    return runKiroScript({
+      scenario: "approve-replacement-supervised",
+      runtimeMode: "auto",
+      inspectRuntime: (input) => {
+        made++;
+        assert.equal(input.runtimePolicy.runtimeMode, made === 1 ? "auto" : "approval-required");
+        assert.equal(
+          input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+          made === 1 ? "enforce" : "off",
+        );
+      },
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+      ],
+      replacementFrames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(true)])),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ forceReplacement, startTurnOn, events }) =>
+        Effect.gen(function* () {
+          yield* forceReplacement({ runtimeMode: "approval-required" });
+          yield* startTurnOn(1, "default");
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          assert.equal(made, 2);
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped);
+  });
+
+  it.live("retains native Auto ownership after a changed-policy candidate fails startup", () => {
+    let made = 0;
+    return runKiroScript({
+      scenario: "approve-replacement-startup-failure",
+      runtimeMode: "auto",
+      inspectRuntime: (input) => {
+        made++;
+        assert.equal(
+          input.processEnvironment?.KIRO_TRUST_CLASSIFIER_MODE,
+          made === 1 ? "enforce" : "off",
+        );
+      },
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      replacementFrames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        {
+          type: "emit_inbound",
+          label: "candidate-startup-error",
+          frame: {
+            kind: "response",
+            method: "session/new",
+            error: { code: -32603, message: "Synthetic candidate startup failure" },
+          },
+        },
+      ],
+      drive: ({ forceReplacement, startTurn, events }) =>
+        Effect.gen(function* () {
+          const failed = yield* Effect.exit(forceReplacement({ runtimeMode: "approval-required" }));
+          assert.isTrue(Exit.isFailure(failed));
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          assert.equal(made, 2);
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped);
+  });
+
+  it.live.each([
+    { approvalPolicy: "on-request" },
+    { sandboxPolicy: { type: "readOnly" } },
+    { interactionMode: "plan" as const },
+    { maxRuntimeMode: "approval-required" as const },
+  ])("rejects forbidden replacement policy before candidate construction (%j)", (policy) => {
+    let made = 0;
+    return runKiroScript({
+      scenario: `approve-replacement-forbidden-${Object.keys(policy)[0]}`,
+      runtimeMode: "auto",
+      inspectRuntime: () => {
+        made++;
+      },
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...closeSession,
+      ],
+      drive: ({ forceReplacement, startTurn, events }) =>
+        Effect.gen(function* () {
+          const result = yield* Effect.exit(forceReplacement(policy));
+          assert.isTrue(Exit.isFailure(result));
+          assert.equal(made, 1);
+          if (Exit.isFailure(result)) assert.include(Cause.pretty(result.cause), "cannot enforce");
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          assert.equal(made, 1);
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped);
+  });
+
+  it.live("keeps native errors after Auto dispatch classified as sent", () =>
+    runKiroScript({
+      scenario: "approve-dispatched-native-error",
+      runtimeMode: "auto",
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(false)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        turnPrompt,
+        update({
+          sessionUpdate: "config_option_update",
+          configOptions: [approveForMeOption(false)],
+        }),
+        {
+          type: "emit_inbound",
+          label: "native-prompt-error",
+          frame: {
+            kind: "response",
+            method: "session/prompt",
+            error: { code: -32603, message: "Synthetic error after native acceptance" },
+          },
+        },
+        ...closeSession,
+      ],
+      drive: ({ startTurn, events }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          const turn = yield* collectTurn(events);
+          assert.equal(terminalStatus(turn), "failed");
+        }),
     }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
+  );
 
-it.live("marks lost native Auto activation as unsent preparation before prompting", () =>
-  runKiroScript({
-    scenario: "approve-for-me-withdrawn",
-    runtimeMode: "auto",
-    frames: [
-      outbound("initialize"),
-      answer("initialize", KIRO_V3_INITIALIZE),
-      outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
-      answer("session/new", sessionSetup([approveForMeOption(true)])),
-      activateApproveForMe,
-      configResult([approveForMeOption(true)]),
-      activateApproveForMe,
-      configResult([approveForMeOption(false)]),
-      ...closeSession,
-    ],
-    drive: ({ startTurn }) =>
+  it.live.each([false, true])(
+    "publishes held ACP text through paragraph filtering only at its boundary (%s)",
+    (paragraph) =>
       Effect.gen(function* () {
-        const result = yield* Effect.exit(startTurn);
-        assert.isTrue(Exit.isFailure(result));
-        if (Exit.isFailure(result)) {
-          assert.include(Cause.pretty(result.cause), "ProviderAdapterTurnPreparationError");
-          assert.include(Cause.pretty(result.cause), "approveForMe is unavailable");
-        }
-      }),
-  }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
+        const published = yield* Deferred.make<{
+          raw: ProviderAdapterV2Event;
+          delivered: ProviderAdapterV2Event | null;
+        }>();
+        const filter = makeAssistantStreamingFilter("paragraph");
+        const text = "SCRIPTED waiting for browser cancellation." + (paragraph ? "\n\n" : "");
+        yield* runKiroScript({
+          scenario: `held-single-chunk-${paragraph}`,
+          runtimeMode: "auto",
+          frames: [
+            outbound("initialize"),
+            answer("initialize", KIRO_V3_INITIALIZE),
+            outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+            answer("session/new", sessionSetup([approveForMeOption(false)])),
+            activateApproveForMe,
+            configResult([approveForMeOption(true)]),
+            activateApproveForMe,
+            configResult([approveForMeOption(true)]),
+            turnPrompt,
+            update({ sessionUpdate: "agent_message_chunk", content: { type: "text", text } }),
+            {
+              type: "expect_outbound",
+              label: "cancel",
+              frame: {
+                kind: "notification",
+                method: "session/cancel",
+                params: { sessionId: SESSION_ID },
+              },
+            },
+            update({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "SCRIPTED browser cancellation received." },
+            }),
+            answer("session/prompt", { stopReason: "cancelled" }),
+            ...closeSession,
+          ],
+          drive: ({ startTurn, events, interrupt }) =>
+            Effect.gen(function* () {
+              const settled = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) =>
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.type === "assistant_message" &&
+                    event.turnItem.streaming
+                      ? Deferred.succeed(published, { raw: event, delivered: filter(event, 0) })
+                      : Effect.void,
+                  ),
+                ),
+              ).pipe(Effect.forkChild);
+              yield* startTurn;
+              const { raw: event, delivered } = yield* Deferred.await(published);
+              assert.equal(delivered !== null, paragraph);
+              if (
+                delivered?.type === "turn_item.updated" &&
+                delivered.turnItem.type === "assistant_message"
+              )
+                assert.equal(delivered.turnItem.text, text);
+              assert.equal(event.type, "turn_item.updated");
+              if (
+                event.type === "turn_item.updated" &&
+                event.turnItem.type === "assistant_message"
+              ) {
+                assert.equal(event.turnItem.text, text);
+                assert.equal(event.turnItem.status, "running");
+                yield* interrupt(event.turnItem.providerTurnId!);
+              }
+              assert.equal(terminalStatus(yield* Fiber.join(settled)), "interrupted");
+            }),
+        });
+      }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
 
-it.live.each(["absent", "select", "false", "no-op", "organization", "error"] as const)(
-  "fails closed before prompting when native Approve for Me is %s",
-  (failure) =>
+  it.live("marks lost native Auto activation as unsent preparation before prompting", () =>
+    runKiroScript({
+      scenario: "approve-for-me-withdrawn",
+      runtimeMode: "auto",
+      frames: [
+        outbound("initialize"),
+        answer("initialize", KIRO_V3_INITIALIZE),
+        outbound("session/new", { cwd: "<workspace>", mcpServers: "<any>" }),
+        answer("session/new", sessionSetup([approveForMeOption(true)])),
+        activateApproveForMe,
+        configResult([approveForMeOption(true)]),
+        activateApproveForMe,
+        configResult([approveForMeOption(false)]),
+        ...closeSession,
+      ],
+      drive: ({ startTurn }) =>
+        Effect.gen(function* () {
+          const result = yield* Effect.exit(startTurn);
+          assert.isTrue(Exit.isFailure(result));
+          if (Exit.isFailure(result)) {
+            assert.include(Cause.pretty(result.cause), "ProviderAdapterTurnPreparationError");
+            assert.include(Cause.pretty(result.cause), "approveForMe is unavailable");
+          }
+        }),
+    }).pipe(Effect.provide(testLayer), Effect.scoped),
+  );
+
+  it.live.each([
+    "absent",
+    "select",
+    "false",
+    "off",
+    "wrong-type",
+    "choice-withdrawn",
+    "effective",
+    "no-op",
+    "organization",
+    "error",
+  ] as const)("fails closed before prompting when native Approve for Me is %s", (failure) =>
     runKiroScript({
       scenario: `approve-for-me-${failure}`,
       runtimeMode: "auto",
@@ -2782,7 +3074,16 @@ it.live.each(["absent", "select", "false", "no-op", "organization", "error"] as 
             failure === "absent"
               ? []
               : failure === "select"
-                ? [{ ...autopilotOption("off"), id: "approveForMe" }]
+                ? [
+                    {
+                      ...autopilotOption("off"),
+                      id: "approveForMe",
+                      options: [
+                        { value: "files", name: "Follow permission files" },
+                        { value: "off", name: "Off" },
+                      ],
+                    },
+                  ]
                 : [approveForMeOption(false)],
           ),
         ),
@@ -2808,12 +3109,47 @@ it.live.each(["absent", "select", "false", "no-op", "organization", "error"] as 
                       },
                     },
                   ]
-                : [configResult(failure === "no-op" ? [] : [approveForMeOption(false)])]),
+                : [
+                    ...(failure === "effective"
+                      ? [
+                          update({
+                            sessionUpdate: "config_option_update",
+                            configOptions: [approveForMeOption(false)],
+                          }),
+                        ]
+                      : []),
+                    configResult(
+                      failure === "no-op"
+                        ? []
+                        : [
+                            failure === "off" && contract === "select"
+                              ? { ...approveForMeOption(false), currentValue: "off" }
+                              : failure === "wrong-type"
+                                ? contract === "select"
+                                  ? {
+                                      id: "approveForMe",
+                                      name: "Approve",
+                                      type: "boolean",
+                                      currentValue: true,
+                                    }
+                                  : { ...autopilotOption("on"), id: "approveForMe" }
+                                : failure === "choice-withdrawn" && contract === "select"
+                                  ? {
+                                      ...approveForMeOption(true),
+                                      options: [
+                                        { value: "files", name: "Follow permission files" },
+                                      ],
+                                    }
+                                  : approveForMeOption(failure === "effective"),
+                          ],
+                    ),
+                  ]),
             ]),
       ],
       drive: () => Effect.die("Unavailable native Auto must not open"),
     }).pipe(Effect.provide(testLayer), Effect.scoped),
-);
+  );
+});
 
 describe("KiroAdapterV2", () => {
   it.effect.each([true, false])(
@@ -3874,6 +4210,7 @@ describe("KiroAdapterV2", () => {
                   secretStorage: true,
                   openExternalUrl: true,
                   userInput: true,
+                  approveForMeOption: true,
                 },
               },
             },

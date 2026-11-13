@@ -114,6 +114,7 @@ import {
   ACP_EMPTY_OPTION_VALUE,
   ACP_SESSION_MODE_OPTION_ID,
   flattenSelectChoices,
+  sessionConfigOptionSupportsValue,
 } from "./sessionConfig.ts";
 import * as AcpSessionRuntime from "./AcpSessionRuntime.ts";
 import {
@@ -458,11 +459,12 @@ export interface AcpAdapterV2Flavor {
     policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
   ) => string | undefined;
   /**
-   * Native policy options. Required booleans must be advertised and echoed by
+   * Native policy options. Required values must be advertised and echoed by
    * the agent; optional selects keep the session default when unavailable.
    */
   readonly sessionConfigForPolicy?: (
     policy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
+    configOptions: ReadonlyArray<EffectAcpSchema.SessionConfigOption>,
   ) => ReadonlyArray<{
     readonly id: string;
     readonly value: string | boolean;
@@ -8297,35 +8299,43 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const applyPolicySessionConfig = Effect.fnUntraced(function* (
           runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy,
         ) {
-          for (const selection of flavor.sessionConfigForPolicy?.(runtimePolicy) ?? []) {
+          const selections =
+            flavor.sessionConfigForPolicy?.(runtimePolicy, yield* runtime.getConfigOptions) ?? [];
+          for (const selection of selections) {
+            const unavailable = () =>
+              new AcpSessionRuntime.AcpSessionConfigError({
+                configId: selection.id,
+                reason: "unavailable",
+              });
             const option = (yield* runtime.getConfigOptions).find(
               (candidate) => candidate.id === selection.id,
             );
-            if (typeof selection.value === "boolean") {
-              const unavailable = () =>
-                new AcpSessionRuntime.AcpSessionConfigError({
-                  configId: selection.id,
-                  reason: "unavailable",
-                });
-              if (option?.type !== "boolean") {
-                if (selection.required) return yield* unavailable();
-                continue;
-              }
-              const response = yield* runtime
-                .setConfigOption(selection.id, selection.value, {
-                  force: true,
-                })
-                .pipe(
-                  Effect.mapError((cause) =>
-                    selection.required
-                      ? new AcpSessionRuntime.AcpSessionConfigError({
-                          configId: selection.id,
-                          reason: "rejected",
-                          cause,
-                        })
-                      : cause,
-                  ),
-                );
+            if (!sessionConfigOptionSupportsValue(option, selection.value)) {
+              if (selection.required) return yield* unavailable();
+              continue;
+            }
+            if (
+              !selection.required &&
+              typeof selection.value === "string" &&
+              option?.currentValue === selection.value
+            )
+              continue;
+            const response = yield* runtime
+              .setConfigOption(selection.id, selection.value, {
+                force: selection.required || typeof selection.value === "boolean",
+              })
+              .pipe(
+                Effect.mapError((cause) =>
+                  selection.required
+                    ? new AcpSessionRuntime.AcpSessionConfigError({
+                        configId: selection.id,
+                        reason: "rejected",
+                        cause,
+                      })
+                    : cause,
+                ),
+              );
+            if (selection.required) {
               const echoed = response.configOptions.find(
                 (candidate) => candidate.id === selection.id,
               );
@@ -8333,23 +8343,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 (candidate) => candidate.id === selection.id,
               );
               if (
-                selection.required &&
-                (echoed?.type !== "boolean" ||
-                  echoed.currentValue !== selection.value ||
-                  effective?.type !== "boolean" ||
-                  effective.currentValue !== selection.value)
+                !sessionConfigOptionSupportsValue(echoed, selection.value) ||
+                echoed?.currentValue !== selection.value ||
+                !sessionConfigOptionSupportsValue(effective, selection.value) ||
+                effective?.currentValue !== selection.value
               ) {
                 return yield* unavailable();
               }
-              continue;
             }
-            if (option?.type !== "select" || option.currentValue === selection.value) continue;
-            const advertisedValues = option.options.flatMap((entry) =>
-              "value" in entry ? [entry.value] : entry.options.map((choice) => choice.value),
-            );
-            if (!advertisedValues.includes(selection.value)) continue;
-            yield* runtime.setConfigOption(selection.id, selection.value);
           }
+          return selections;
         });
 
         const configureSession = Effect.fnUntraced(function* (
@@ -8503,7 +8506,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }),
             );
           }
-          yield* applyPolicySessionConfig(runtimePolicy);
+          const policyConfig = yield* applyPolicySessionConfig(runtimePolicy);
           const policyMode = flavor.sessionModeForPolicy?.(runtimePolicy);
           if (policyMode !== undefined) {
             yield* runtime.setMode(policyMode);
@@ -8592,6 +8595,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               { cwd: runtimePolicy.cwd ?? process.cwd(), sessionId: startResult.sessionId },
             ) ?? Effect.void
           );
+          return policyConfig;
         });
 
         yield* configureSession(started, input.modelSelection, input.runtimePolicy);
@@ -9266,6 +9270,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             );
             const needsSessionActivation =
               (yield* Ref.get(activeSessionId)) !== requestedSessionId || restartAfterInterrupt;
+            let policyConfig: ReturnType<
+              NonNullable<AcpAdapterV2Flavor["sessionConfigForPolicy"]>
+            > = [];
             if (needsSessionActivation) {
               yield* withSnapshotReplay(
                 Effect.gen(function* () {
@@ -9274,7 +9281,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     turnInput.threadId,
                   ).pipe(Effect.onError(() => restorePreviousRuntimePolicy));
                   yield* Effect.uninterruptible(adoptLoadedSession(activated));
-                  yield* configureSession(
+                  policyConfig = yield* configureSession(
                     activated,
                     turnInput.modelSelection,
                     turnInput.runtimePolicy,
@@ -9304,7 +9311,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     detail: `ACP session ${requestedSessionId} has no active setup metadata`,
                   });
                 }
-                yield* configureSession(
+                policyConfig = yield* configureSession(
                   currentSessionSetup,
                   turnInput.modelSelection,
                   turnInput.runtimePolicy,
@@ -9317,7 +9324,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 yield* Ref.set(activeSelection, turnInput.modelSelection);
                 yield* Ref.set(activeInteractionMode, turnInput.runtimePolicy.interactionMode);
               } else {
-                yield* applyPolicySessionConfig(turnInput.runtimePolicy).pipe(
+                policyConfig = yield* applyPolicySessionConfig(turnInput.runtimePolicy).pipe(
                   Effect.mapError(
                     (cause) =>
                       new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
@@ -9392,12 +9399,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }),
             );
             const promptRuntime = runtime;
-            const requiredConfigOptions = (
-              flavor.sessionConfigForPolicy?.(turnInput.runtimePolicy) ?? []
-            ).flatMap((option) =>
-              option.required && typeof option.value === "boolean"
-                ? [{ id: option.id, value: option.value }]
-                : [],
+            const requiredConfigOptions = policyConfig.flatMap((option) =>
+              option.required ? [{ id: option.id, value: option.value }] : [],
             );
             const promptParts = isContinuationTurn
               ? null

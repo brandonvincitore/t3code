@@ -282,3 +282,44 @@ Native naming now requires a meaningful existing T3 title; unavailable title
 seeds are skipped because provider-facing text may already contain handoffs.
 Normal client first-message seeds remain available before model work. The
 initial external-rename race and creation-only limit remain unchanged.
+
+## November 13 fork-owned Approve for Me version-contract correction
+
+This bounded Brandon fork adaptation uses dependent base
+`2fc5d3e8ad927912693d2c6e2519dc6303a2fa21` and adopts no upstream PR.
+The earlier boolean-contract source pin
+`fdcf34835ff8b8f9c536c1480e938734850917b9958d47ab4741c6f3585a1d90`
+is Kiro 3.2.0, not 3.2.1. That genuine legacy contract remains supported;
+the earlier synthetic boolean proof was not live 3.2.1 proof.
+
+The parent's read-only inspection of the cached public Linux Kiro 3.2.1
+`acp-server.js` (16,533,385 bytes, SHA256
+`37ad677e768131aafcb4c40c4dce271104489f2aaa8b9ce2c34d194213e4de1c`)
+supplies the corrected contract. Its report SHA256 is
+`aa593f9e0e60a3d61274b3432bee4099dbb4fd2df862700130b3fbbf8ddc213c`,
+with extracts SHA256
+`a0abcdb8ad1401c3ff2629c309b3eb3274e2901f7aa2be57a6ec47b2ab46c885`.
+These are parent-provided source findings; this writer found no matching local
+cached engine and did not execute native Kiro or the user's probe scripts.
+
+Kiro 3.2.1 requires the exact client capability
+`_meta.kiro.approveForMeOption: true` to expose the native select. It offers
+`files` (follow permission files), `on`, and `off`; boolean writes return the
+current options unchanged. `files` can retain Approve for Me and is not Off.
+Current Auto negotiation uses actual advertised type and choices: required
+boolean `true` for the legacy contract, required select `on` for the new one.
+Both require a forced write, confirmed response and current effective value,
+and synchronized admission of that same value before native prompt dispatch.
+Missing or withdrawn support fails unsent with the existing Supervised recovery.
+Classifier-off process transitions remain authoritative outside Auto; this
+Linux source hides the option then. No claim is made that every platform has
+identical exposure, or that a missing option identifies an account cause.
+
+Focused proof uses strict synthetic ACP stdio peers, including capability
+merging, ignored boolean writes, native uncertainty's original callback,
+held MCP preparation, and replacement ownership. It invokes no native engine,
+classifier, model, OAuth, live userdata, account or organization policy. The
+source inspection and protocol proof do not establish live Mac compatibility
+or backend availability. The parent owns independent review and client proof.
+The entire prior 53,274-byte ledger prefix and all original source credits,
+133 unique source references, 51 PR source rows and 48 canonical PRs are retained.

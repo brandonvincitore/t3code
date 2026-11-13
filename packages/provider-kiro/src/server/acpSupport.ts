@@ -170,6 +170,26 @@ export interface KiroAcpRuntimeInput extends Omit<
   readonly nativeAuto?: boolean;
 }
 
+export function kiroClientCapabilities(
+  capabilities: EffectAcpSchema.ClientCapabilities | undefined,
+) {
+  const kiro = capabilities?._meta?.kiro;
+  return {
+    ...capabilities,
+    _meta: {
+      ...capabilities?._meta,
+      kiro: {
+        ...(typeof kiro === "object" && kiro !== null && !Array.isArray(kiro) ? kiro : {}),
+        approveForMeOption: true,
+      },
+    },
+    session: {
+      ...capabilities?.session,
+      configOptions: { boolean: {}, ...capabilities?.session?.configOptions },
+    },
+  };
+}
+
 export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")(function* (
   input: KiroAcpRuntimeInput,
 ): Effect.fn.Return<
@@ -183,10 +203,7 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
       ...runtimeOptions,
       // ACP sessions do not inherit the CLI's workflow feature setting.
       sessionMeta: (initialized) => kiroSessionMeta(initialized.agentCapabilities?._meta, settings),
-      clientCapabilities: {
-        ...runtimeOptions.clientCapabilities,
-        session: { ...runtimeOptions.clientCapabilities?.session, configOptions: { boolean: {} } },
-      },
+      clientCapabilities: kiroClientCapabilities(runtimeOptions.clientCapabilities),
       spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment, nativeAuto),
     }),
   );

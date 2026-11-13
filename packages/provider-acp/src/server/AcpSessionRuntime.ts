@@ -33,6 +33,7 @@ import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/s
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
+import { sessionConfigOptionSupportsValue } from "./sessionConfig.ts";
 import { appendAcpStderrTail, sanitizeAcpStderrExcerpt } from "./stderr.ts";
 import {
   collectSessionConfigOptionValues,
@@ -1194,7 +1195,10 @@ export class AcpSessionRuntime extends Context.Service<
         readonly dispatched?: Deferred.Deferred<void>;
         readonly admission?: {
           readonly sessionId: string;
-          readonly configOptions: ReadonlyArray<{ readonly id: string; readonly value: boolean }>;
+          readonly configOptions: ReadonlyArray<{
+            readonly id: string;
+            readonly value: string | boolean;
+          }>;
         };
       },
     ) => Effect.Effect<
@@ -2643,19 +2647,19 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
               const started = yield* getStartedState;
               if (promptOptions?.admission !== undefined) {
                 const configOptions = yield* SubscriptionRef.get(configOptionsRef);
+                const invalidOption = promptOptions.admission.configOptions.find((required) => {
+                  const option = findSessionConfigOption(configOptions, required.id);
+                  return (
+                    !sessionConfigOptionSupportsValue(option, required.value) ||
+                    option?.currentValue !== required.value
+                  );
+                });
                 if (
                   started.sessionId !== promptOptions.admission.sessionId ||
-                  promptOptions.admission.configOptions.some((required) => {
-                    const option = findSessionConfigOption(configOptions, required.id);
-                    return option?.type !== "boolean" || option.currentValue !== required.value;
-                  })
+                  invalidOption !== undefined
                 ) {
                   return yield* new AcpPromptAdmissionError({
-                    configId:
-                      promptOptions.admission.configOptions.find((required) => {
-                        const option = findSessionConfigOption(configOptions, required.id);
-                        return option?.type !== "boolean" || option.currentValue !== required.value;
-                      })?.id ?? promptOptions.admission.configOptions[0]?.id,
+                    configId: invalidOption?.id ?? promptOptions.admission.configOptions[0]?.id,
                   });
                 }
               }

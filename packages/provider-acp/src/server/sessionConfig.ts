@@ -28,6 +28,16 @@ export function flattenSelectChoices(
   return options.flatMap((candidate) => ("value" in candidate ? [candidate] : candidate.options));
 }
 
+export function sessionConfigOptionSupportsValue(
+  option: EffectAcpSchema.SessionConfigOption | undefined,
+  value: string | boolean,
+): boolean {
+  return typeof value === "boolean"
+    ? option?.type === "boolean"
+    : option?.type === "select" &&
+        flattenSelectChoices(option.options).some((choice) => choice.value === value);
+}
+
 function selectChoices(
   candidates: ReadonlyArray<{
     readonly value: string;

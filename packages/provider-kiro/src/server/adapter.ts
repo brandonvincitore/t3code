@@ -48,6 +48,7 @@ import {
   KIRO_AUTOPILOT_CONFIG_ID,
   KIRO_APPROVE_FOR_ME_CONFIG_ID,
   kiroNativeAuto,
+  kiroClientCapabilities,
   validateKiroRuntimePolicy,
   KIRO_EFFORT_CONFIG_ID,
   KIRO_MODEL_CONFIG_ID,
@@ -723,10 +724,7 @@ function makeKiroAcpAdapterFlavor(
             ...input.processEnvironment,
             KIRO_TRUST_CLASSIFIER_MODE: kiroNativeAuto(input.runtimePolicy) ? "enforce" : "off",
           },
-          clientCapabilities: {
-            ...input.clientCapabilities,
-            session: { ...input.clientCapabilities?.session, configOptions: { boolean: {} } },
-          },
+          clientCapabilities: kiroClientCapabilities(input.clientCapabilities),
         }),
       ),
       Effect.tap(secretStorage.installHandlers),
@@ -763,6 +761,7 @@ function makeKiroAcpAdapterFlavor(
         secretStorage: true,
         openExternalUrl: true,
         userInput: true,
+        approveForMeOption: true,
       },
     },
     makeRuntime,
@@ -792,10 +791,20 @@ function makeKiroAcpAdapterFlavor(
     // With Autopilot off (Supervised) Kiro asks the user to accept a turn's
     // changes before it ends. T3's runtime policy answers its per-tool prompts
     // either way, and a runtime-mode change reopens the session to reapply it.
-    sessionConfigForPolicy: (policy) => [
+    sessionConfigForPolicy: (policy, configOptions) => [
       { id: KIRO_AUTOPILOT_CONFIG_ID, value: kiroAutopilotValue(policy) },
       ...(kiroNativeAuto(policy)
-        ? [{ id: KIRO_APPROVE_FOR_ME_CONFIG_ID, value: true, required: true }]
+        ? [
+            {
+              id: KIRO_APPROVE_FOR_ME_CONFIG_ID,
+              value:
+                configOptions.find((option) => option.id === KIRO_APPROVE_FOR_ME_CONFIG_ID)
+                  ?.type === "select"
+                  ? "on"
+                  : true,
+              required: true,
+            },
+          ]
         : []),
     ],
     // See isKiroPromptActivity: Kiro 2.27.1 can drop a cancel sent just after
