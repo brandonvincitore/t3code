@@ -1,4 +1,5 @@
 import type {
+  NativeHistoryReadError,
   BackgroundScope,
   ChatAttachment,
   ManagedPolicySummary,
@@ -48,6 +49,13 @@ export class ProviderHost extends Context.Service<
     readonly shouldRunBackgroundWork: (scope: BackgroundScope) => Effect.Effect<boolean>;
     /** Absolute attachment path, or null if the ID does not resolve inside attachmentsDir. */
     readonly resolveAttachmentPath: (attachment: ChatAttachment) => string | null;
+    readonly decodeNativeHistoryArchive?: (
+      bytes: Uint8Array,
+      nativeId: string,
+    ) => Effect.Effect<
+      { readonly metadata: string; readonly transcript: string },
+      NativeHistoryReadError
+    >;
     readonly resolveExtractedTextPath?: (path: string) => Effect.Effect<string | undefined>;
     readonly credentials: (
       namespace: string,

@@ -1,3 +1,4 @@
+import { makeNativeExportCapture, type NativeHistoryExportOptions } from "./nativeHistoryExport.ts";
 // @effect-diagnostics nodeBuiltinImport:off - No-follow reads and descriptor identity checks protect native files from path substitution.
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
@@ -559,8 +560,48 @@ function materialize(text: string): NativeHistoryCapture["rows"] {
   return rows;
 }
 
+function validateRecord(text: string, cwd: string, nativeId: string, platform: NodeJS.Platform) {
+  const record = parseMetadata(text);
+  if (record.schemaVersion !== "1.0.0") fail("unsupported", "unsupported");
+  if (
+    record.id !== nativeId ||
+    record.workspacePaths.length !== 1 ||
+    record.workspacePaths.some(
+      (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== normalize(cwd, platform),
+    ) ||
+    record.rootPaths?.some(
+      (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== normalize(cwd, platform),
+    ) ||
+    record.parentSessionId !== undefined ||
+    record.parentExecutionId !== undefined ||
+    record.forkedAtMessageId !== undefined ||
+    record.workflowLaunch !== undefined ||
+    (record.executionTarget !== undefined && record.executionTarget !== "local") ||
+    (record._meta !== undefined && Object.keys(record._meta).length > 0) ||
+    !Number.isFinite(Date.parse(record.createdAt)) ||
+    !Number.isFinite(Date.parse(record.lastModifiedAt)) ||
+    Date.parse(record.lastModifiedAt) < Date.parse(record.createdAt)
+  )
+    fail("unsafe", "invalid_source");
+  return record;
+}
+const decodeJson = Schema.decodeSync(Schema.fromJsonString(Schema.Unknown));
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+function canonical(value: unknown, depth = 0): unknown {
+  if (depth > 64) fail("unsafe", "invalid_source");
+  if (Array.isArray(value)) return value.map((item) => canonical(item, depth + 1));
+  if (value !== null && typeof value === "object")
+    return Object.fromEntries(
+      Object.entries(value)
+        .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+        .map(([key, item]) => [key, canonical(item, depth + 1)]),
+    );
+  return value;
+}
+
 export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(function* (
   environment: NodeJS.ProcessEnv,
+  exportOptions?: NativeHistoryExportOptions,
 ) {
   const fallbackHome = yield* HostProcess.HomeDirectory;
   const host = yield* HostProcess.Hostname;
@@ -597,28 +638,7 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
               };
             };
             const first = await observe();
-            const record = parseMetadata(first.metadata.text);
-            if (record.schemaVersion !== "1.0.0") fail("unsupported", "unsupported");
-            if (
-              record.id !== nativeId ||
-              record.workspacePaths.length !== 1 ||
-              record.workspacePaths.some(
-                (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== workspace,
-              ) ||
-              record.rootPaths?.some(
-                (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== workspace,
-              ) ||
-              record.parentSessionId !== undefined ||
-              record.parentExecutionId !== undefined ||
-              record.forkedAtMessageId !== undefined ||
-              record.workflowLaunch !== undefined ||
-              (record.executionTarget !== undefined && record.executionTarget !== "local") ||
-              (record._meta !== undefined && Object.keys(record._meta).length > 0) ||
-              !Number.isFinite(Date.parse(record.createdAt)) ||
-              !Number.isFinite(Date.parse(record.lastModifiedAt)) ||
-              Date.parse(record.lastModifiedAt) < Date.parse(record.createdAt)
-            )
-              fail("unsafe", "invalid_source");
+            const record = validateRecord(first.metadata.text, cwd, nativeId, platform);
             const rows = materialize(first.transcript.text);
             if (rows.some((row) => Date.parse(row.timestamp) > Date.parse(record.lastModifiedAt)))
               fail("busy", "incomplete");
@@ -698,5 +718,58 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
         return yield* new NativeHistoryReadError({ status: "busy", reason: "lease_present" });
       }),
   );
-  return { capture, admit };
+  const exported =
+    exportOptions === undefined
+      ? undefined
+      : yield* makeNativeExportCapture({
+          environment,
+          options: exportOptions,
+          observeLease: (cwd, nativeId) => admit({ cwd, nativeId }),
+          normalize: (path) => normalize(path, platform),
+          parse: (metadata, transcript, cwd, nativeId) =>
+            Effect.tryPromise({
+              try: async () => {
+                if (
+                  Buffer.byteLength(metadata) > 65536 ||
+                  Buffer.byteLength(transcript) > MAX_BYTES ||
+                  !transcript.endsWith("\n")
+                )
+                  fail("unsafe", "invalid_source");
+                const record = validateRecord(metadata, cwd, nativeId, platform);
+                const lines = transcript.slice(0, -1).split("\n");
+                if (lines.length > MAX_ROWS) fail("unsafe", "invalid_source");
+                const normalized =
+                  lines.map((line) => encodeJson(canonical(decodeJson(line)))).join("\n") + "\n";
+                const rows = materialize(normalized);
+                if (
+                  rows.some((row) => Date.parse(row.timestamp) > Date.parse(record.lastModifiedAt))
+                )
+                  fail("busy", "incomplete");
+                const root = await nativeRoot(environment, fallbackHome, platform, true);
+                const source =
+                  "kiro-export-v1:" +
+                  hash(
+                    encodeIdentity([
+                      "kiro-native-export-v1",
+                      normalize(root, platform),
+                      exportOptions.instanceId,
+                      normalize(cwd, platform),
+                      nativeId,
+                      record.schemaVersion,
+                      record.createdAt,
+                    ]),
+                  );
+                return {
+                  source,
+                  identity: hash(encodeJson(canonical([source, record, rows]))),
+                  rows,
+                };
+              },
+              catch: (cause) =>
+                isHistoryReadError(cause)
+                  ? cause
+                  : new NativeHistoryReadError({ status: "unsafe", reason: "invalid_source" }),
+            }),
+        });
+  return { capture: exported ?? capture, admit };
 });

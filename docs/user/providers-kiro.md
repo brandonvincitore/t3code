@@ -83,15 +83,15 @@ and access from multiple clients.
 
 After continuing that session in the CLI, release its native lease in Kiro, then choose
 **Sync from Kiro** in the provider's Sessions section. This copies a stable saved snapshot into
-the existing T3 conversation without opening Kiro or starting a model. **Check history** checks
+the existing T3 conversation without starting a native conversation or model. **Check history** checks
 for updates without copying them. The operation runs on the selected environment.
 
 T3 never clears native leases, including stale or uncertain ones. Older histories need a verified
 native T3 turn boundary; without one, T3 keeps the timeline unchanged and reports ambiguity.
-Sync currently requires a Linux server with descriptor-anchored file access. macOS and Windows
-servers report unsupported until an equivalent safe file reader is available. Normal native
-sending remains separate from that restriction. Sync supports saved root chat-user, assistant
-and reasoning text in the supported local format.
+Sync requires Kiro’s session export extension and supports saved root chat-user, assistant
+and reasoning text in that export. The extension prepares a temporary archive; it does not
+activate the conversation. T3 validates the exported completed turns; the export can omit
+malformed native records, so it is not a raw history integrity check.
 Interrupted responses remain marked interrupted; API-injected user text is not copied.
 Tools, attachments, internal records, workflows, rewritten or compacted histories, and unfinished
 turns are not imported. A legacy catch-up starts after the verified boundary and does not fill

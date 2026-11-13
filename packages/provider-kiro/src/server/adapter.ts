@@ -45,7 +45,7 @@ import type * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/instanceEnvironment";
 import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
-import type * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
@@ -889,7 +889,14 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
   options: KiroAdapterV2Options,
 ) {
   const secretStorage = yield* makeKiroSecretStorage(options.environment, options.instanceId);
-  const history = yield* makeKiroNativeHistory(options.environment);
+  const host = yield* ProviderHost.ProviderHost;
+  const history = yield* makeKiroNativeHistory(options.environment, {
+    instanceId: options.instanceId,
+    settings: options.settings,
+    ...(host.decodeNativeHistoryArchive === undefined
+      ? {}
+      : { decodeArchive: host.decodeNativeHistoryArchive }),
+  });
   type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
   const runtimes = new Map<string, Set<Runtime>>();
   const admitRuntimeSession = Effect.fn("KiroHistory.admitRuntimeSession")(function (

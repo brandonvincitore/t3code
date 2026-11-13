@@ -1,3 +1,4 @@
+import { decodeNativeHistoryArchive } from "../zipArchive.ts";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { ProviderCredentialError } from "@t3tools/provider-core/server/errors";
 import * as Digest from "effect/crypto/Digest";
@@ -23,6 +24,7 @@ export const layer = Layer.effect(
     const digest = yield* Digest.Digest;
     const fileSystem = yield* FileSystem.FileSystem;
     return ProviderHost.ProviderHost.of({
+      decodeNativeHistoryArchive,
       managedPolicy: serverSettings.managedPolicy,
       paths: {
         cwd: config.cwd,

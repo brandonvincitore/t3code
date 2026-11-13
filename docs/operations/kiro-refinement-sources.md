@@ -395,3 +395,20 @@ proof. Descriptor-anchored capture is implemented on Linux. Other server platfor
 explicitly report unsupported pending an equivalent verified filesystem boundary.
 Earlier ledger bytes and pins remain unchanged; no native session or paid turn
 was used for these corrections.
+
+
+### Portable native export snapshot (2026-11-13)
+
+Fork-owned work dependent on `7857a7ec71e05f77c9673b1abb32bdcca06612c1` uses
+advertised `_kiro/session/export` through fresh initialize-only management ACP.
+The supplied 3.2.1 routing/export supplement is pinned externally as SHA-256
+`07d2fa5c967991549b82cd0a26d376c0b4960b066c88d3c05eb7a2a6aaf52b9a`;
+the same CODE pin above applies. Export is local-only and writes a temporary ZIP,
+not source history or leases; its persistence loader can omit malformed records.
+T3 confines artifact handling to a fresh app-owned private temp root and decodes
+bounded archive bytes without extraction. This is a trusted configured-provider
+boundary, not a portable kernel filesystem sandbox or an atomic native snapshot.
+Canonical exported rows support repeated capture across temporary paths. The
+Linux descriptor reader remains separate; there is no silent export fallback.
+Synthetic ACP/ZIP/service and platform-override tests are not real Mac/Windows
+or native CLI proof. All prior ledger bytes, source pins and credits remain intact.

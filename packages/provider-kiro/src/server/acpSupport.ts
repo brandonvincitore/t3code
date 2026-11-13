@@ -181,6 +181,7 @@ export interface KiroAcpRuntimeInput extends Omit<
   readonly settings: KiroAcpRuntimeSettings | null | undefined;
   readonly environment?: NodeJS.ProcessEnv;
   readonly nativeAuto?: boolean;
+  readonly inheritEnvironment?: false;
 }
 
 export function kiroClientCapabilities(
@@ -210,7 +211,7 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
   EffectAcpErrors.AcpError,
   ChildProcessSpawner.ChildProcessSpawner | SecureRandom.SecureRandom | Scope.Scope
 > {
-  const { settings, environment, nativeAuto, ...runtimeOptions } = input;
+  const { settings, environment, nativeAuto, inheritEnvironment, ...runtimeOptions } = input;
   const context = yield* Layer.build(
     AcpSessionRuntime.layer({
       ...runtimeOptions,
@@ -218,7 +219,10 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
       // ACP sessions do not inherit the CLI's workflow feature setting.
       sessionMeta: (initialized) => kiroSessionMeta(initialized.agentCapabilities?._meta, settings),
       clientCapabilities: kiroClientCapabilities(runtimeOptions.clientCapabilities),
-      spawn: buildKiroAcpSpawnInput(settings, input.cwd, environment, nativeAuto),
+      spawn: {
+        ...buildKiroAcpSpawnInput(settings, input.cwd, environment, nativeAuto),
+        ...(inheritEnvironment === false ? { extendEnv: false } : {}),
+      },
     }),
   );
   return yield* Effect.service(AcpSessionRuntime.AcpSessionRuntime).pipe(Effect.provide(context));

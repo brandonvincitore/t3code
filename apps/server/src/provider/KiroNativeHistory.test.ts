@@ -1,11 +1,18 @@
+import { makeKiroAcpRuntime } from "@t3tools/provider-kiro/testing";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as NodeCryptoService from "@effect/platform-node/NodeCrypto";
+import * as ZipArchive from "../zipArchive.ts";
+import { makeExportPeer } from "./KiroExportHistory.testkit.ts";
 // @effect-diagnostics nodeBuiltinImport:off - Fixture bucket hashes must match the native on-disk workspace format.
 import * as NodeFS from "node:fs";
 import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
-import { assert, it, vi } from "@effect/vitest";
+import { assert, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { makeKiroNativeHistory } from "@t3tools/provider-kiro/testing";
+import * as Layer from "effect/Layer";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -118,7 +125,10 @@ it.effect(
       assert.equal(capture.rows.find((row) => row.id === "start")?.userRowId, "row-user");
       assert.equal(capture.rows.find((row) => row.id === "api-user")?.userRowId, "api-user");
       assert.deepEqual(yield* h.capture, capture);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer)),
+    ),
 );
 
 it.effect.each([
@@ -183,7 +193,7 @@ it.effect.each([
       );
       assert.isFalse(JSON.stringify(captured).includes("private"));
     }
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer))),
 );
 
 it.effect("rejects ancestor ABA substitution during an awaited leaf resolution", () =>
@@ -272,7 +282,7 @@ it.effect("rejects ancestor ABA substitution during an awaited leaf resolution",
         result.success.rows.filter((row) => row.text !== undefined).map((row) => row.text),
         ["CLI request", "A thought", "CLI response"],
       );
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer))),
 );
 
 it.effect(
@@ -288,7 +298,10 @@ it.effect(
       const after = yield* h.capture;
       assert.notEqual(after.source, before.source);
       assert.deepEqual(after.rows, before.rows);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer)),
+    ),
 );
 
 it.effect.each(["darwin", "win32"] as const)(
@@ -303,7 +316,10 @@ it.effect.each(["darwin", "win32"] as const)(
         (yield* reader.capture({ cwd: h.cwd, nativeId: h.nativeId }).pipe(Effect.flip)).status,
         "unsupported",
       );
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer)),
+    ),
 );
 
 it.effect.each(["live", "stale", "unknown", "lock", "symlink"] as const)(
@@ -342,7 +358,10 @@ it.effect.each(["live", "stale", "unknown", "lock", "symlink"] as const)(
         (yield* h.reader.admit({ cwd: h.cwd, nativeId: h.nativeId }).pipe(Effect.flip)).reason,
         "lease_present",
       );
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer)),
+    ),
 );
 
 it.effect(
@@ -388,7 +407,10 @@ it.effect(
         "busy",
       );
       assert.equal((yield* h.capture.pipe(Effect.flip)).status, "busy");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer)),
+    ),
 );
 
 it.effect.each([
@@ -495,5 +517,143 @@ it.effect.each([
           ? "unsupported"
           : "unsafe",
     );
-  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer))),
+);
+
+it.live.each([
+  "normal",
+  "no-advertisement",
+  "unknown-method",
+  "failed",
+  "auth-required",
+  "wrong-cwd",
+  "metadata-cwd",
+  "parent",
+  "no-source",
+  "archive-large",
+  "hardlink-file",
+  "remote",
+  "wrong-id",
+  "version",
+  "outside",
+  "filename",
+  "symlink-file",
+  "symlink-directory",
+  "duplicate",
+  "traversal",
+  "zip-link",
+  "zipbomb",
+  "crc",
+  "too-many",
+] as const)("bounds native export and cleans only its private temporary resources: %s", (mode) =>
+  Effect.gen(function* () {
+    const peer = yield* makeExportPeer();
+    yield* peer.write({ ...peer.source, mode });
+    const reader = yield* makeKiroNativeHistory(peer.environment, {
+      instanceId: "synthetic",
+      settings: { enabled: true, binaryPath: peer.script },
+      decodeArchive: ZipArchive.decodeNativeHistoryArchive,
+    });
+    const result = yield* reader
+      .capture({ cwd: peer.source.cwd, nativeId: peer.source.id })
+      .pipe(Effect.result);
+    if (mode === "normal") expect(result._tag).toBe("Success");
+    else {
+      expect(result._tag).toBe("Failure");
+      if (result._tag === "Failure")
+        expect(result.failure.status).toBe(
+          ["no-advertisement", "unknown-method", "version"].includes(mode)
+            ? "unsupported"
+            : ["failed", "auth-required"].includes(mode)
+              ? "unavailable"
+              : "unsafe",
+        );
+    }
+    const wire = yield* peer.calls;
+    expect(wire).not.toMatch(/session\/(new|load|prompt)|authenticate|set_mode|session\/history/);
+    if (mode === "no-advertisement" || mode === "wrong-cwd" || mode === "remote")
+      expect(wire.includes('"method":"_kiro/session/export"')).toBe(false);
+    for (const root of yield* peer.tempRoots) expect(yield* peer.fs.exists(root)).toBe(false);
+    expect(yield* peer.fs.exists(`${peer.root}/source.json`)).toBe(true);
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer))),
+);
+
+it.live.each(["live", "stale", "unknown", "own"] as const)(
+  "never invokes export under a present %s lease",
+  (kind) =>
+    Effect.gen(function* () {
+      const peer = yield* makeExportPeer();
+      const file = `${peer.native}/session-leases/sync.lease`;
+      const contents =
+        kind === "unknown"
+          ? "{"
+          : JSON.stringify({
+              v: 1,
+              pid: process.pid,
+              parentPid: process.ppid,
+              hostId: yield* HostProcess.Hostname,
+              instanceId: "fixture",
+              token: "fixture",
+              acquiredAt: timestamp,
+            });
+      yield* peer.fs.writeFileString(file, contents);
+      if (kind === "stale") yield* peer.fs.utimes(file, 1, 1);
+      const reader = yield* makeKiroNativeHistory(peer.environment, {
+        instanceId: "synthetic",
+        settings: { enabled: true, binaryPath: peer.script },
+        decodeArchive: ZipArchive.decodeNativeHistoryArchive,
+      }).pipe(Effect.provideService(HostProcess.Platform, "darwin"));
+      const before = yield* peer.fs.stat(file);
+      expect(
+        (yield* reader
+          .capture({ cwd: peer.source.cwd, nativeId: peer.source.id })
+          .pipe(Effect.flip)).reason,
+      ).toBe("lease_present");
+      expect(yield* peer.calls).toBe("");
+      expect(yield* peer.fs.readFileString(file)).toBe(contents);
+      expect(yield* peer.fs.stat(file)).toEqual(before);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer)),
+    ),
+);
+
+it.live("closes an interrupted management runtime before removing its recorded private root", () =>
+  Effect.gen(function* () {
+    const peer = yield* makeExportPeer();
+    yield* peer.write({ ...peer.source, mode: "hang" });
+    const entered = yield* Deferred.make<void>();
+    let owned: string | undefined;
+    const reader = yield* makeKiroNativeHistory(peer.environment, {
+      instanceId: "synthetic",
+      settings: { enabled: true, binaryPath: peer.script },
+      decodeArchive: ZipArchive.decodeNativeHistoryArchive,
+      makeRuntime: (cwd, environment) => {
+        owned = environment.TMPDIR;
+        return makeKiroAcpRuntime({
+          settings: { binaryPath: peer.script },
+          environment,
+          cwd,
+          authenticateOnAuthRequired: false,
+          inheritEnvironment: false,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
+          },
+          clientInfo: { name: "fixture", version: "0" },
+          requestLogger: (event) =>
+            event.method === "_kiro/session/export" && event.status === "started"
+              ? Deferred.succeed(entered, undefined).pipe(Effect.asVoid)
+              : Effect.void,
+        });
+      },
+    });
+    const capture = yield* reader
+      .capture({ cwd: peer.source.cwd, nativeId: peer.source.id })
+      .pipe(Effect.forkChild);
+    yield* Deferred.await(entered);
+    expect(owned !== undefined).toBe(true);
+    yield* Fiber.interrupt(capture);
+    expect(yield* peer.fs.exists(owned!)).toBe(false);
+  }).pipe(Effect.scoped, Effect.provide(Layer.merge(NodeServices.layer, NodeCryptoService.layer))),
 );

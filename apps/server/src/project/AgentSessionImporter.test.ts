@@ -1,3 +1,7 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import * as ZipArchive from "../zipArchive.ts";
+import { makeExportPeer } from "../provider/KiroExportHistory.testkit.ts";
 // @effect-diagnostics nodeBuiltinImport:off - The runtime proof supplies a closed stdin and an explicit isolated subprocess environment.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -1718,5 +1722,110 @@ it.live(
       yield* Effect.logInfo(
         "SYNTHETIC RUNTIME PROOF: Node pipe writer exited 0; lease blocked sync unchanged; fixture released lease; synced 3 items including reasoning into same owner; repeat added 0; native open/load/model calls 0; fake runs 0.",
       );
-    }).pipe(Effect.scoped, Effect.provide(Layer.merge(persistence, NodeServices.layer))),
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.mergeAll(persistence, NodeServices.layer, NodeCrypto.layer)),
+    ),
+);
+
+it.live.each(["darwin", "win32"] as const)(
+  "syncs native exported history through a strict management pipe on %s",
+  (platform) =>
+    Effect.gen(function* () {
+      const h = yield* setupKiroSync(true);
+      const peer = yield* makeExportPeer();
+      const current = yield* h.read();
+      yield* h.sink.write({
+        events: [
+          {
+            id: EventId.make("export-worktree"),
+            type: "thread.metadata-updated",
+            threadId: h.input.threadId,
+            occurredAt: now,
+            payload: { ...current.thread, worktreePath: peer.source.cwd },
+          },
+        ],
+      });
+      const reader = yield* makeKiroNativeHistory(peer.environment, {
+        instanceId: h.input.instanceId,
+        settings: { enabled: true, binaryPath: peer.script },
+        decodeArchive: ZipArchive.decodeNativeHistoryArchive,
+      }).pipe(Effect.provideService(HostProcess.Platform, platform));
+      h.provider.current = { ...h.provider.current, nativeHistory: { capture: reader.capture } };
+      expect(yield* h.importer.syncNativeHistory(h.input)).toMatchObject({
+        status: "synced",
+        addedItems: 3,
+      });
+      expect(yield* h.importer.syncNativeHistory(h.input)).toMatchObject({
+        status: "synced",
+        addedItems: 0,
+      });
+      const rebuilt = yield* makeKiroNativeHistory(peer.environment, {
+        instanceId: h.input.instanceId,
+        settings: { enabled: true, binaryPath: peer.script },
+        decodeArchive: ZipArchive.decodeNativeHistoryArchive,
+      }).pipe(Effect.provideService(HostProcess.Platform, platform));
+      h.provider.current = { ...h.provider.current, nativeHistory: { capture: rebuilt.capture } };
+      yield* peer.write({
+        ...peer.source,
+        rows: peer.source.rows.map((row) => ({
+          ...row,
+          payload: Object.fromEntries(Object.entries(row.payload).reverse()),
+        })),
+      });
+      const reconstructed = yield* h.make();
+      expect(yield* reconstructed.syncNativeHistory(h.input)).toMatchObject({
+        status: "synced",
+        addedItems: 0,
+      });
+      const records = yield* h.read();
+      expect(records.runs).toHaveLength(1);
+      expect(
+        records.providerThreads[0]?.nativeMetadata?.nativeHistory?.source.startsWith(
+          "kiro-export-v1:",
+        ),
+      ).toBe(true);
+      const requests = yield* h.projections.getThreadRecords(h.input.threadId, ["runtimeRequests"]);
+      expect(requests.runtimeRequests).toHaveLength(0);
+      expect(records.messages.map((message) => message.text)).toEqual([
+        "Earlier T3 prompt",
+        "External request",
+        "External answer",
+      ]);
+      expect(
+        records.turnItems.filter((item) => item.runId === null).map((item) => item.type),
+      ).toEqual(["user_message", "reasoning", "assistant_message"]);
+      const calls = (yield* peer.calls)
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method: string });
+      expect(calls.map((call) => call.method)).toEqual(
+        Array.from({ length: 6 }, () => [
+          "initialize",
+          "session/list",
+          "_kiro/session/export",
+        ]).flat(),
+      );
+      for (const root of yield* peer.tempRoots) expect(yield* peer.fs.exists(root)).toBe(false);
+      const before = (yield* h.read()).providerThreads[0]?.nativeMetadata?.nativeHistory;
+      yield* peer.write({
+        ...peer.source,
+        rows: peer.source.rows.map((row) =>
+          row.id === "export-user"
+            ? { ...row, payload: { ...row.payload, _meta: { kiro: { unknownFraming: true } } } }
+            : row,
+        ),
+      });
+      expect(yield* reconstructed.syncNativeHistory(h.input)).toMatchObject({
+        status: "unsupported",
+        addedItems: 0,
+      });
+      expect((yield* h.read()).providerThreads[0]?.nativeMetadata?.nativeHistory).toEqual(before);
+      yield* Effect.logInfo(
+        `SYNTHETIC EXPORT PROOF ${platform}: initialize/list/export only; same owner with run; 3 items; repeat/rebuilt 0; unknown metadata did not advance receipt; temporary roots removed.`,
+      );
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(Layer.mergeAll(persistence, NodeServices.layer, NodeCrypto.layer)),
+    ),
 );
