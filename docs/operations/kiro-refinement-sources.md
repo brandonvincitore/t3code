@@ -323,3 +323,41 @@ source inspection and protocol proof do not establish live Mac compatibility
 or backend availability. The parent owns independent review and client proof.
 The entire prior 53,274-byte ledger prefix and all original source credits,
 133 unique source references, 51 PR source rows and 48 canonical PRs are retained.
+
+## November 13 fork-owned initial native default-title correction
+
+This separate Brandon fork adaptation follows the Approve for Me correction
+at `7beb9314347e8207e501f1071407db7596de5ed0`; it adopts no upstream PR.
+The parent's Kiro 3.2.1 source inspection uses the same public Linux bundle
+SHA256 `37ad677e768131aafcb4c40c4dce271104489f2aaa8b9ce2c34d194213e4de1c`,
+with title report SHA256
+`c85c4b719b5799de0b6821f9a9a00b113085dc4a0671b6f80cf02a6458218309`
+and extracts SHA256
+`9928c008fa2a1e4e0bdc85bfc4d210933eb54f6a6000cb5ba0c1226b3e411340`.
+Those are parent-provided source findings, not locally retrieved VPS files
+or native execution. A supplemental user-reported read-only Mac observation
+found a meaningful T3 title before the first prompt, a fresh native response
+with title New Session, no intervening rename RPC, and a later setup-derived
+native title. This writer did not access that Mac or independently execute
+that trace. An existing recorded repository response also carries New Session
+and matching creation timestamps; it is not new live 3.2.1 proof.
+
+The previous empty-title fixtures missed the actual fresh creation default.
+Only the existing proven T3-created local root window may treat that exact
+initial metadata as unowned: matching native identity, creation metadata,
+current runtime/generation, no prior history or activation, and no observed
+native name or explicit manual-ownership flag. Meaningful existing names and
+manual New Session remain protected, as do imports, loads, replacement
+runtimes and delegated children. A spelling alone never establishes ownership.
+There is no backfill or mass rename of existing chats, and the unobserved
+concurrent external-rename race remains because the native API has no CAS.
+
+Separate RED proof on the exact preceding AFM head uses the authentic default
+response. The strict synthetic persistence peer acknowledges rename only after
+saving titleSetByUser, then confirms that first and later prompts and process
+reloads make zero synthetic automatic-title attempts. A rejected rename restores
+the peer's initial prompt state, still runs the user turn, and permits native
+fallback; it does not claim a successful title change. These are source-shaped
+scripted ACP processes, not Kiro, account, classifier or paid title-model runs.
+All earlier ledger bytes, pins, original credits and PR source rows are retained;
+the parent owns the new independent review and combined client proof.

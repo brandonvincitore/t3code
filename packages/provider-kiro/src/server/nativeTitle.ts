@@ -9,10 +9,16 @@ const decodeMethods = Schema.decodeUnknownOption(
 const decodeSession = Schema.decodeUnknownOption(
   Schema.Struct({
     source: Schema.optional(Schema.String),
+    schemaVersion: Schema.optional(Schema.String),
+    id: Schema.optional(Schema.String),
+    createdAt: Schema.optional(Schema.String),
+    lastModifiedAt: Schema.optional(Schema.String),
+    titleSetByUser: Schema.optional(Schema.Boolean),
     title: Schema.optional(Schema.NullOr(Schema.String)),
     kiro: Schema.optional(
       Schema.Struct({
         source: Schema.optional(Schema.String),
+        titleSetByUser: Schema.optional(Schema.Boolean),
         title: Schema.optional(Schema.NullOr(Schema.String)),
       }),
     ),
@@ -38,7 +44,21 @@ export const initializeKiroThreadTitle: NonNullable<AcpAdapterV2Flavor["initiali
     const meta = Option.getOrUndefined(decodeSession(session.sessionSetupResult._meta));
     const sources = [meta?.source, meta?.kiro?.source].filter((source) => source !== undefined);
     if (sources.length === 0 || sources.some((source) => source !== "local")) return;
-    if (meta?.title?.trim() || meta?.kiro?.title?.trim() || observedTitle?.trim()) return;
+    if (meta?.titleSetByUser === true || meta?.kiro?.titleSetByUser === true) return;
+    // Only the adapter's proven fresh-root window can treat Kiro's creation metadata as unowned.
+    const initialDefault =
+      meta?.title === "New Session" &&
+      meta.schemaVersion === "1.0.0" &&
+      meta.id === session.sessionId &&
+      meta.createdAt !== undefined &&
+      Number.isFinite(Date.parse(meta.createdAt)) &&
+      meta.createdAt === meta.lastModifiedAt;
+    if (
+      (meta?.title?.trim() && !initialDefault) ||
+      meta?.kiro?.title?.trim() ||
+      observedTitle?.trim()
+    )
+      return;
     const title = normalizeTitle(turn.appThread.title);
     if (title === undefined) return;
     const result = yield* runtime
