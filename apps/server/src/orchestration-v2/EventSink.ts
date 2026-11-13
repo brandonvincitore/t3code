@@ -161,6 +161,7 @@ export interface EventSinkV2Shape {
   /** Commits only if the full provider row equals expected; some writers do not advance updatedAt. */
   readonly writeIfProviderThreadUnchanged: (input: {
     readonly expected: OrchestrationV2ProviderThread;
+    readonly runlessItemRunOrdinal?: number;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<
     {
@@ -379,7 +380,10 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+    const normalizeEvents = (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      runlessItemRunOrdinal?: number,
+    ) => {
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -394,7 +398,9 @@ const layerBase: Layer.Layer<
             ? turnItemPositions
                 .normalize(
                   event.payload,
-                  event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
+                  event.payload.runId === null
+                    ? runlessItemRunOrdinal
+                    : runOrdinals.get(event.payload.runId),
                 )
                 .pipe(Effect.map((payload) => ({ ...event, payload })))
             : Effect.succeed(event),
@@ -661,6 +667,7 @@ const layerBase: Layer.Layer<
       readStoredPayload: Effect.Effect<ReadonlyArray<{ readonly payload_json: string }>, E>,
       expectedJson: string,
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      runlessItemRunOrdinal?: number,
     ) =>
       commitThenPublish(
         Effect.gen(function* () {
@@ -672,7 +679,7 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(events);
+          const normalized = yield* normalizeEvents(events, runlessItemRunOrdinal);
           const storedEvents = yield* eventStore.append({ events: normalized });
           const outcomes = yield* applyStoredEvents(storedEvents);
           return { committed: true as const, storedEvents, outcomes };
@@ -700,6 +707,7 @@ const layerBase: Layer.Layer<
         `,
         expectedJson,
         input.events,
+        input.runlessItemRunOrdinal,
       );
     });
 

@@ -48,6 +48,7 @@ const RPC_AGGREGATES = {
   [WS_METHODS.kiroMemoryDelete]: "provider",
   [WS_METHODS.kiroMemoryGetSyncStatus]: "provider",
   [WS_METHODS.kiroMemorySync]: "provider",
+  [WS_METHODS.serverSyncNativeHistory]: "provider",
   [WS_METHODS.kiroPowersList]: "provider",
   [WS_METHODS.kiroPowersInstall]: "provider",
   [WS_METHODS.kiroPowersRemove]: "provider",

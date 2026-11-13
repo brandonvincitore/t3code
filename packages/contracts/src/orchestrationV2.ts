@@ -1,3 +1,4 @@
+import { NativeHistoryReceipt } from "./nativeHistory.ts";
 import { OrchestrationMessageContext } from "./composerContext.ts";
 import { withRecordIdTable } from "./orchestrationV2IdTable.ts";
 import * as DateTime from "effect/DateTime";
@@ -1082,6 +1083,7 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
 export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
 
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
+  nativeHistory: Schema.optional(NativeHistoryReceipt),
   importedHistory: Schema.optional(
     Schema.Struct({
       driver: ProviderDriverKind,

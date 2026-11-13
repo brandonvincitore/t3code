@@ -107,6 +107,7 @@ export interface AcpSessionRuntimeOptions {
   readonly initializeMeta?: EffectAcpSchema.InitializeRequest["_meta"];
   readonly ownDetachedProcessGroup?: boolean;
   readonly ownDescendantProcessGroups?: boolean;
+  readonly observeProcessIdentity?: boolean;
   readonly processGroupPlatform?: NodeJS.Platform;
   readonly processGroupTerminationGrace?: Duration.Input;
   readonly windowsProcessTreeTerminator?: (
@@ -1149,6 +1150,11 @@ export class AcpSessionRuntime extends Context.Service<
     >;
     readonly authenticate?: (methodId: string) => Effect.Effect<void, EffectAcpErrors.AcpError>;
     readonly start: () => Effect.Effect<AcpSessionRuntimeStartResult, EffectAcpErrors.AcpError>;
+    readonly ownsProcess?: (
+      pid: number,
+      parentPid: number,
+      acquiredAt: string,
+    ) => Effect.Effect<boolean>;
     readonly getEvents: () => Stream.Stream<AcpSessionRuntimeEvent, never>;
     readonly drainEvents: Effect.Effect<void>;
     readonly getModeState: Effect.Effect<AcpSessionModeState | undefined>;
@@ -1487,6 +1493,7 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           ELECTRON_RUN_AS_NODE: "1",
           T3_ACP_CGROUP_WRAPPER: "1",
         };
+  const spawnedAt = yield* Clock.currentTimeMillis.pipe(withWallClock);
   const child = yield* spawner
     .spawn(
       ChildProcess.make(containedSpawnCommand.command, containedSpawnCommand.args, {
@@ -1518,6 +1525,20 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     );
   }
 
+  const hostPlatform = yield* HostProcess.Platform;
+  const nativeLeaseIdentity =
+    options.observeProcessIdentity === true &&
+    (hostPlatform === "linux" || hostPlatform === "darwin")
+      ? yield* Effect.sync(() => {
+          try {
+            const controller = makePosixProcessTreeController(hostPlatform);
+            const root = controller.identity(Number(child.pid));
+            return root === undefined ? undefined : { controller, root };
+          } catch {
+            return undefined;
+          }
+        })
+      : undefined;
   const posixOwnershipLedger = new Map<string, AcpOwnedPosixProcess>();
   const posixOwnershipFrontier = new Map<number, AcpOwnedPosixProcess>();
   const posixOwnershipChildQueues = new Map<number, Array<number>>();
@@ -2458,6 +2479,23 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   });
 
   return {
+    ownsProcess: (pid, parentPid, acquiredAt) =>
+      Effect.try({
+        try: () => {
+          if (!Number.isFinite(Date.parse(acquiredAt)) || Date.parse(acquiredAt) < spawnedAt)
+            return false;
+          const controller = nativeLeaseIdentity?.controller ?? posixController;
+          if (!controller) return false;
+          const owned =
+            nativeLeaseIdentity?.root.pid === pid
+              ? nativeLeaseIdentity.root
+              : [...posixOwnershipLedger.values()].find((entry) => entry.pid === pid);
+          if (!owned || owned.ppid !== parentPid) return false;
+          const current = controller.identity(pid);
+          return current?.state !== "Z" && samePosixProcessIdentity(owned, current);
+        },
+        catch: () => false,
+      }).pipe(Effect.orElseSucceed(() => false)),
     handleRequestPermission: acp.handleRequestPermission,
     handleElicitation: acp.handleElicitation,
     handleMcpConnect: acp.handleMcpConnect,

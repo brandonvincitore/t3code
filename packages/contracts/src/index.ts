@@ -77,3 +77,5 @@ export * from "./kiroMcp.ts";
 
 export * from "./kiroMemory.ts";
 export * from "./kiroPowers.ts";
+
+export * from "./nativeHistory.ts";

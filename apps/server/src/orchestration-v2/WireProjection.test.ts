@@ -18,6 +18,7 @@ import {
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadStreamItem,
   OrchestrationV2TurnItem,
+  OrchestrationV2ProviderThread,
   OrchestrationV2TurnItemJson,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -31,6 +32,8 @@ import {
   projectTurnItemForDetail,
   projectDomainEventForWire,
   projectStoredEventForWire,
+  projectThreadProjectionForWire,
+  capProjectionCheckpointFilesForWire,
 } from "./WireProjection.ts";
 import { threadShellFromProjection } from "./ProjectionStore.ts";
 import { MAX_TOOL_OUTPUT_IMAGES, toolOutputImages } from "@t3tools/shared/toolOutput";
@@ -532,4 +535,62 @@ describe("live body deduper", () => {
     const first = reply(1, "a");
     expect([first, message(2, "a")].map(makeLiveBodyDeduper())[0]).toBe(first);
   });
+});
+
+it("keeps native row receipts off streamed events and both snapshot paths", () => {
+  const now = DateTime.makeUnsafe("2026-11-13T00:00:00.000Z");
+  const thread = OrchestrationV2ProviderThread.make({
+    id: ProviderThreadId.make("native-owner"),
+    driver: ProviderDriverKind.make("kiro"),
+    providerInstanceId: ProviderInstanceId.make("kiro"),
+    providerSessionId: null,
+    appThreadId: ThreadId.make("owner"),
+    ownerNodeId: null,
+    nativeThreadRef: {
+      driver: ProviderDriverKind.make("kiro"),
+      nativeId: "native",
+      strength: "strong",
+    },
+    nativeConversationHeadRef: null,
+    status: "idle",
+    firstRunOrdinal: null,
+    lastRunOrdinal: null,
+    handoffIds: [],
+    forkedFrom: null,
+    createdAt: now,
+    updatedAt: now,
+    nativeMetadata: {
+      title: "Native title",
+      nativeHistory: {
+        version: 1,
+        source: "source-hash",
+        providerInstanceId: ProviderInstanceId.make("kiro"),
+        nativeThreadId: "native",
+        baselineRows: 0,
+        coveredRunOrdinal: 0,
+        rows: [{ id: "native-row", digest: "row-digest", itemId: TurnItemId.make("synced-item") }],
+      },
+    },
+  });
+  const event = projectDomainEventForWire({
+    id: EventId.make("receipt"),
+    type: "provider-thread.updated",
+    threadId: ThreadId.make("owner"),
+    occurredAt: now,
+    payload: thread,
+  });
+  expect(JSON.stringify(event)).not.toContain("row-digest");
+  const projection = {
+    providerThreads: [thread],
+    checkpoints: [],
+    turnItems: [],
+    visibleTurnItems: [],
+    contextHandoffs: [],
+  } as unknown as OrchestrationV2ThreadProjection;
+  for (const project of [projectThreadProjectionForWire, capProjectionCheckpointFilesForWire]) {
+    const projected = project(projection);
+    expect(projected.providerThreads[0]?.nativeMetadata).toEqual({ title: "Native title" });
+    expect(project(projected).providerThreads[0]).toBe(projected.providerThreads[0]);
+  }
+  expect(thread.nativeMetadata?.nativeHistory?.rows).toHaveLength(1);
 });

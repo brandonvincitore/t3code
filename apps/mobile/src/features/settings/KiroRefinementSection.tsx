@@ -1,3 +1,4 @@
+import { nativeHistorySyncMessage } from "@t3tools/client-runtime/kiro-actions";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { makeKiroMcpActions, makeKiroResourceActions } from "@t3tools/client-runtime/kiro-actions";
 import { runAtomCommand } from "@t3tools/client-runtime/state/runtime";
@@ -225,6 +226,10 @@ function KiroNativeSessions(props: {
   const canDelete = useAtomValue(
     serverEnvironment.deleteAcpRegistrySession.permissionAtom(props.environmentId),
   );
+  const canSync = useAtomValue(
+    serverEnvironment.syncNativeHistory.permissionAtom(props.environmentId),
+  );
+  const [syncMessage, setSyncMessage] = useState<string | null>(null);
   const [sessions, setSessions] = useState<ReadonlyArray<AcpRegistrySession>>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [deletable, setDeletable] = useState(false);
@@ -293,6 +298,25 @@ function KiroNativeSessions(props: {
     if (result._tag === "Success") open(result.value.threadId);
     else setError("Could not import the Kiro session. Refresh and try again.");
   }
+  async function syncHistory(session: AcpRegistrySession) {
+    if (busy || !canSync || !session.importedThreadId) return;
+    setBusy(true);
+    setError(null);
+    setSyncMessage(null);
+    const result = await runAtomCommand(
+      registry,
+      serverEnvironment.syncNativeHistory,
+      {
+        environmentId: props.environmentId,
+        input: { ...target, threadId: session.importedThreadId },
+      },
+      { reportFailure: false },
+    );
+    if (!alive.current) return;
+    setBusy(false);
+    if (result._tag === "Success") setSyncMessage(nativeHistorySyncMessage(result.value));
+    else setError("Could not sync native history.");
+  }
   async function remove(session: AcpRegistrySession) {
     if (busy || !canDelete || session.importedThreadId) return;
     setBusy(true);
@@ -346,6 +370,15 @@ function KiroNativeSessions(props: {
                 void importSession(session);
               }}
             />
+            {session.importedThreadId ? (
+              <Button
+                label={busy ? "Checking / syncing" : "Sync from Kiro"}
+                disabled={busy || !canSync}
+                onPress={() => {
+                  void syncHistory(session);
+                }}
+              />
+            ) : null}
             {deletable && !session.importedThreadId ? (
               <Button
                 label="Delete"
@@ -367,6 +400,7 @@ function KiroNativeSessions(props: {
           }}
         />
       ) : null}
+      {syncMessage ? <Text className="text-foreground-muted">{syncMessage}</Text> : null}
       {error ? (
         <Text accessibilityRole="alert" className="text-foreground-muted">
           {error}

@@ -1,3 +1,4 @@
+import { ProviderDriverKind } from "@t3tools/contracts";
 import { modelSelectionsEqual } from "@t3tools/shared/model";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import {
@@ -1299,33 +1300,53 @@ export const layer: Layer.Layer<
         );
         if (resumed._tag === "Success") {
           const imported = providerThread.nativeMetadata?.importedHistory;
+          const synchronized = providerThread.nativeMetadata?.nativeHistory;
           const loaded = resumed.success;
+          const ownsReceipt = (
+            receipt:
+              | Pick<
+                  NonNullable<typeof imported>,
+                  "driver" | "providerInstanceId" | "nativeThreadId"
+                >
+              | undefined,
+          ) =>
+            receipt !== undefined &&
+            receipt.driver === session.driver &&
+            receipt.driver === providerThread.driver &&
+            receipt.driver === loaded.driver &&
+            receipt.driver === providerThread.nativeThreadRef?.driver &&
+            receipt.driver === loaded.nativeThreadRef?.driver &&
+            receipt.providerInstanceId === run.providerInstanceId &&
+            receipt.providerInstanceId === session.instanceId &&
+            receipt.providerInstanceId === providerThread.providerInstanceId &&
+            receipt.providerInstanceId === loaded.providerInstanceId &&
+            receipt.nativeThreadId === providerThread.nativeThreadRef?.nativeId &&
+            receipt.nativeThreadId === loaded.nativeThreadRef?.nativeId;
+          const ownsImported = ownsReceipt(imported);
+          const ownsSynchronized = ownsReceipt(
+            synchronized === undefined
+              ? undefined
+              : { ...synchronized, driver: ProviderDriverKind.make("kiro") },
+          );
           // An import proves ownership only for this native session; row identity also survives replacement.
           if (
             projection.thread.historyOrigin === "v1_import" &&
-            imported !== undefined &&
+            (ownsImported || ownsSynchronized) &&
             providerThread.nativeThreadRef.strength === "strong" &&
             loaded.nativeThreadRef?.strength === "strong" &&
-            imported.driver === session.driver &&
-            imported.driver === providerThread.driver &&
-            imported.driver === loaded.driver &&
-            imported.driver === providerThread.nativeThreadRef.driver &&
-            imported.driver === loaded.nativeThreadRef?.driver &&
-            imported.providerInstanceId === run.providerInstanceId &&
-            imported.providerInstanceId === session.instanceId &&
-            imported.providerInstanceId === providerThread.providerInstanceId &&
-            imported.providerInstanceId === loaded.providerInstanceId &&
-            imported.nativeThreadId === providerThread.nativeThreadRef.nativeId &&
-            imported.nativeThreadId === loaded.nativeThreadRef.nativeId &&
             loaded.id === providerThread.id &&
             loaded.appThreadId === projection.thread.id &&
             !projection.runs.some((source) => source.status === "rolled_back")
           ) {
             nativeImportItemIds = new Set(
-              Array.from({ length: imported.itemCount }, (_, index) =>
+              Array.from({ length: ownsImported ? imported!.itemCount : 0 }, (_, index) =>
                 agentSessionImportTurnItemId(projection.thread.id, index),
               ),
             );
+            if (ownsSynchronized) {
+              for (const row of synchronized!.rows)
+                if (row.itemId) nativeImportItemIds.add(row.itemId);
+            }
             effectiveHandoffs = handoffs.filter(
               (handoff) =>
                 handoff.strategy !== "manual_context" ||

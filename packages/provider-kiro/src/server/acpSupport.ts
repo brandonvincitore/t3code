@@ -214,6 +214,7 @@ export const makeKiroAcpRuntime = Effect.fn("KiroAcpSupport.makeKiroAcpRuntime")
   const context = yield* Layer.build(
     AcpSessionRuntime.layer({
       ...runtimeOptions,
+      observeProcessIdentity: true,
       // ACP sessions do not inherit the CLI's workflow feature setting.
       sessionMeta: (initialized) => kiroSessionMeta(initialized.agentCapabilities?._meta, settings),
       clientCapabilities: kiroClientCapabilities(runtimeOptions.clientCapabilities),

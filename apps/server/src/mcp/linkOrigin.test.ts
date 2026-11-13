@@ -1,3 +1,4 @@
+import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -116,7 +117,9 @@ const layerLaunches = Layer.effect(
 
 const layerTools = Layer.mergeAll(
   McpHttpServer.layerOrchestratorToolkit,
-  McpHttpServer.layerThreadToolkit,
+  McpHttpServer.layerThreadToolkit.pipe(
+    Layer.provide(Layer.mock(AgentSessionImporter.AgentSessionImporter)({})),
+  ),
   McpHttpServer.layerProjectRegistration,
 ).pipe(
   Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),

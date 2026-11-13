@@ -1,3 +1,4 @@
+import { TurnItemId } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it, vi } from "vite-plus/test";
@@ -2089,6 +2090,20 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
 
 effectIt.effect.each([
   "same native session",
+  "synced same native session",
+  "synced no receipt",
+  "synced wrong native receipt",
+  "synced wrong instance receipt",
+  "synced replaced native session",
+  "synced replaced provider instance",
+  "synced replaced driver",
+  "synced failed resume",
+  "synced uncertain delivery",
+  "synced fresh session",
+  "synced Edit from here",
+  "synced native fork",
+  "synced stale import receipt",
+
   "no receipt",
   "wrong native receipt",
   "wrong instance receipt",
@@ -2103,8 +2118,13 @@ effectIt.effect.each([
   "fresh named title",
   "Edit from here",
   "native fork",
-] as const)("continues imported native history: %s", (scenario) =>
+] as const)("continues imported native history: %s", (testCase) =>
   Effect.gen(function* () {
+    const synchronized = testCase.startsWith("synced ");
+    const scenario =
+      testCase === "synced stale import receipt"
+        ? "same native session"
+        : testCase.replace(/^synced /, "");
     const checksNativeTitle =
       scenario === "fresh unnamed title" || scenario === "fresh named title";
     const harness = makeLocalCommandHarness({ text: "Continue", useRealHandoffs: true });
@@ -2116,7 +2136,11 @@ effectIt.effect.each([
       nativeId: "imported-native",
       strength: "strong" as const,
     };
-    const itemIds = [0, 1, 2].map((index) => agentSessionImportTurnItemId(run.threadId, index));
+    const itemIds = [0, 1, 2].map((index) =>
+      synchronized
+        ? TurnItemId.make(`kiro-history:synthetic-${index}`)
+        : agentSessionImportTurnItemId(run.threadId, index),
+    );
     const importedHistory = {
       driver:
         scenario === "wrong driver receipt"
@@ -2135,7 +2159,29 @@ effectIt.effect.each([
       driver: nativeThreadRef.driver,
       nativeThreadRef,
       status: "idle" as const,
-      nativeMetadata: scenario === "no receipt" ? null : { importedHistory },
+      nativeMetadata:
+        scenario === "no receipt"
+          ? null
+          : synchronized
+            ? {
+                ...(testCase === "synced stale import receipt"
+                  ? { importedHistory: { ...importedHistory, nativeThreadId: "old-session" } }
+                  : {}),
+                nativeHistory: {
+                  version: 1 as const,
+                  source: "synthetic-source",
+                  providerInstanceId: importedHistory.providerInstanceId,
+                  nativeThreadId: importedHistory.nativeThreadId,
+                  baselineRows: 0,
+                  coveredRunOrdinal: 0,
+                  rows: itemIds.map((itemId, index) => ({
+                    id: `native-row-${index}`,
+                    digest: `digest-${index}`,
+                    itemId,
+                  })),
+                },
+              }
+            : { importedHistory },
     };
     const importedItems = itemIds.map((id, index) => ({
       id,

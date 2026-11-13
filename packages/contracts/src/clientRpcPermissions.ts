@@ -17,6 +17,7 @@ import { WS_METHODS } from "./rpc.ts";
 
 /** Incremental client enforcement; the server still authorizes every request. */
 export const CLIENT_GUARDED_RPC_SCOPES = {
+  [WS_METHODS.serverSyncNativeHistory]: AuthOrchestrationOperateScope,
   [WS_METHODS.kiroMemoryList]: AuthProvidersManageScope,
   [WS_METHODS.kiroMemoryGet]: AuthProvidersManageScope,
   [WS_METHODS.kiroMemoryCreate]: AuthProvidersManageScope,

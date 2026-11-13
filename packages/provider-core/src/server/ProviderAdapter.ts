@@ -1,3 +1,4 @@
+import type { NativeHistoryReadError } from "@t3tools/contracts";
 import type { OrchestrationV2HistoricalMessage } from "@t3tools/contracts";
 import {
   ChatAttachment,
@@ -785,6 +786,7 @@ export class ProviderAdapterV2 extends Context.Service<
   {
     readonly instanceId: ProviderInstanceId;
     readonly driver: ProviderDriverKind;
+    readonly nativeHistory?: NativeHistoryReader;
     readonly getCapabilities: () => Effect.Effect<
       OrchestrationV2ProviderCapabilities,
       ProviderAdapterV2Error
@@ -797,3 +799,24 @@ export class ProviderAdapterV2 extends Context.Service<
     ) => Effect.Effect<ProviderAdapterV2SessionRuntime, ProviderAdapterV2Error, Scope.Scope>;
   }
 >()("@t3tools/provider-core/server/ProviderAdapter/ProviderAdapterV2") {}
+
+export interface NativeHistoryCapture {
+  readonly source: string;
+  readonly identity: string;
+  readonly rows: ReadonlyArray<{
+    readonly id: string;
+    readonly digest: string;
+    readonly timestamp: string;
+    readonly kind: "user" | "assistant" | "reasoning" | "control";
+    readonly text?: string;
+    readonly status?: "completed" | "interrupted";
+    readonly userRowId?: string;
+    readonly boundary?: "start" | "end";
+  }>;
+}
+export interface NativeHistoryReader {
+  readonly capture: (input: {
+    readonly cwd: string;
+    readonly nativeId: string;
+  }) => Effect.Effect<NativeHistoryCapture, NativeHistoryReadError>;
+}

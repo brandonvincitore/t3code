@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off - The runtime proof supplies a closed stdin and an explicit isolated subprocess environment.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as FileSystem from "effect/FileSystem";
+import { makeKiroNativeHistory } from "@t3tools/provider-kiro/testing";
 import { expect, it } from "@effect/vitest";
 import {
   type AgentSessionSource,
@@ -10,6 +15,10 @@ import {
   ProviderThreadId,
   MessageId,
   RunId,
+  TurnItemId,
+  RunAttemptId,
+  NodeId,
+  ProviderTurnId,
   ThreadId,
   type ApplicationStoredEvent,
   type OrchestrationV2AppThread,
@@ -28,6 +37,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
@@ -47,6 +57,11 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as AgentSessionImporter from "./AgentSessionImporter.ts";
 import * as AgentSessionScanner from "./AgentSessionScanner.ts";
 import * as ProjectService from "./ProjectService.ts";
+
+class SyntheticWriterError extends Schema.TaggedError<SyntheticWriterError>()(
+  "SyntheticWriterError",
+  { cause: Schema.Defect() },
+) {}
 
 const projectId = ProjectId.make("agent-session-import-project");
 const timestamp = "2026-09-01T10:00:00.000Z";
@@ -112,13 +127,14 @@ function importId(source: ReturnType<typeof candidate>) {
 const seedOwner = Effect.fn(function* (
   source: ReturnType<typeof candidate>,
   lifecycle: "active" | "archived" | "deleted" = "active",
+  driverOverride?: ProviderDriverKind,
 ) {
   const sink = yield* EventSink.EventSinkV2;
   const ids = yield* IdAllocator.IdAllocatorV2;
   const { providerInstanceId, providerSessionId, provider } = source.source;
   const nativeThreadId = nativeId(source);
   const threadId = ThreadId.make(`owner:${providerInstanceId}:${providerSessionId}`);
-  const driver = ProviderDriverKind.make(provider);
+  const driver = driverOverride ?? ProviderDriverKind.make(provider);
   const providerThread: OrchestrationV2ProviderThread = {
     id: ids.derive.providerThread({ driver, nativeThreadId }),
     driver,
@@ -256,9 +272,12 @@ const makeImporter = Effect.fn(function* (
                   ),
                 ),
           }),
-          Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)(
-            getAdapter === undefined ? {} : { get: getAdapter },
-          ),
+          getAdapter === undefined
+            ? Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})
+            : Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistryV2, {
+                get: getAdapter,
+                list: () => Effect.succeed([]),
+              }),
           Layer.succeed(
             ThreadCommandExecutor.ThreadCommandExecutor,
             threadCommands ?? (yield* KeyedLock.make<ThreadId>()),
@@ -271,9 +290,63 @@ const makeImporter = Effect.fn(function* (
   return {
     run: importer.importRecentAgentThreads({ projectId }),
     importNativeHistory: importer.importNativeHistory,
+    syncNativeHistory: importer.syncNativeHistory,
     published,
   };
 });
+
+it.effect("catches up an existing Kiro owner without loading the native session", () =>
+  Effect.gen(function* () {
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const selection = { instanceId: ProviderInstanceId.make("kiro"), model: "default" };
+    const threadId = yield* seedOwner(
+      candidate(selection, "catch-up"),
+      "active",
+      ProviderDriverKind.make("kiro"),
+    );
+    const before = yield* projections.getThreadRecords(threadId, ["providerThreads"]);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("legacy-history"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...before.thread, historyOrigin: "v1_import" },
+        },
+      ],
+    });
+    const capture = {
+      source: "synthetic-source",
+      identity: "snapshot-1",
+      rows: [
+        {
+          id: "native-user-row",
+          digest: "row-digest",
+          timestamp,
+          kind: "user" as const,
+          text: "External CLI addition",
+        },
+      ],
+    };
+    const adapter = {
+      instanceId: selection.instanceId,
+      driver: ProviderDriverKind.make("kiro"),
+      nativeHistory: {
+        capture: () => Effect.succeed(capture),
+      },
+      openSession: () => Effect.die("Native load must never be used for catch-up"),
+    } as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
+    const importer = yield* makeImporter([], Effect.void, () => Effect.succeed(adapter));
+    expect(
+      yield* importer.importNativeHistory({ threadId, workspaceRoot: "/workspace/project" }),
+    ).toBe(1);
+    expect(
+      (yield* projections.getThreadRecords(threadId, ["messages"])).messages.map((m) => m.text),
+    ).toEqual(["External CLI addition"]);
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
 
 it.effect(
   "ignores owned sessions, including archived and deleted threads, but imports other instances and unowned sessions",
@@ -898,4 +971,571 @@ it.effect("imports under a policy ceiling in the project's default, kept under t
       "auto-accept-edits",
     );
   }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+const setupKiroSync = Effect.fn("test.setupKiroSync")(function* (withRun = false) {
+  const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const sink = yield* EventSink.EventSinkV2;
+  const selection = { instanceId: ProviderInstanceId.make("kiro"), model: "default" };
+  const threadId = yield* seedOwner(
+    candidate(selection, "sync"),
+    "active",
+    ProviderDriverKind.make("kiro"),
+  );
+  const before = yield* projections.getThreadRecords(threadId, ["providerThreads"]);
+  const owner = before.providerThreads[0]!;
+  const rows: Array<
+    import("@t3tools/provider-core/server/ProviderAdapter").NativeHistoryCapture["rows"][number]
+  > = [
+    {
+      id: "user-external",
+      digest: "user-digest",
+      timestamp,
+      kind: "user",
+      text: "CLI addition",
+      userRowId: "user-external",
+    },
+    {
+      id: "reasoning",
+      digest: "reasoning-digest",
+      timestamp,
+      kind: "reasoning",
+      text: "Thinking",
+      userRowId: "user-external",
+    },
+    {
+      id: "reply",
+      digest: "reply-digest",
+      timestamp,
+      kind: "assistant",
+      text: "Reply",
+      userRowId: "user-external",
+    },
+    {
+      id: "end-external",
+      digest: "end-digest",
+      timestamp,
+      kind: "control",
+      boundary: "end",
+      userRowId: "user-external",
+    },
+  ];
+  const capture = { source: "scoped-source", identity: "snapshot-1", rows };
+  const state = { reads: 0, capture, beforeCapture: Effect.void as Effect.Effect<void> };
+  const reader = {
+    capture: () =>
+      state.beforeCapture.pipe(
+        Effect.andThen(
+          Effect.sync(() => {
+            state.reads++;
+            return state.capture;
+          }),
+        ),
+      ),
+  };
+  const adapter = {
+    instanceId: selection.instanceId,
+    driver: ProviderDriverKind.make("kiro"),
+    nativeHistory: reader,
+    openSession: () => Effect.die("Native loading is forbidden"),
+  } as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
+  const provider = { current: adapter };
+  const lock = yield* KeyedLock.make<ThreadId>();
+  const make = () => makeImporter([], Effect.void, () => Effect.succeed(provider.current), lock);
+  const importer = yield* make();
+  if (withRun) {
+    const runId = RunId.make("existing-run");
+    const attemptId = RunAttemptId.make("existing-attempt");
+    const nodeId = NodeId.make("existing-node");
+    const turnId = ProviderTurnId.make("existing-turn");
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make("existing-run"),
+          type: "run.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: runId,
+            threadId,
+            ordinal: 1,
+            providerInstanceId: selection.instanceId,
+            modelSelection: selection,
+            providerThreadId: owner.id,
+            userMessageId: MessageId.make("existing-user"),
+            rootNodeId: nodeId,
+            activeAttemptId: attemptId,
+            status: "completed",
+            requestedAt: now,
+            startedAt: now,
+            completedAt: now,
+            checkpointId: null,
+            contextHandoffId: null,
+          },
+        },
+        {
+          id: EventId.make("existing-attempt"),
+          type: "run-attempt.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: attemptId,
+            runId,
+            attemptOrdinal: 1,
+            rootNodeId: nodeId,
+            providerInstanceId: selection.instanceId,
+            providerThreadId: owner.id,
+            providerTurnId: turnId,
+            nativeThreadId: "sync",
+            reason: "initial",
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+        {
+          id: EventId.make("existing-turn"),
+          type: "provider-turn.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: turnId,
+            providerThreadId: owner.id,
+            nodeId,
+            runAttemptId: attemptId,
+            nativeTurnRef: {
+              driver: ProviderDriverKind.make("kiro"),
+              nativeId: "anchored-user",
+              strength: "strong",
+            },
+            ordinal: 1,
+            status: "completed",
+            startedAt: now,
+            completedAt: now,
+          },
+        },
+        {
+          id: EventId.make("existing-user-item"),
+          type: "turn-item.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            id: TurnItemId.make("existing-user-item"),
+            threadId,
+            runId,
+            nodeId,
+            providerThreadId: owner.id,
+            providerTurnId: turnId,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 1,
+            status: "completed",
+            title: null,
+            startedAt: now,
+            completedAt: now,
+            updatedAt: now,
+            type: "user_message",
+            createdBy: "user",
+            creationSource: "web",
+            messageId: MessageId.make("existing-user"),
+            inputIntent: "turn_start",
+            text: "Earlier T3 prompt",
+            attachments: [],
+          },
+        },
+        {
+          id: EventId.make("existing-user-message"),
+          type: "message.updated",
+          threadId,
+          occurredAt: now,
+          payload: {
+            createdBy: "user",
+            creationSource: "web",
+            id: MessageId.make("existing-user"),
+            threadId,
+            runId,
+            nodeId,
+            role: "user",
+            text: "Earlier T3 prompt",
+            attachments: [],
+            streaming: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        {
+          id: EventId.make("existing-history"),
+          type: "thread.metadata-updated",
+          threadId,
+          occurredAt: now,
+          payload: { ...before.thread, historyOrigin: "v1_import" },
+        },
+      ],
+    });
+    rows.unshift(
+      {
+        id: "anchored-user",
+        digest: "anchor-digest",
+        timestamp,
+        kind: "user",
+        text: "Earlier T3 prompt",
+        userRowId: "anchored-user",
+      },
+      {
+        id: "anchored-end",
+        digest: "anchor-end-digest",
+        timestamp,
+        kind: "control",
+        boundary: "end",
+        userRowId: "anchored-user",
+      },
+    );
+  }
+  const input = { threadId, projectId, instanceId: selection.instanceId };
+  return {
+    importer,
+    make,
+    input,
+    capture,
+    state,
+    provider,
+    owner,
+    sink,
+    projections,
+    lock,
+    read: () =>
+      projections.getThreadRecords(threadId, ["providerThreads", "messages", "runs", "turnItems"]),
+  };
+});
+
+it.effect(
+  "syncs CLI additions after a strong legacy anchor in a thread with runs, and remains idempotent across concurrent requests and reconstruction",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* setupKiroSync(true);
+      expect(yield* h.importer.syncNativeHistory({ ...h.input, checkOnly: true })).toMatchObject({
+        status: "updates_available",
+        baselineRows: 2,
+      });
+      expect((yield* h.read()).messages).toHaveLength(1);
+      const results = yield* Effect.all(
+        [h.importer.syncNativeHistory(h.input), h.importer.syncNativeHistory(h.input)],
+        { concurrency: 2 },
+      );
+      expect(results.map((result) => result.addedItems).sort()).toEqual([0, 3]);
+      const records = yield* h.read();
+      expect(records.runs).toHaveLength(1);
+      expect(records.messages.map((message) => message.text)).toEqual([
+        "Earlier T3 prompt",
+        "CLI addition",
+        "Reply",
+      ]);
+      const externalItems = records.turnItems.filter((item) => item.runId === null);
+      expect(
+        externalItems.every(
+          (item) => item.ordinal > records.turnItems.find((item) => item.runId !== null)!.ordinal,
+        ),
+      ).toBe(true);
+      expect(externalItems.map((item) => item.type)).toEqual([
+        "user_message",
+        "reasoning",
+        "assistant_message",
+      ]);
+      expect(externalItems.map((item) => item.nativeItemRef?.nativeId)).toEqual([
+        "user-external",
+        "reasoning",
+        "reply",
+      ]);
+      expect(records.providerThreads[0]?.nativeMetadata?.nativeHistory?.rows).toHaveLength(6);
+      const restarted = yield* h.make();
+      expect(yield* restarted.syncNativeHistory(h.input)).toMatchObject({
+        status: "synced",
+        addedItems: 0,
+      });
+      h.state.capture = {
+        ...h.capture,
+        identity: "snapshot-2",
+        rows: [
+          ...h.capture.rows,
+          {
+            id: "next-user",
+            digest: "next-digest",
+            timestamp,
+            kind: "user",
+            text: "CLI addition",
+            userRowId: "next-user",
+          },
+          {
+            id: "next-end",
+            digest: "next-end",
+            timestamp,
+            kind: "control",
+            boundary: "end",
+            userRowId: "next-user",
+          },
+        ],
+      };
+      expect(yield* restarted.syncNativeHistory(h.input)).toMatchObject({
+        status: "synced",
+        addedItems: 1,
+      });
+      expect(
+        (yield* h.read()).messages.filter((message) => message.text === "CLI addition"),
+      ).toHaveLength(2);
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.effect.each([
+  "unanchored",
+  "unsupported",
+  "rewrite",
+  "truncate",
+  "home",
+  "project",
+  "instance",
+  "replacement",
+  "native replacement",
+  "provider replacement",
+  "driver replacement",
+  "cwd replacement",
+  "busy",
+  "unstable",
+] as const)("keeps receipts and timeline unchanged on %s sync", (kind) =>
+  Effect.gen(function* () {
+    const h = yield* setupKiroSync(kind === "unanchored");
+    if (kind !== "unanchored") yield* h.importer.syncNativeHistory(h.input);
+    const before = yield* h.read();
+    let input = h.input;
+    switch (kind) {
+      case "unsupported":
+        yield* h.sink.write({
+          events: [
+            {
+              id: EventId.make("unsupported-driver"),
+              type: "provider-thread.updated",
+              threadId: input.threadId,
+              occurredAt: now,
+              payload: { ...before.providerThreads[0]!, driver: ProviderDriverKind.make("codex") },
+            },
+          ],
+        });
+        break;
+      case "unanchored":
+        h.capture.rows[0] = { ...h.capture.rows[0]!, id: "different-native-user" };
+        break;
+      case "rewrite":
+        h.state.capture = {
+          ...h.capture,
+          rows: [{ ...h.capture.rows[0]!, digest: "rewritten" }, ...h.capture.rows.slice(1)],
+        };
+        break;
+      case "truncate":
+        h.state.capture = { ...h.capture, rows: h.capture.rows.slice(0, -1) };
+        break;
+      case "home":
+        h.state.capture = { ...h.capture, source: "another-home" };
+        break;
+      case "project":
+        input = { ...input, projectId: ProjectId.make("another-project") };
+        break;
+      case "instance":
+        input = { ...input, instanceId: ProviderInstanceId.make("another-instance") };
+        break;
+      case "replacement":
+        h.state.beforeCapture = Effect.sync(() => {
+          h.provider.current = {
+            ...h.provider.current,
+            nativeHistory: { ...h.provider.current.nativeHistory! },
+          };
+        });
+        break;
+      case "native replacement":
+      case "provider replacement":
+      case "driver replacement":
+      case "cwd replacement":
+        h.state.beforeCapture = Effect.suspend(() =>
+          h.state.reads > 2
+            ? Effect.void
+            : h.sink
+                .write({
+                  events: [
+                    kind === "cwd replacement"
+                      ? {
+                          id: EventId.make("capture-cwd-change"),
+                          type: "thread.metadata-updated",
+                          threadId: input.threadId,
+                          occurredAt: now,
+                          payload: { ...before.thread, worktreePath: "/another-workspace" },
+                        }
+                      : {
+                          id: EventId.make(`capture-${kind}`),
+                          type: "provider-thread.updated",
+                          threadId: input.threadId,
+                          occurredAt: now,
+                          payload: {
+                            ...before.providerThreads[0]!,
+                            ...(kind === "native replacement"
+                              ? {
+                                  nativeThreadRef: {
+                                    ...h.owner.nativeThreadRef!,
+                                    nativeId: "another-native",
+                                  },
+                                }
+                              : {}),
+                            ...(kind === "provider replacement"
+                              ? { providerInstanceId: ProviderInstanceId.make("another-provider") }
+                              : {}),
+                            ...(kind === "driver replacement"
+                              ? { driver: ProviderDriverKind.make("another-driver") }
+                              : {}),
+                          },
+                        },
+                  ],
+                })
+                .pipe(Effect.asVoid, Effect.orDie),
+        );
+        break;
+      case "unstable":
+        h.state.beforeCapture = Effect.sync(() => {
+          h.state.capture = { ...h.state.capture, identity: `changing-${h.state.reads}` };
+        });
+        break;
+      case "busy":
+        yield* h.sink.write({
+          events: [
+            {
+              id: EventId.make("busy-run"),
+              type: "run.updated",
+              threadId: input.threadId,
+              occurredAt: now,
+              payload: {
+                id: RunId.make("busy-run"),
+                threadId: input.threadId,
+                ordinal: 1,
+                providerInstanceId: input.instanceId,
+                modelSelection: { instanceId: input.instanceId, model: "default" },
+                providerThreadId: h.owner.id,
+                userMessageId: MessageId.make("busy-user"),
+                rootNodeId: null,
+                activeAttemptId: null,
+                status: "running",
+                requestedAt: now,
+                startedAt: now,
+                completedAt: null,
+                checkpointId: null,
+                contextHandoffId: null,
+              },
+            },
+          ],
+        });
+        break;
+    }
+    const result = yield* h.importer.syncNativeHistory(input);
+    expect(result.status).toBe(
+      kind === "unsupported"
+        ? "unsupported"
+        : kind === "unanchored"
+          ? "ambiguous"
+          : kind === "busy" || kind === "unstable"
+            ? "busy"
+            : "unsafe",
+    );
+    const after = yield* h.read();
+    expect(after.messages).toEqual(before.messages);
+    expect(after.providerThreads[0]?.nativeMetadata).toEqual(
+      before.providerThreads[0]?.nativeMetadata,
+    );
+  }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
+it.live(
+  "proves read-only catch-up through the service after a synthetic subprocess releases its lease",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-kiro-history-proof-" });
+      const selection = { instanceId: ProviderInstanceId.make("kiro"), model: "default" };
+      const threadId = yield* seedOwner(
+        candidate(selection, "pipe-proof"),
+        "active",
+        ProviderDriverKind.make("kiro"),
+      );
+      const native = `${home}/.kiro`;
+      const writer = String.raw`
+      const fs = require('node:fs'); const path = require('node:path'); const crypto = require('node:crypto');
+      const root = process.env.KIRO_HOME; const cwd = '/workspace/project'; const id = 'pipe-proof';
+      const directory = path.join(root, 'sessions', crypto.createHash('sha256').update(cwd).digest('hex').slice(0,16), id);
+      fs.mkdirSync(directory, { recursive: true }); fs.mkdirSync(path.join(root,'session-leases'), {recursive:true});
+      const at = '2026-11-13T00:00:00.000Z';
+      fs.writeFileSync(path.join(directory,'session.json'),JSON.stringify({schemaVersion:'1.0.0',id,workspacePaths:[cwd],createdAt:at,lastModifiedAt:at}));
+      const rows = [{id:'writer-user',timestamp:at,payload:{type:'user',content:'Synthetic CLI request'}},
+        {id:'writer-answer',timestamp:at,payload:{type:'assistant',operationType:'Say',content:'Synthetic CLI answer'}},
+        {id:'writer-end',timestamp:at,payload:{type:'turn_end',stopReason:'end_turn'}}];
+      fs.writeFileSync(path.join(directory,'messages.jsonl'),rows.map(row=>JSON.stringify(row)).join('\n')+'\n');
+      fs.writeFileSync(path.join(root,'session-leases',id+'.lease'),'synthetic foreign lease');
+      process.stdout.write('synthetic writer: one completed turn persisted\n');
+    `;
+      const transcript = yield* Effect.tryPromise({
+        try: () =>
+          new Promise<string>((resolve, reject) => {
+            const child = NodeChildProcess.spawn(process.execPath, ["-e", writer], {
+              cwd: home,
+              env: {
+                HOME: home,
+                KIRO_HOME: native,
+                XDG_CONFIG_HOME: `${home}/xdg`,
+                PATH: "/usr/bin:/bin",
+              },
+              stdio: ["ignore", "pipe", "pipe"],
+            });
+            let output = "";
+            child.stdout.on("data", (data) => {
+              output += String(data);
+            });
+            child.stderr.resume();
+            child.once("error", reject);
+            child.once("close", (code) =>
+              code === 0 ? resolve(output) : reject(new SyntheticWriterError({ cause: code })),
+            );
+          }),
+        catch: (cause) => new SyntheticWriterError({ cause }),
+      });
+      expect(transcript).toBe("synthetic writer: one completed turn persisted\n");
+      const reader = yield* makeKiroNativeHistory({
+        HOME: home,
+        KIRO_HOME: native,
+        XDG_CONFIG_HOME: `${home}/xdg`,
+      });
+      const adapter = {
+        instanceId: selection.instanceId,
+        driver: ProviderDriverKind.make("kiro"),
+        nativeHistory: { capture: reader.capture },
+        openSession: () => Effect.die("Sync must not open or load a native session"),
+      } as unknown as ProviderAdapter.ProviderAdapterV2["Service"];
+      const importer = yield* makeImporter([], Effect.void, () => Effect.succeed(adapter));
+      const input = { threadId, projectId, instanceId: selection.instanceId };
+      expect(yield* importer.syncNativeHistory(input)).toMatchObject({
+        status: "busy",
+        reason: "lease_present",
+      });
+      const lease = `${native}/session-leases/pipe-proof.lease`;
+      expect(yield* fs.readFileString(lease)).toBe("synthetic foreign lease");
+      // The fixture acts as the user releasing a lease; production never removes one.
+      yield* fs.remove(lease);
+      const synced = yield* importer.syncNativeHistory(input);
+      expect(synced).toMatchObject({ status: "synced", addedItems: 2 });
+      expect(yield* importer.syncNativeHistory(input)).toMatchObject({
+        status: "synced",
+        addedItems: 0,
+      });
+      const projection = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+        threadId,
+        ["runs", "messages"],
+      );
+      expect(projection.runs).toHaveLength(0);
+      expect(projection.messages).toHaveLength(2);
+      yield* Effect.logInfo(
+        "SYNTHETIC RUNTIME PROOF: Node pipe writer exited 0; lease blocked sync unchanged; fixture released lease; synced 2 items into same owner; repeat added 0; native open/load/model calls 0; fake runs 0.",
+      );
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(persistence, NodeServices.layer))),
 );

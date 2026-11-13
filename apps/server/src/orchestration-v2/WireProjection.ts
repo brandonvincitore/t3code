@@ -1,3 +1,4 @@
+import type { OrchestrationV2ProviderThread } from "@t3tools/contracts";
 import type {
   CheckpointId,
   MessageId,
@@ -132,10 +133,19 @@ function capCheckpointFiles<T extends CheckpointFiles>(value: T): T {
   return capped;
 }
 
+function providerThreadForWire(
+  thread: OrchestrationV2ProviderThread,
+): OrchestrationV2ProviderThread {
+  if (thread.nativeMetadata?.nativeHistory === undefined) return thread;
+  const { nativeHistory: _receipt, ...nativeMetadata } = thread.nativeMetadata;
+  return { ...thread, nativeMetadata };
+}
+
 /** Idempotent; bounded snapshots that skip `projectThreadProjectionForWire` still need it. */
 export function capProjectionCheckpointFilesForWire(
   projection: OrchestrationV2ThreadProjection,
 ): OrchestrationV2ThreadProjection {
+  const providerThreads = projection.providerThreads.map(providerThreadForWire);
   const checkpoints = projection.checkpoints.map(capCheckpointFiles);
   const turnItems = projection.turnItems.map(capCheckpointItemFiles);
   const visibleTurnItems = projection.visibleTurnItems.map((row) => {
@@ -144,11 +154,12 @@ export function capProjectionCheckpointFilesForWire(
   });
   const unchanged = (next: ReadonlyArray<unknown>, previous: ReadonlyArray<unknown>) =>
     next.every((value, index) => value === previous[index]);
-  return unchanged(checkpoints, projection.checkpoints) &&
+  return unchanged(providerThreads, projection.providerThreads) &&
+    unchanged(checkpoints, projection.checkpoints) &&
     unchanged(turnItems, projection.turnItems) &&
     unchanged(visibleTurnItems, projection.visibleTurnItems)
     ? projection
-    : { ...projection, checkpoints, turnItems, visibleTurnItems };
+    : { ...projection, providerThreads, checkpoints, turnItems, visibleTurnItems };
 }
 
 function capCheckpointItemFiles(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
@@ -320,6 +331,7 @@ export function projectThreadProjectionForWire(
   };
   return {
     ...projection,
+    providerThreads: projection.providerThreads.map(providerThreadForWire),
     checkpoints: projection.checkpoints.map(capCheckpointFiles),
     contextHandoffs: projection.contextHandoffs.map(projectContextHandoffForWire),
     turnItems: projection.turnItems.map(project),
@@ -333,13 +345,15 @@ export function projectThreadProjectionForWire(
 export function projectDomainEventForWire(
   event: OrchestrationV2DomainEvent,
 ): OrchestrationV2DomainEvent {
-  return event.type === "turn-item.updated"
-    ? { ...event, payload: projectTurnItemForWire(event.payload) }
-    : event.type === "context-handoff.updated"
-      ? { ...event, payload: projectContextHandoffForWire(event.payload) }
-      : event.type === "checkpoint.captured"
-        ? { ...event, payload: capCheckpointFiles(event.payload) }
-        : event;
+  return event.type === "provider-thread.updated"
+    ? { ...event, payload: providerThreadForWire(event.payload) }
+    : event.type === "turn-item.updated"
+      ? { ...event, payload: projectTurnItemForWire(event.payload) }
+      : event.type === "context-handoff.updated"
+        ? { ...event, payload: projectContextHandoffForWire(event.payload) }
+        : event.type === "checkpoint.captured"
+          ? { ...event, payload: capCheckpointFiles(event.payload) }
+          : event;
 }
 
 // Keyed on the stored event PubSub hands every subscriber, so all of them share one projection

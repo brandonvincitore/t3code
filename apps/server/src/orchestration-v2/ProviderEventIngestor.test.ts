@@ -3,6 +3,7 @@ import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CheckpointId,
+  EventId,
   CheckpointRef,
   CheckpointScopeId,
   MessageId,
@@ -501,6 +502,59 @@ layer("ProviderEventIngestorV2", (it) => {
         ["provider-thread.updated"],
       );
       assert.equal(latestThreadSequence, 2);
+      const kiro = {
+        ...providerThread,
+        driver: ProviderDriverKind.make("kiro"),
+        nativeThreadRef: {
+          ...providerThread.nativeThreadRef!,
+          driver: ProviderDriverKind.make("kiro"),
+        },
+        nativeMetadata: {
+          nativeHistory: {
+            version: 1 as const,
+            source: "synthetic-source",
+            providerInstanceId: modelSelection.instanceId,
+            nativeThreadId: "native-thread",
+            baselineRows: 0,
+            coveredRunOrdinal: 0,
+            rows: [{ id: "row", digest: "digest", itemId: TurnItemId.make("synced-item") }],
+          },
+        },
+      };
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("durable-native-receipt"),
+            type: "provider-thread.updated",
+            threadId: threadEvent.threadId,
+            occurredAt: now,
+            payload: kiro,
+          },
+        ],
+      });
+      for (const nativeId of ["native-thread", "replacement-native"]) {
+        yield* ingestor.ingestNormalized({
+          providerSessionId,
+          providerInstanceId: modelSelection.instanceId,
+          threadId: threadEvent.threadId,
+          event: {
+            type: "provider_thread.updated",
+            driver: kiro.driver,
+            providerThread: {
+              ...kiro,
+              nativeThreadRef: { ...kiro.nativeThreadRef, nativeId },
+              nativeMetadata: null,
+            },
+          },
+        });
+        const current = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+          "providerThreads",
+        ])).providerThreads[0]!;
+        assert.deepEqual(
+          current.nativeMetadata?.nativeHistory,
+          nativeId === "native-thread" ? kiro.nativeMetadata.nativeHistory : undefined,
+        );
+      }
     }),
   );
 

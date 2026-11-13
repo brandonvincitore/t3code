@@ -1,3 +1,4 @@
+import * as AgentSessionImporter from "../../../project/AgentSessionImporter.ts";
 import {
   type CommandId,
   type RuntimeRequestId,
@@ -91,6 +92,20 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
+  t3_thread_sync_native_history: writesThread((input) =>
+    Effect.gen(function* () {
+      const { projection } = yield* readThread(input.threadId, []);
+      const importer = yield* AgentSessionImporter.AgentSessionImporter;
+      return yield* importer
+        .syncNativeHistory({
+          threadId: projection.thread.id,
+          projectId: projection.thread.projectId,
+          instanceId: projection.thread.modelSelection.instanceId,
+          ...(input.checkOnly === undefined ? {} : { checkOnly: input.checkOnly }),
+        })
+        .pipe(Effect.mapError(unavailable));
+    }),
+  ),
   run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {
       const scheduler = yield* ScheduledTasks.ScheduledTaskService;

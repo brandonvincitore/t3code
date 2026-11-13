@@ -361,3 +361,22 @@ fallback; it does not claim a successful title change. These are source-shaped
 scripted ACP processes, not Kiro, account, classifier or paid title-model runs.
 All earlier ledger bytes, pins, original credits and PR source rows are retained;
 the parent owns the new independent review and combined client proof.
+
+## Fork-owned native history catch-up (2026-11-13)
+
+Based on refinement `83c91bb25f39d274b8954619b432a3f5166aebae` and the bounded,
+read-only Linux Kiro CLI 3.2.1 persistence audit supplied for this task (bundle
+SHA-256 `37ad677e768131aafcb4c40c4dce271104489f2aaa8b9ce2c34d194213e4de1c`,
+16,533,385 bytes). That cached bundle was unavailable in this checkout's host;
+the supplied schema, writer, workspace and lease excerpts are static evidence,
+not a live native or macOS result. This is fork-owned implementation work.
+Earlier ledger bytes, source pins, author credits and PR rows remain intact.
+
+Explicit catch-up uses bounded read-only saved files, refuses every present lease,
+and records row identities with prefix digests atomically in the existing owner.
+Legacy reconciliation uses the adapter's strong native user-message reference
+only when it joins a saved user row and a closed turn; older gaps remain omitted.
+Exact-session receipts suppress echo on successful same-native continuation and
+retain portable recovery history on replacement. Independent source review and
+the integrated client pass belong to the parent; no live native compatibility
+or paid provider/model/eval proof is claimed here.

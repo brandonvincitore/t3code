@@ -1,3 +1,5 @@
+import { useAtomValue } from "@effect/atom-react";
+import { nativeHistorySyncMessage } from "@t3tools/client-runtime/kiro-actions";
 import {
   AuthOrchestrationOperateScope,
   AuthProvidersManageScope,
@@ -120,6 +122,7 @@ function InstanceSessionManagement(
   const [sessions, setSessions] = useState<ReadonlyArray<AcpRegistrySession>>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [syncingSessionId, setSyncingSessionId] = useState<string | null>(null);
   const [importingSessionId, setImportingSessionId] = useState<string | null>(null);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -136,6 +139,7 @@ function InstanceSessionManagement(
     setNextCursor(null);
     setLoading(false);
     setImportingSessionId(null);
+    setSyncingSessionId(null);
     setDeletingSessionId(null);
     setProviders([]);
     setLoadingProviders(false);
@@ -148,6 +152,10 @@ function InstanceSessionManagement(
   const importSession = useAtomCommand(serverEnvironment.importAcpRegistrySession, {
     reportFailure: false,
   });
+  const syncHistory = useAtomCommand(serverEnvironment.syncNativeHistory, { reportFailure: false });
+  const syncPermission = useAtomValue(
+    serverEnvironment.syncNativeHistory.permissionAtom(props.environmentId),
+  );
   const deleteSession = useAtomCommand(serverEnvironment.deleteAcpRegistrySession, {
     reportFailure: false,
   });
@@ -238,6 +246,29 @@ function InstanceSessionManagement(
       return;
     }
     reportFailure("Could not import ACP session", result);
+  };
+
+  const synchronize = async (session: AcpRegistrySession, checkOnly: boolean) => {
+    const generation = projectGeneration.current;
+    if (!session.importedThreadId || !projectId || syncingSessionId !== null) return;
+    setSyncingSessionId(session.sessionId);
+    const result = await syncHistory({
+      environmentId: props.environmentId,
+      input: {
+        threadId: session.importedThreadId,
+        projectId,
+        instanceId: props.instanceId,
+        checkOnly,
+      },
+    });
+    if (generation !== projectGeneration.current) return;
+    setSyncingSessionId(null);
+    if (result._tag === "Success")
+      toastManager.add({
+        type: result.value.status === "synced" ? "success" : "info",
+        title: nativeHistorySyncMessage(result.value),
+      });
+    else reportFailure("Could not sync native history", result);
   };
 
   const deleteNativeSession = async (session: AcpRegistrySession) => {
@@ -487,6 +518,34 @@ function InstanceSessionManagement(
                             ? "Importing"
                             : "Import"}
                       </Button>
+                      {props.provider.driver === "kiro" && session.importedThreadId !== null ? (
+                        <>
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="ghost-muted"
+                            disabled={
+                              props.readOnly || !syncPermission || syncingSessionId !== null
+                            }
+                            onClick={() => void synchronize(session, true)}
+                          >
+                            Check history
+                          </Button>
+                          <Button
+                            type="button"
+                            size="xs"
+                            variant="ghost-muted"
+                            disabled={
+                              props.readOnly || !syncPermission || syncingSessionId !== null
+                            }
+                            onClick={() => void synchronize(session, false)}
+                          >
+                            {syncingSessionId === session.sessionId
+                              ? "Checking / syncing"
+                              : "Sync from Kiro"}
+                          </Button>
+                        </>
+                      ) : null}
                       {canDelete ? (
                         <Button
                           type="button"

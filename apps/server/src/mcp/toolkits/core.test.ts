@@ -1,3 +1,4 @@
+import * as AgentSessionImporter from "../../project/AgentSessionImporter.ts";
 import * as AssetSigner from "../../assets/AssetSigner.ts";
 import * as DocumentText from "../../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -83,6 +84,7 @@ const decodeThreadSearchResult = Schema.decodeUnknownEffect(
 );
 
 const layerThreadToolkit = McpHttpServer.layerThreadToolkit.pipe(
+  Layer.provide(Layer.mock(AgentSessionImporter.AgentSessionImporter)({})),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
   Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
@@ -120,18 +122,21 @@ it.effect("checks capability through the production registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     expect(server.tools.some(({ tool }) => tool.name === "t3_thread_organize")).toBe(true);
-    const result = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
-      .pipe(
+    for (const tool of [
+      { name: "t3_thread_organize", arguments: { action: "pin" } },
+      { name: "t3_thread_sync_native_history", arguments: { checkOnly: true } },
+    ]) {
+      const result = yield* server.callTool(tool).pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, {
           ...scope,
           capabilities: new Set<never>(),
         }),
         Effect.provideService(McpSchema.McpServerClient, client),
       );
-    expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
-    expect(result.isError).toBe(true);
-    expect(result.structuredContent).toBeUndefined();
+      expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+    }
   }).pipe(
     Effect.provide(
       layerThreadToolkit.pipe(
@@ -694,6 +699,7 @@ it.effect("search names the calling thread, so an agent can tell its own match a
   }).pipe(
     Effect.provide(
       McpHttpServer.layerThreadToolkit.pipe(
+        Layer.provide(Layer.mock(AgentSessionImporter.AgentSessionImporter)({})),
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
@@ -934,6 +940,7 @@ it.effect.each([
   }).pipe(
     Effect.provide(
       McpHttpServer.layerThreadToolkit.pipe(
+        Layer.provide(Layer.mock(AgentSessionImporter.AgentSessionImporter)({})),
         Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
         Layer.provide(NodeCrypto.layer),
         Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),

@@ -101,6 +101,9 @@ const testLayer = Layer.mergeAll(
 
 const SESSION_ID = "sess_abb5e0cf-d4a2-4360-9f03-2f8f0889a707";
 const decodeKiroTestSettings = Schema.decodeSync(KiroSettings);
+const decodeOwnedLease = Schema.decodeEffect(
+  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+);
 const ENABLED_KIRO_SETTINGS = decodeKiroTestSettings({ enabled: true });
 
 it("reports context windows only for explicit known Kiro models", () => {
@@ -5623,3 +5626,178 @@ describe("Kiro permission policy", () => {
     );
   });
 });
+
+it.effect("refuses a present native lease before spawning or loading any Kiro runtime", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-lease-admission-" });
+    const home = `${root}/home`;
+    const native = `${home}/.kiro`;
+    yield* fs.makeDirectory(`${native}/session-leases`, { recursive: true });
+    const lease = `${native}/session-leases/${SESSION_ID}.lease`;
+    yield* fs.writeFileString(lease, "unknown foreign holder");
+    let spawned = 0;
+    const instanceId = ProviderInstanceId.make("kiro-lease-guard");
+    const adapter = yield* makeKiroAdapterV2({
+      instanceId,
+      settings: ENABLED_KIRO_SETTINGS,
+      environment: { HOME: home, KIRO_HOME: native },
+      selfInvocation: yield* resolveSelfInvocation(),
+      makeRuntime: () => {
+        spawned++;
+        return Effect.die("Native runtime must not be created");
+      },
+    });
+    const failure = yield* adapter
+      .openSession({
+        threadId: ThreadId.make("lease-owner"),
+        providerSessionId: ProviderSessionId.make("lease-session"),
+        modelSelection: { instanceId, model: "default" },
+        runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+          cwd: root,
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+        }),
+        initialNativeThreadId: SESSION_ID,
+      })
+      .pipe(Effect.flip);
+    assert.equal(failure._tag, "ProviderAdapterThreadInUseError");
+    assert.equal(spawned, 0);
+    assert.equal(yield* fs.readFileString(lease), "unknown foreign holder");
+  }).pipe(Effect.scoped, Effect.provide(testLayer)),
+);
+
+it.live(
+  "continues only under the current Kiro runtime's exact own lease and isolates sibling instances",
+  () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-own-lease-" });
+      const home = `${root}/home`;
+      const native = `${home}/.kiro`;
+      const lease = `${native}/session-leases/owned-native.lease`;
+      const wire = `${root}/wire.jsonl`;
+      const script = `${root}/peer.mjs`;
+      yield* fs.makeDirectory(`${native}/session-leases`, { recursive: true });
+      yield* fs.writeFileString(
+        script,
+        String.raw`
+      import { writeFileSync, appendFileSync } from 'node:fs';
+      import { hostname } from 'node:os';
+      import { createInterface } from 'node:readline';
+      const sessionId = 'owned-native';
+      createInterface({ input: process.stdin }).on('line', line => {
+        const { id, method } = JSON.parse(line); if (id === undefined) return;
+        appendFileSync(process.env.WIRE, JSON.stringify({ method })+'\n');
+        let result = {};
+        if (method === 'initialize') result = { protocolVersion: 1, agentCapabilities: { loadSession: true } };
+        if (method === 'session/new') {
+          writeFileSync(process.env.LEASE, JSON.stringify({ v:1, pid:process.pid, parentPid:process.ppid,
+            instanceId:'synthetic-native',hostId:hostname(), acquiredAt:new Date().toISOString(),token:'synthetic-token' }));
+          result = { sessionId, _meta: { source:'local', title:'Owned synthetic session' }, configOptions:[] };
+        }
+        if (method === 'session/prompt') result = { stopReason:'end_turn' };
+        process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id, result })+'\n');
+      });
+    `,
+      );
+      const instanceId = ProviderInstanceId.make("kiro-own-lease");
+      const threadId = ThreadId.make("kiro-own-lease");
+      const modelSelection = { instanceId, model: "default" };
+      const runtimePolicy = ProviderAdapterV2RuntimePolicy.make({
+        cwd: root,
+        runtimeMode: "approval-required",
+        interactionMode: "default",
+      });
+      const environment = { HOME: home, KIRO_HOME: native, XDG_CONFIG_HOME: `${home}/xdg` };
+      const adapter = yield* makeKiroAdapterV2({
+        instanceId,
+        settings: ENABLED_KIRO_SETTINGS,
+        environment,
+        selfInvocation: yield* resolveSelfInvocation(),
+        makeRuntime: (input) =>
+          AcpSessionRuntime.make({
+            ...input,
+            observeProcessIdentity: true,
+            spawn: {
+              command: process.execPath,
+              args: [script],
+              cwd: root,
+              extendEnv: false,
+              env: { ...environment, WIRE: wire, LEASE: lease },
+            },
+          }),
+      });
+      const session = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("owned-runtime"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* session.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      const original = yield* fs.readFileString(lease);
+      const turn = (ordinal: number) =>
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: DateTime.makeUnsafe("2026-11-13T00:00:00.000Z"),
+          ordinal,
+        });
+      const send = Effect.fn("test.ownedLease.send")(function* (ordinal: number) {
+        const events = yield* collectTurn(session.events).pipe(Effect.forkScoped);
+        yield* session.startTurn(turn(ordinal));
+        assert.equal(terminalStatus(yield* Fiber.join(events)), "completed");
+      });
+      yield* send(1);
+      assert.equal(yield* fs.readFileString(lease), original);
+      assert.equal(
+        (yield* adapter.nativeHistory
+          .capture({ cwd: root, nativeId: "owned-native" })
+          .pipe(Effect.flip)).status,
+        "busy",
+      );
+      const siblingId = ProviderInstanceId.make("sibling-kiro");
+      const sibling = yield* makeKiroAdapterV2({
+        instanceId: siblingId,
+        settings: ENABLED_KIRO_SETTINGS,
+        environment,
+        selfInvocation: yield* resolveSelfInvocation(),
+        makeRuntime: () => Effect.die("A sibling cannot spawn under the owner's lease"),
+      });
+      assert.equal(
+        (yield* sibling
+          .openSession({
+            threadId: ThreadId.make("sibling-thread"),
+            providerSessionId: ProviderSessionId.make("sibling-runtime"),
+            modelSelection: { ...modelSelection, instanceId: siblingId },
+            runtimePolicy,
+            initialNativeThreadId: "owned-native",
+          })
+          .pipe(Effect.flip))._tag,
+        "ProviderAdapterThreadInUseError",
+      );
+      const stamp = yield* decodeOwnedLease(original);
+      yield* fs.writeFileString(
+        lease,
+        JSON.stringify({ ...stamp, acquiredAt: "2020-01-01T00:00:00.000Z" }),
+      );
+      assert.equal(
+        (yield* session.startTurn(turn(2)).pipe(Effect.flip))._tag,
+        "ProviderAdapterThreadInUseError",
+      );
+      yield* fs.writeFileString(lease, original);
+      yield* send(2);
+      const calls = (yield* fs.readFileString(wire))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method: string });
+      assert.equal(calls.filter((call) => call.method === "session/prompt").length, 2);
+      assert.equal(calls.filter((call) => call.method === "session/load").length, 0);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+);

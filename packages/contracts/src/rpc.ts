@@ -1,3 +1,4 @@
+import { NativeHistorySyncInput, NativeHistorySyncResult } from "./nativeHistory.ts";
 import {
   KiroPowersInput,
   KiroPowersInstallInput,
@@ -575,6 +576,7 @@ export const WS_METHODS = {
   serverUninstallAcpRegistryManagedBinary: "server.uninstallAcpRegistryManagedBinary",
   serverAcceptAcpRegistryUrlAuth: "server.acceptAcpRegistryUrlAuth",
   serverListAcpRegistrySessions: "server.listAcpRegistrySessions",
+  serverSyncNativeHistory: "server.syncNativeHistory",
   serverImportAcpRegistrySession: "server.importAcpRegistrySession",
   serverDeleteAcpRegistrySession: "server.deleteAcpRegistrySession",
   serverListAcpRegistryProviders: "server.listAcpRegistryProviders",
@@ -1033,6 +1035,12 @@ const WsServerListAcpRegistrySessionsRpc = Rpc.make(WS_METHODS.serverListAcpRegi
   payload: AcpRegistryListSessionsInput,
   success: AcpRegistryListSessionsResult,
   error: Schema.Union([AcpRegistryOperationError, EnvironmentAuthorizationError]),
+});
+
+const WsServerSyncNativeHistoryRpc = Rpc.make(WS_METHODS.serverSyncNativeHistory, {
+  payload: NativeHistorySyncInput,
+  success: NativeHistorySyncResult,
+  error: Schema.Union([AgentSessionScanError, EnvironmentAuthorizationError]),
 });
 
 const WsServerImportAcpRegistrySessionRpc = Rpc.make(WS_METHODS.serverImportAcpRegistrySession, {
@@ -2276,6 +2284,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsKiroPowersInstallRpc,
   WsKiroPowersRemoveRpc,
   WsServerListAcpRegistrySessionsRpc,
+  WsServerSyncNativeHistoryRpc,
   WsServerImportAcpRegistrySessionRpc,
   WsServerDeleteAcpRegistrySessionRpc,
   WsServerListAcpRegistryProvidersRpc,

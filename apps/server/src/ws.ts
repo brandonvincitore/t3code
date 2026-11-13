@@ -2297,6 +2297,8 @@ export const layerWsRpc = (
             "provider.instance_id": input.instanceId,
             "project.id": input.projectId,
           }).pipe(Effect.andThen(listAcpRegistrySessions(input))),
+        [WS_METHODS.serverSyncNativeHistory]: (input) =>
+          agentSessionImporter.syncNativeHistory(input),
         [WS_METHODS.serverImportAcpRegistrySession]: (input) =>
           Effect.annotateCurrentSpan({
             "provider.instance_id": input.instanceId,

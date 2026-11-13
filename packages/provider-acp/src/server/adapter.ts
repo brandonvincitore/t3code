@@ -360,6 +360,12 @@ export function acpPerTurnPromptUsage(
 }
 
 export interface AcpAdapterV2Flavor {
+  readonly threadInUse?: (cause: unknown) => boolean;
+  readonly beforePrompt?: (input: {
+    readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
+    readonly sessionId: string;
+    readonly cwd: string;
+  }) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   readonly buildAttachmentPrompt?: (input: {
     readonly text: string;
     readonly attachments: ReadonlyArray<ChatAttachment>;
@@ -9620,6 +9626,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
                   ),
                 );
+            yield* (
+              flavor.beforePrompt?.({
+                runtime: promptRuntime,
+                sessionId: requestedSessionId,
+                cwd: turnInput.runtimePolicy.cwd ?? process.cwd(),
+              }) ?? Effect.void
+            );
             const startedAt = yield* DateTime.now;
             const nativeTurnId = `${requestedSessionId}:turn:${turnInput.providerTurnOrdinal}`;
             const providerTurnId = deriveProviderTurnId(nativeTurnId);
@@ -9648,6 +9661,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       : {
                           ...turnInput.providerThread.nativeMetadata,
                           ...rememberedNativeMetadata,
+                          ...(turnInput.providerThread.nativeMetadata?.nativeHistory === undefined
+                            ? {}
+                            : {
+                                nativeHistory:
+                                  turnInput.providerThread.nativeMetadata.nativeHistory,
+                              }),
                         };
                   if (initialNativeMetadata !== null) {
                     yield* Ref.update(nativeMetadataBySessionId, (current) =>
@@ -10473,6 +10492,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                           nativeMetadata: {
                             ...threadInput.providerThread.nativeMetadata,
                             ...rememberedMetadata,
+                            ...(threadInput.providerThread.nativeMetadata?.nativeHistory ===
+                            undefined
+                              ? {}
+                              : {
+                                  nativeHistory:
+                                    threadInput.providerThread.nativeMetadata.nativeHistory,
+                                }),
                           },
                         }),
                     ...(settledContextUsage === undefined
@@ -10490,14 +10516,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             },
             (effect, threadInput) =>
               effect.pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderAdapter.ProviderAdapterResumeThreadError({
-                      driver,
-                      providerSessionId: input.providerSessionId,
-                      providerThreadId: threadInput.providerThread.id,
-                      cause,
-                    }),
+                Effect.mapError((cause) =>
+                  flavor.threadInUse?.(cause) === true
+                    ? new ProviderAdapter.ProviderAdapterThreadInUseError({
+                        driver,
+                        providerThreadId: threadInput.providerThread.id,
+                        detail:
+                          "The native session lease must be released in Kiro before continuing.",
+                        cause,
+                      })
+                    : new ProviderAdapter.ProviderAdapterResumeThreadError({
+                        driver,
+                        providerSessionId: input.providerSessionId,
+                        providerThreadId: threadInput.providerThread.id,
+                        cause,
+                      }),
                 ),
               ),
           ),

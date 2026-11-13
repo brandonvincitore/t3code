@@ -1,3 +1,6 @@
+import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { ProviderThreadId, type OrchestrationV2ProviderThread } from "@t3tools/contracts";
+import { makeKiroNativeHistory } from "./nativeHistory.ts";
 import type * as Digest from "effect/crypto/Digest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveSelfInvocation, type SelfInvocation } from "@t3tools/shared/nodeRuntime";
@@ -735,6 +738,11 @@ function makeKiroAcpAdapterFlavor(
   secretStorage: Effect.Success<ReturnType<typeof makeKiroSecretStorage>>,
   skills: KiroSkills,
   nativeTitles: Effect.Success<ReturnType<typeof makeKiroNativeTitles>>,
+  rememberRuntime: (
+    runtime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+    input: AcpAdapterV2RuntimeInput,
+  ) => Effect.Effect<AcpSessionRuntime.AcpSessionRuntime["Service"], never, Scope.Scope>,
+  beforePrompt: NonNullable<AcpAdapterV2Flavor["beforePrompt"]>,
 ): AcpAdapterV2Flavor {
   const makeNativeRuntime =
     options.makeRuntime ??
@@ -760,6 +768,7 @@ function makeKiroAcpAdapterFlavor(
           clientCapabilities: kiroClientCapabilities(input.clientCapabilities),
         }),
       ),
+      Effect.flatMap((runtime) => rememberRuntime(runtime, input)),
       Effect.tap((runtime) =>
         nativeTitles.bindRuntime(
           runtime,
@@ -774,7 +783,14 @@ function makeKiroAcpAdapterFlavor(
   const workflows = makeKiroWorkflowSupport();
   return {
     driver: KIRO_PROVIDER,
+    threadInUse: (cause) =>
+      isAcpRequestError(cause) &&
+      typeof cause.data === "object" &&
+      cause.data !== null &&
+      "t3NativeLeasePresent" in cause.data &&
+      cause.data.t3NativeLeasePresent === true,
     runtimeHarness: "Kiro",
+    beforePrompt,
     capabilities: KiroProviderCapabilitiesV2,
     initializeThreadTitle: nativeTitles.initialize,
     syncGeneratedTitle: nativeTitles.synchronize,
@@ -873,18 +889,167 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
   options: KiroAdapterV2Options,
 ) {
   const secretStorage = yield* makeKiroSecretStorage(options.environment, options.instanceId);
-  return yield* makeAcpAdapterV2({
+  const history = yield* makeKiroNativeHistory(options.environment);
+  type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+  const runtimes = new Map<string, Set<Runtime>>();
+  const admitRuntimeSession = Effect.fn("KiroHistory.admitRuntimeSession")(function (
+    runtime: Runtime,
+    cwd: string,
+    nativeId: string | undefined,
+  ) {
+    return nativeId === undefined
+      ? Effect.void
+      : history
+          .admit({
+            cwd,
+            nativeId,
+            ...(runtime.ownsProcess === undefined ? {} : { ownsProcess: runtime.ownsProcess }),
+          })
+          .pipe(
+            Effect.asVoid,
+            Effect.mapError(
+              () =>
+                new EffectAcpErrors.AcpRequestError({
+                  code: -32001,
+                  errorMessage: "Kiro session lease requires release in Kiro.",
+                  data: { t3NativeLeasePresent: true },
+                }),
+            ),
+          );
+  });
+  const rememberRuntime = Effect.fn("KiroHistory.rememberRuntime")(function* (
+    runtime: Runtime,
+    input: AcpAdapterV2RuntimeInput,
+  ) {
+    let activeId = input.resumeSessionId;
+    const before = (nativeId: string | undefined) =>
+      admitRuntimeSession(runtime, input.cwd, nativeId);
+    const ids = new Set<string>();
+    const remember = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) => {
+      activeId = started.sessionId;
+      ids.add(started.sessionId);
+      const bound = runtimes.get(started.sessionId) ?? new Set<Runtime>();
+      bound.add(runtime);
+      runtimes.set(started.sessionId, bound);
+    };
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        for (const id of ids) {
+          const bound = runtimes.get(id);
+          bound?.delete(runtime);
+          if (bound?.size === 0) runtimes.delete(id);
+        }
+      }),
+    );
+    return {
+      ...runtime,
+      start: () =>
+        before(activeId).pipe(
+          Effect.andThen(runtime.start()),
+          Effect.tap((started) => Effect.sync(() => remember(started))),
+        ),
+      loadSession: (id, input) =>
+        before(id).pipe(
+          Effect.andThen(runtime.loadSession(id, input)),
+          Effect.tap((started) => Effect.sync(() => remember(started))),
+        ),
+      resumeSession: (id, input) =>
+        before(id).pipe(
+          Effect.andThen(runtime.resumeSession(id, input)),
+          Effect.tap((started) => Effect.sync(() => remember(started))),
+        ),
+      forkSession: (id, input, meta) =>
+        before(id).pipe(
+          Effect.andThen(runtime.forkSession(id, input, meta)),
+          Effect.tap((started) => Effect.sync(() => remember(started))),
+        ),
+    } satisfies Runtime;
+  });
+  const admit = Effect.fn("KiroHistory.admitWrite")(function* (
+    cwd: string,
+    nativeId: string,
+    providerThreadId: ProviderThreadId,
+  ) {
+    yield* history
+      .admit({
+        cwd,
+        nativeId,
+        ownsProcess: Effect.fn("KiroHistory.ownsLeaseProcess")(function* (
+          pid: number,
+          parentPid: number,
+          acquiredAt: string,
+        ) {
+          for (const runtime of runtimes.get(nativeId) ?? []) {
+            if (runtime.ownsProcess && (yield* runtime.ownsProcess(pid, parentPid, acquiredAt)))
+              return true;
+          }
+          return false;
+        }),
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterThreadInUseError({
+              driver: KIRO_PROVIDER,
+              providerThreadId,
+              detail:
+                "Kiro's native session lease is present or uncertain. Release or clear it in Kiro, then try again.",
+              cause,
+            }),
+        ),
+      );
+  });
+  const adapter = yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: makeKiroAcpAdapterFlavor(
       options,
       secretStorage,
       options.skills ?? (yield* makeKiroSkills()),
       yield* makeKiroNativeTitles(options.instanceId),
+      rememberRuntime,
+      ({ runtime, cwd, sessionId }) => admitRuntimeSession(runtime, cwd, sessionId),
     ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.testHooks === undefined ? {} : { testHooks: options.testHooks }),
   });
+  return {
+    ...adapter,
+    nativeHistory: { capture: history.capture },
+    openSession: Effect.fn("KiroHistory.openSession")(function* (
+      input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
+    ) {
+      if (input.initialNativeThreadId)
+        yield* admit(
+          input.runtimePolicy.cwd ?? process.cwd(),
+          input.initialNativeThreadId,
+          ProviderThreadId.make(input.initialNativeThreadId),
+        );
+      const session = yield* adapter.openSession(input);
+      const admitThread = (
+        thread: OrchestrationV2ProviderThread,
+        cwd = input.runtimePolicy.cwd ?? process.cwd(),
+      ) =>
+        thread.nativeThreadRef?.nativeId
+          ? admit(cwd, thread.nativeThreadRef.nativeId, thread.id)
+          : Effect.void;
+      return {
+        ...session,
+        resumeThread: Effect.fn("KiroHistory.resumeThread")(function* (
+          target: Parameters<ProviderAdapter.ProviderAdapterV2SessionRuntime["resumeThread"]>[0],
+        ) {
+          yield* admitThread(target.providerThread, target.runtimePolicy?.cwd ?? undefined);
+          return yield* session.resumeThread(target);
+        }),
+        startTurn: Effect.fn("KiroHistory.startTurn")(function* (
+          turn: ProviderAdapter.ProviderAdapterV2TurnInput,
+        ) {
+          yield* admitThread(turn.providerThread, turn.runtimePolicy.cwd ?? undefined);
+          return yield* session.startTurn(turn);
+        }),
+      } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    }),
+  } satisfies ProviderAdapter.ProviderAdapterV2["Service"];
 });
 
 export type KiroAdapterV2DriverEnv =

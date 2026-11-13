@@ -81,6 +81,19 @@ Sessions already owned by T3 open their existing conversation. See the
 [refinement guide](kiro-refinement.md#keep-conversations-across-updates) for a stable data directory
 and access from multiple clients.
 
+After continuing that session in the CLI, release its native lease in Kiro, then choose
+**Sync from Kiro** in the provider's Sessions section. This copies a stable saved snapshot into
+the existing T3 conversation without opening Kiro or starting a model. **Check history** checks
+for updates without copying them. The operation runs on the selected environment.
+
+T3 never clears native leases, including stale or uncertain ones. Older histories need a verified
+native T3 turn boundary; without one, T3 keeps the timeline unchanged and reports ambiguity.
+Sync supports saved root chat-user, assistant and reasoning text in the supported local format.
+Interrupted responses remain marked interrupted; API-injected user text is not copied.
+Tools, attachments, internal records, workflows, rewritten or compacted histories, and unfinished
+turns are not imported. A legacy catch-up starts after the verified boundary and does not fill
+older gaps. A synced snapshot does not guarantee that a later CLI change is already visible.
+
 ## Automatic titles
 
 Kiro can generate thread titles when selected for titles or when no other configured title

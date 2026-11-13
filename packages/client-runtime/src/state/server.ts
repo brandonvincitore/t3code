@@ -1827,6 +1827,15 @@ export function createServerEnvironmentAtoms<R, E>(
           `${environmentId}:${input.instanceId}:${input.projectId}:${input.cursor ?? "first"}`,
       },
     }),
+    syncNativeHistory: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:sync-native-history",
+      tag: WS_METHODS.serverSyncNativeHistory,
+      concurrency: {
+        mode: "singleFlight",
+        key: ({ environmentId, input }) =>
+          `${environmentId}:${input.threadId}:${input.checkOnly ?? false}`,
+      },
+    }),
     importAcpRegistrySession: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:acp-registry:import-session",
       tag: WS_METHODS.serverImportAcpRegistrySession,

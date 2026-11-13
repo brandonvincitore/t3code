@@ -176,13 +176,14 @@ describe("command permissions", () => {
   );
 
   it.effect.each([
+    { method: WS_METHODS.serverSyncNativeHistory, scope: AuthOrchestrationOperateScope },
     { method: WS_METHODS.serverRunStorageCleanup, scope: AuthSettingsWriteScope },
     { method: WS_METHODS.serverReclaimDatabaseSpace, scope: AuthEnvironmentMaintainScope },
   ])("requires the destination $scope grant for $method", ({ method, scope }) =>
     Effect.gen(function* () {
       const registry = yield* setup;
       const command = createCommandPermissions(runtime, method);
-      registry.set(sessions(env), AsyncResult.success(grant(true)));
+      registry.set(sessions(env), AsyncResult.success(grant(false)));
       expect(registry.get(command.permissionAtom(env))).toBe(false);
       expect((yield* command.authorize(registry, env).pipe(Effect.flip))._tag).toBe(
         "EnvironmentAuthorizationError",

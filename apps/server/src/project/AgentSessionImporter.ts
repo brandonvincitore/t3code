@@ -1,3 +1,6 @@
+import { reconcileNativeHistory } from "./nativeHistoryReconciliation.ts";
+import { isActiveRun } from "../orchestration-v2/CommandPolicy.ts";
+import { type NativeHistorySyncInput, type NativeHistorySyncResult } from "@t3tools/contracts";
 import {
   DEFAULT_MODEL,
   DEFAULT_MODEL_BY_PROVIDER,
@@ -109,11 +112,14 @@ function messageEvents(input: {
   readonly threadId: ThreadId;
   readonly index: number;
   readonly message: HistoryMessage;
+  readonly itemId?: TurnItemId;
+  readonly nativeRowId?: string;
+  readonly status?: "completed" | "interrupted";
 }): ReadonlyArray<OrchestrationV2DomainEvent> {
   const ordinal = input.index + 1;
   const suffix = String(input.index).padStart(6, "0");
-  const messageId = MessageId.make(`${input.threadId}:${suffix}`);
-  const turnItemId = agentSessionImportTurnItemId(input.threadId, input.index);
+  const messageId = MessageId.make(input.itemId ?? `${input.threadId}:${suffix}`);
+  const turnItemId = input.itemId ?? agentSessionImportTurnItemId(input.threadId, input.index);
   const at = dateTime(input.message.createdAt);
   const common = {
     id: turnItemId,
@@ -122,10 +128,17 @@ function messageEvents(input: {
     nodeId: null,
     providerThreadId: null,
     providerTurnId: null,
-    nativeItemRef: null,
+    nativeItemRef:
+      input.nativeRowId === undefined
+        ? null
+        : {
+            driver: ProviderDriverKind.make("kiro"),
+            nativeId: input.nativeRowId,
+            strength: "strong" as const,
+          },
     parentItemId: null,
     ordinal,
-    status: "completed" as const,
+    status: input.status ?? ("completed" as const),
     title: null,
     startedAt: at,
     completedAt: at,
@@ -488,15 +501,201 @@ const make = Effect.gen(function* () {
     return { importedCount, skippedCount } satisfies AgentSessionImportResult;
   });
 
-  /**
-   * Loading a native session replays its history only into the adapter's own
-   * snapshot, so copy that snapshot into the thread as run-less history. The
-   * `v1_import` origin keeps the copied history in forks.
-   */
+  const syncNativeHistory = Effect.fn("AgentSessionImporter.syncNativeHistory")(
+    function* (input: NativeHistorySyncInput) {
+      const result = (
+        status: NativeHistorySyncResult["status"],
+        reason: NativeHistorySyncResult["reason"],
+        addedItems = 0,
+        baselineRows = 0,
+      ): NativeHistorySyncResult => ({ status, reason, addedItems, baselineRows });
+      const read = () =>
+        orchestrator.getThreadRecords(input.threadId, [
+          "providerThreads",
+          "runs",
+          "providerTurns",
+          "attempts",
+          "turnItems",
+        ]);
+      const initial = yield* read().pipe(Effect.option);
+      if (Option.isNone(initial)) return result("unavailable", "unavailable");
+      if (
+        initial.value.thread.projectId !== input.projectId ||
+        initial.value.thread.modelSelection.instanceId !== input.instanceId
+      )
+        return result("unsafe", "binding_changed");
+      const selectedOwner = initial.value.providerThreads.find(
+        (owner) => owner.id === initial.value.thread.activeProviderThreadId,
+      );
+      if (selectedOwner && selectedOwner.driver !== "kiro")
+        return result("unsupported", "unsupported");
+      const currentOwner = (records: typeof initial.value) =>
+        records.providerThreads.find(
+          (owner) =>
+            records.thread.deletedAt === null &&
+            records.thread.projectId === input.projectId &&
+            records.thread.modelSelection.instanceId === input.instanceId &&
+            owner.id === records.thread.activeProviderThreadId &&
+            owner.appThreadId === input.threadId &&
+            owner.ownerNodeId === null &&
+            owner.providerInstanceId === input.instanceId &&
+            owner.driver === "kiro" &&
+            owner.nativeThreadRef?.driver === "kiro" &&
+            owner.nativeThreadRef.strength === "strong",
+        );
+      const owner = currentOwner(initial.value);
+      const nativeId = owner?.nativeThreadRef?.nativeId;
+      if (!owner || !nativeId) return result("unsafe", "binding_changed");
+      if (
+        initial.value.runs.some(isActiveRun) ||
+        owner.status === "active" ||
+        (owner.pendingBackgroundTasks?.length ?? 0) > 0
+      )
+        return result("busy", "thread_busy");
+      const project = yield* projects.getById(input.projectId).pipe(Effect.option);
+      if (
+        Option.isNone(project) ||
+        Option.isNone(project.value) ||
+        project.value.value.deletedAt !== null
+      )
+        return result("unavailable", "unavailable");
+      const workspaceRoot = project.value.value.workspaceRoot;
+      const cwd = initial.value.thread.worktreePath ?? workspaceRoot;
+      const adapter = yield* registry.get(input.instanceId).pipe(Effect.option);
+      if (
+        Option.isNone(adapter) ||
+        adapter.value.driver !== "kiro" ||
+        adapter.value.instanceId !== input.instanceId ||
+        !adapter.value.nativeHistory
+      )
+        return result("unsupported", "unsupported");
+      const metadata = yield* registry.getMetadata?.(input.instanceId) ?? Effect.undefined;
+      if (metadata?.enabled === false) return result("unavailable", "unavailable");
+      const reader = adapter.value.nativeHistory;
+      const capture = yield* reader.capture({ cwd, nativeId });
+      const verified = yield* reader.capture({ cwd, nativeId });
+      if (capture.identity !== verified.identity || capture.source !== verified.source)
+        return result("busy", "source_changed");
+      return yield* threadCommands.withLock(
+        input.threadId,
+        Effect.gen(function* () {
+          const current = yield* read();
+          const currentAdapter = yield* registry.get(input.instanceId);
+          const currentProject = yield* projects.getById(input.projectId);
+          const currentMetadata = yield* (
+            registry.getMetadata?.(input.instanceId) ?? Effect.undefined
+          );
+          if (
+            Option.isNone(currentProject) ||
+            currentProject.value.deletedAt !== null ||
+            currentProject.value.workspaceRoot !== workspaceRoot ||
+            currentMetadata?.enabled === false
+          )
+            return result("unsafe", "binding_changed");
+          const active = currentOwner(current);
+          if (
+            !active ||
+            active.id !== owner.id ||
+            active.nativeThreadRef?.nativeId !== owner.nativeThreadRef?.nativeId ||
+            current.thread.worktreePath !== initial.value.thread.worktreePath ||
+            currentAdapter.driver !== "kiro" ||
+            currentAdapter.instanceId !== input.instanceId ||
+            currentAdapter.nativeHistory !== reader
+          )
+            return result("unsafe", "binding_changed");
+          if (
+            current.runs.some(isActiveRun) ||
+            active.status === "active" ||
+            (active.pendingBackgroundTasks?.length ?? 0) > 0
+          )
+            return result("busy", "thread_busy");
+          const plan = reconcileNativeHistory(capture, current, active);
+          if (plan.status !== "ready") return result(plan.status, plan.reason);
+          if (input.checkOnly)
+            return result(
+              plan.changed ? "updates_available" : "synced",
+              "captured",
+              0,
+              plan.receipt.baselineRows,
+            );
+          if (!plan.changed) return result("synced", "captured", 0, plan.receipt.baselineRows);
+          const at = yield* DateTime.now;
+          const ordinal = current.turnItems.reduce((max, item) => Math.max(max, item.ordinal), 0);
+          const events = plan.additions.flatMap(({ row, itemId }, index) =>
+            messageEvents({
+              threadId: input.threadId,
+              itemId,
+              nativeRowId: row.id,
+              ...(row.status === undefined ? {} : { status: row.status }),
+              index: ordinal + index,
+              message: {
+                role: row.kind === "control" ? "assistant" : row.kind,
+                text: row.text!,
+                createdAt: row.timestamp,
+              },
+            }),
+          );
+          const committed = yield* eventSink.writeIfProviderThreadUnchanged({
+            expected: active,
+            runlessItemRunOrdinal: current.runs.reduce(
+              (max, run) => (run.startedAt === null ? max : Math.max(max, run.ordinal)),
+              0,
+            ),
+            events: [
+              ...events,
+              {
+                id: EventId.make(`kiro-history:${input.threadId}:${capture.identity}`),
+                type: "provider-thread.updated",
+                threadId: input.threadId,
+                providerInstanceId: input.instanceId,
+                occurredAt: at,
+                payload: {
+                  ...active,
+                  nativeMetadata: { ...active.nativeMetadata, nativeHistory: plan.receipt },
+                },
+              },
+              {
+                id: EventId.make(`kiro-history-thread:${input.threadId}:${capture.identity}`),
+                type: "thread.metadata-updated",
+                threadId: input.threadId,
+                occurredAt: at,
+                payload: { ...current.thread, historyOrigin: "v1_import" },
+              },
+            ],
+          });
+          return committed.committed
+            ? result("synced", "captured", plan.additions.length, plan.receipt.baselineRows)
+            : result("unsafe", "binding_changed");
+        }),
+      );
+    },
+    Effect.catchTags({
+      NativeHistoryReadError: (error) =>
+        Effect.succeed({
+          status: error.status,
+          reason: error.reason,
+          addedItems: 0,
+          baselineRows: 0,
+        } satisfies NativeHistorySyncResult),
+    }),
+    Effect.mapError((cause) => new AgentSessionScanError({ operation: "read-projects", cause })),
+  );
+
   const importNativeHistory = Effect.fn("importNativeHistoryV2")(function* (input: {
     readonly threadId: ThreadId;
     readonly workspaceRoot: string;
   }) {
+    const bound = yield* orchestrator.getThreadRecords(input.threadId, ["providerThreads"]);
+    const owner = bound.providerThreads.find(
+      (owner) => owner.id === bound.thread.activeProviderThreadId,
+    );
+    if (owner?.driver === "kiro") {
+      return (yield* syncNativeHistory({
+        threadId: input.threadId,
+        projectId: bound.thread.projectId,
+        instanceId: owner.providerInstanceId,
+      })).addedItems;
+    }
     const pendingThread = Effect.map(
       orchestrator.getThreadRecords(input.threadId, ["providerThreads", "runs"]),
       (records) =>
@@ -633,7 +832,7 @@ const make = Effect.gen(function* () {
     return yield* commit(messages, providerThread, nativeThreadId);
   });
 
-  return { importRecentAgentThreads, importNativeHistory };
+  return { importRecentAgentThreads, importNativeHistory, syncNativeHistory };
 });
 
 type AgentSessionImporterShape = Effect.Success<typeof make>;

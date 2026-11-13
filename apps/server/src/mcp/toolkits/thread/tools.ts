@@ -1,3 +1,5 @@
+import * as AgentSessionImporter from "../../../project/AgentSessionImporter.ts";
+import { NativeHistorySyncResult } from "@t3tools/contracts";
 import {
   OrchestratorMcpEnvironmentTarget,
   ScheduledTaskId,
@@ -239,7 +241,22 @@ const ScheduledTaskRunTool = Tool.make("run_scheduled_task_now", {
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
+const NativeHistorySyncTool = Tool.make("t3_thread_sync_native_history", {
+  description:
+    "Check or sync external Kiro history into its existing T3 owner thread. Read-only against Kiro; a present lease or ambiguous legacy boundary blocks sync. Release native leases in Kiro yourself. Omit threadId for this thread.",
+  parameters: Schema.Struct({
+    environmentId: OrchestratorMcpEnvironmentTarget,
+    threadId: Schema.optional(ThreadId),
+    checkOnly: Schema.optional(Schema.Boolean),
+  }),
+  success: NativeHistorySyncResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return" as const,
+  dependencies: [...commandTool.dependencies, AgentSessionImporter.AgentSessionImporter],
+}).annotate(Tool.Destructive, false);
+
 export const ThreadToolkit = Toolkit.make(
+  NativeHistorySyncTool,
   ScheduledTaskRunTool,
   ThreadSearchTool,
   ThreadConfigureTool,

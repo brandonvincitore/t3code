@@ -19,3 +19,4 @@ export {
   kiroAgentDescriptor,
   kiroDefaultModelId,
 } from "./server/status.ts";
+export { makeKiroNativeHistory } from "./server/nativeHistory.ts";
