@@ -58,10 +58,15 @@ of the server's credentials. See [Kiro setup](providers-kiro.md) for models, age
 modes.
 
 Open MCP servers in a Kiro conversation's Servers panel to refresh connection status. Browser
-sign-in is available only when the installed CLI advertises reconnect support and the client
-can complete the server-local callback. Otherwise, sign in through `kiro-cli` on the server,
-then reconnect the conversation. T3 and Kiro CLI share Kiro's credential storage; avoid changing
-the same MCP sign-in concurrently. Sign-in URLs are transient and belong to the initiating client.
+sign-in is available from a local T3 browser when Kiro supports reconnect and can complete its
+server-local callback. Choose Sign in / reconnect, then open or copy the fresh sign-in link.
+Kiro CLI 3.2.1 supports this even though it omits reconnect from its advertised methods; T3
+attempts it only when you request sign-in. Unsupported connections stop and require a CLI update
+and a new session. T3 stores MCP credentials separately from the native CLI, so signing in with
+`kiro-cli` does not sign this T3 session in. Sign-in URLs are transient and belong to the initiating
+client. For a remote connection, open this T3 server through localhost in a browser on the Kiro
+machine and sign in there; remote callback forwarding is unsupported. Dismissal closes the local
+flow without revoking access or cancelling Kiro's underlying connection attempt.
 
 Administrators can use the existing [managed policy](managed-policy.md) to restrict providers,
 permission modes, clients, and telemetry. The same server policy applies to connected clients.
@@ -100,8 +105,8 @@ the automated fixture tests.
 
 A server restart ends its running provider process. Saved T3 conversation history remains in
 its data directory, but automatic reattachment to workflows surviving outside that process is
-not provided. Browser OAuth depends on the installed CLI's advertised methods; the tested CLI
-3.1.0 does not advertise the reconnect method, so use the server-local CLI sign-in fallback.
+not provided. Browser OAuth requires reconnect support in the installed Kiro CLI and a browser
+on the Kiro machine. Native CLI MCP credentials are not imported into T3.
 
 Share refinement problems with the person coordinating your pilot, including the commit, operating
 system, Kiro CLI version, connection mode, and minimal steps.

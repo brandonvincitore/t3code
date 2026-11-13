@@ -64,7 +64,7 @@ export class KiroMcpError extends Schema.TaggedError<KiroMcpError>()("KiroMcpErr
       case "session_unavailable":
         return "Start a Kiro session in this thread to see its MCP servers.";
       case "unsupported":
-        return "This Kiro session does not advertise MCP sign-in. Authenticate with the Kiro CLI on its environment, then start a new session.";
+        return "MCP sign-in is unavailable in this connection. Update Kiro CLI on its server and start a new session, then retry in T3. CLI MCP credentials are separate from T3.";
       case "server_unavailable":
         return "This server is no longer awaiting authorization in this session.";
       case "busy":

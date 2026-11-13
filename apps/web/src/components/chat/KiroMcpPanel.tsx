@@ -5,6 +5,9 @@ import type {
 } from "@t3tools/contracts";
 import { useEffect, useRef, useState } from "react";
 
+import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
+import { useStableCallback } from "../../hooks/useStableCallback";
+
 import { Button } from "../ui/button";
 
 export function KiroMcpPanel({
@@ -27,19 +30,35 @@ export function KiroMcpPanel({
   readonly refresh: () => Promise<void>;
 }) {
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
+  const [feedback, setFeedback] = useState<string | null>(null);
+  const previousStatus = useRef(status);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const generation = useRef(0);
   const attemptId = useRef<string | null>(null);
+
+  const cancel = useStableCallback(cancelSignIn);
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- refreshed native status retires the externally owned transient sign-in link
+  useEffect(() => {
+    if (previousStatus.current === status) return;
+    previousStatus.current = status;
+    if (attemptId.current && status.attempt?.attemptId !== attemptId.current) {
+      generation.current += 1;
+      attemptId.current = null;
+      setAuthorizationUrl(null);
+      setFeedback(null);
+      setPending(false);
+    }
+  }, [status]);
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- dismiss the session-owned transient OAuth flow when this panel leaves its thread
   useEffect(
     () => () => {
       generation.current += 1;
       const current = attemptId.current;
-      if (current) void cancelSignIn(current).catch(() => {});
+      if (current) void cancel(current).catch(() => {});
     },
-    [cancelSignIn],
+    [cancel],
   );
 
   async function signIn(serverName: string) {
@@ -47,6 +66,7 @@ export function KiroMcpPanel({
     const current = ++generation.current;
     setPending(true);
     setError(null);
+    setFeedback(null);
     setAuthorizationUrl(null);
     try {
       const started = await beginSignIn(serverName);
@@ -58,8 +78,10 @@ export function KiroMcpPanel({
       const result = await takeAuthorizationUrl(started.attemptId);
       if (generation.current === current) setAuthorizationUrl(result.url);
     } catch {
-      if (generation.current === current)
+      if (generation.current === current) {
         setError("Could not start MCP sign-in. Refresh the status and try again.");
+        await refresh().catch(() => {});
+      }
     }
     if (generation.current === current) setPending(false);
   }
@@ -69,6 +91,7 @@ export function KiroMcpPanel({
     const current = attemptId.current ?? status.attempt?.attemptId;
     attemptId.current = null;
     setAuthorizationUrl(null);
+    setFeedback(null);
     setPending(false);
     try {
       if (current) await cancelSignIn(current);
@@ -81,11 +104,24 @@ export function KiroMcpPanel({
   async function open() {
     if (!authorizationUrl || !canManage || !isLocalEnvironment) return;
     const url = authorizationUrl;
-    setAuthorizationUrl(null);
+    const current = generation.current;
     try {
       await openAuthorizationUrl(url);
+      if (generation.current === current) setFeedback("Sign-in page opened.");
     } catch {
-      setError("Could not open the sign-in page. Dismiss this attempt and start a fresh sign-in.");
+      if (generation.current === current)
+        setError("Could not open the sign-in page. Copy the sign-in link or try opening it again.");
+    }
+  }
+
+  async function copy() {
+    if (!authorizationUrl || !canManage || !isLocalEnvironment) return;
+    const current = generation.current;
+    try {
+      await writeTextToClipboard(authorizationUrl, "MCP sign-in link");
+      if (generation.current === current) setFeedback("Sign-in link copied.");
+    } catch {
+      if (generation.current === current) setError("Could not copy the sign-in link.");
     }
   }
 
@@ -139,22 +175,22 @@ export function KiroMcpPanel({
       )}
       {status.servers.some((server) => server.failedAuthorization) && !status.canSignIn ? (
         <p className="text-muted-foreground">
-          This Kiro session does not advertise MCP sign-in. Authenticate with the Kiro CLI on its
-          environment, then start a new session.
+          MCP sign-in is unavailable in this connection. Update Kiro CLI on its server and start a
+          new session, then retry here. CLI MCP credentials are separate from T3.
         </p>
       ) : null}
       {!isLocalEnvironment ? (
         <p className="text-muted-foreground">
           MCP sign-in must finish in a browser on the machine running Kiro. Remote callback
-          forwarding is not supported; authenticate there with the Kiro CLI, then start a new
-          session.
+          forwarding is not supported. Open this T3 server through localhost on that machine and
+          start sign-in there. CLI MCP credentials are separate from T3.
         </p>
       ) : null}
       {pending ? <p role="status">Waiting for a fresh sign-in page from Kiro…</p> : null}
       {authorizationUrl ? (
         <div className="flex flex-col gap-2">
           <p>Continue in your browser to authorize this MCP server.</p>
-          <div>
+          <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
               disabled={!canManage || !isLocalEnvironment}
@@ -163,6 +199,16 @@ export function KiroMcpPanel({
               }}
             >
               Open sign-in page
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={!canManage || !isLocalEnvironment}
+              onClick={() => {
+                void copy();
+              }}
+            >
+              Copy sign-in link
             </Button>
           </div>
         </div>
@@ -191,6 +237,7 @@ export function KiroMcpPanel({
           A previous sign-in is still finishing. Refresh to check its status.
         </p>
       ) : null}
+      {feedback ? <p role="status">{feedback}</p> : null}
       {error ? <p role="alert">{error}</p> : null}
     </section>
   );

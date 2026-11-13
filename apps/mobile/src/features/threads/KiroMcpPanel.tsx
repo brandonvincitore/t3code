@@ -41,10 +41,14 @@ export function KiroMcpPanel({
       )}
       <AppText>
         MCP sign-in must finish in a browser on the machine running Kiro. Remote callback forwarding
-        is not supported. Authenticate there with the Kiro CLI, then start a new session.
+        is not supported. Open this T3 server through localhost on that machine and start sign-in
+        there. CLI MCP credentials are separate from T3.
       </AppText>
       {status.servers.some((server) => server.failedAuthorization) && !status.canSignIn ? (
-        <AppText>This Kiro session does not advertise MCP sign-in.</AppText>
+        <AppText>
+          MCP sign-in is unavailable in this connection. Update Kiro CLI on its server and start a
+          new session, then retry from a local T3 browser.
+        </AppText>
       ) : null}
       {status.busy ? (
         <AppText>

@@ -10,6 +10,18 @@ import * as Scope from "effect/Scope";
 import * as AcpErrors from "effect-acp/errors";
 
 const resetMethod = "_kiro/mcp/resetServer";
+const isRequestError = Schema.is(AcpErrors.AcpRequestError);
+const decodeUnknownMethod = Schema.decodeUnknownOption(
+  Schema.Struct({ details: Schema.Literal(`Unknown ext method: ${resetMethod}`) }),
+);
+
+function unsupportedReset(error: AcpErrors.AcpError) {
+  return (
+    isRequestError(error) &&
+    (error.code === -32601 ||
+      (error.code === -32603 && Option.isSome(decodeUnknownMethod(error.data))))
+  );
+}
 const decodeSnapshot = Schema.decodeUnknownOption(
   Schema.Struct({
     sessionId: Schema.String,
@@ -20,11 +32,6 @@ const decodeSnapshot = Schema.decodeUnknownOption(
         failedAuthorization: Schema.optional(Schema.Boolean),
       }),
     ),
-  }),
-);
-const decodeMethods = Schema.decodeUnknownOption(
-  Schema.Struct({
-    kiro: Schema.Struct({ extensionMethods: Schema.Array(Schema.String) }),
   }),
 );
 const decodeUrl = Schema.decodeUnknownOption(Schema.Struct({ url: Schema.String }));
@@ -213,10 +220,8 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
         const previous = sessions.get(started.sessionId);
         if (previous && previous !== state && previous.attempt) yield* dismiss(previous.attempt);
         state.sessionId = started.sessionId;
-        state.supported =
-          Option.getOrUndefined(
-            decodeMethods(started.initializeResult.agentCapabilities?._meta),
-          )?.kiro.extensionMethods.includes(resetMethod) === true;
+        // Kiro 3.2.1 implements resetServer but omits it from its advertised methods.
+        state.supported = true;
         sessions.set(started.sessionId, state);
       }),
     );
@@ -277,9 +282,17 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
           startOAuth: true,
         })
         .pipe(
-          Effect.catch(() =>
-            Effect.sync(() => {
+          Effect.catch((error) =>
+            Effect.gen(function* () {
               state.quarantined = true;
+              attempt.cancelled = true;
+              attempt.url = undefined;
+              const unsupported = unsupportedReset(error);
+              if (unsupported) state.supported = false;
+              yield* Deferred.fail(
+                attempt.ready,
+                new KiroMcpError({ code: unsupported ? "unsupported" : "connection_failed" }),
+              );
             }),
           ),
           Effect.ensuring(
@@ -298,10 +311,15 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
   const takeAuthorizationUrl: KiroMcpController["takeAuthorizationUrl"] = Effect.fn(
     "KiroMcp.takeAuthorizationUrl",
   )(function* (input) {
-    const { attempt } = yield* attemptFor(input);
+    const { state, attempt } = yield* attemptFor(input);
     if (attempt.claimed) return yield* new KiroMcpError({ code: "attempt_unavailable" });
     attempt.claimed = true;
-    yield* Deferred.await(attempt.ready);
+    const ready = yield* Deferred.await(attempt.ready).pipe(Effect.timeoutOption("30 seconds"));
+    if (Option.isNone(ready)) {
+      state.quarantined = true;
+      yield* dismiss(attempt);
+      return yield* new KiroMcpError({ code: "connection_failed" });
+    }
     const current = yield* attemptFor(input);
     const url = current.attempt.url;
     current.attempt.url = undefined;

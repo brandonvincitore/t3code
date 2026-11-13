@@ -4,8 +4,9 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Scope from "effect/Scope";
+import * as TestClock from "effect/testing/TestClock";
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import type * as AcpErrors from "effect-acp/errors";
+import * as AcpErrors from "effect-acp/errors";
 import type { AcpAdapterV2ExtensionContext } from "@t3tools/provider-acp/server/adapter";
 import { makeKiroMcpSupport } from "./mcp.ts";
 
@@ -92,57 +93,118 @@ describe("Kiro MCP sessions", () => {
         yield* h.snapshot([{ name: "other", status: "connected" }], "unowned");
         yield* h.emit("_kiro/mcp/status", { sessionId: "first", servers: "broken" });
         assert.equal((yield* h.support.getStatus("first", "owner")).servers.length, 1);
+        yield* h.snapshot([{ ...auth, status: "pending" }]);
         const result = yield* h.support
           .beginSignIn({ sessionId: "first", serverName: "company", ownerId: "owner" })
           .pipe(Effect.flip);
-        assert.equal(result.code, "unsupported");
+        assert.equal(result.code, "server_unavailable");
         assert.equal(h.requests.length, 0);
         yield* h.snapshot([]);
         assert.deepEqual((yield* h.support.getStatus("first", "owner")).servers, []);
       }).pipe(Effect.scoped),
   );
 
-  it.effect("routes only fresh requested URLs to the owner once and keeps them out of status", () =>
+  it.effect.each([{ methods: [resetMethod] }, { methods: [] }])(
+    "routes fresh user-requested URLs with advertised methods $methods to the owner once",
+    ({ methods }) =>
+      Effect.gen(function* () {
+        const h = yield* setup();
+        yield* h.activate("first", methods);
+        assert.equal(h.requests.length, 0);
+        assert.isTrue((yield* h.support.getStatus("first", "owner")).canSignIn);
+        yield* h.snapshot([auth]);
+        const { attemptId } = yield* h.support.beginSignIn({
+          sessionId: "first",
+          serverName: "company",
+          ownerId: "owner",
+        });
+        yield* Deferred.await(h.dispatched);
+        assert.deepEqual(h.requests, [
+          {
+            method: resetMethod,
+            params: { sessionId: "first", serverName: "company", startOAuth: true },
+          },
+        ]);
+        assert.equal((yield* h.support.getStatus("first", "different-owner")).attempt, null);
+        const wrong = yield* h.support
+          .takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "different-owner" })
+          .pipe(Effect.flip);
+        assert.equal(wrong.code, "attempt_unavailable");
+        const url = "https://login.example.test/authorize?state=private-value";
+        yield* h.emit("_kiro/openExternalUrl", { url });
+        assert.ok(
+          !JSON.stringify(yield* h.support.getStatus("first", "owner")).includes("private-value"),
+        );
+        assert.deepEqual(
+          yield* h.support.takeAuthorizationUrl({
+            sessionId: "first",
+            attemptId,
+            ownerId: "owner",
+          }),
+          { url },
+        );
+        assert.equal(
+          (yield* h.support
+            .takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "owner" })
+            .pipe(Effect.flip)).code,
+          "attempt_unavailable",
+        );
+        assert.equal(
+          (yield* h.emit("_kiro/openExternalUrl", { url }).pipe(Effect.asVoid, Effect.flip))._tag,
+          "AcpRequestError",
+        );
+      }).pipe(Effect.scoped),
+  );
+
+  it.effect("fails closed when an unadvertised reset is unsupported or never supplies a URL", () =>
     Effect.gen(function* () {
-      const h = yield* setup();
-      yield* h.activate();
-      yield* h.snapshot([auth]);
-      const { attemptId } = yield* h.support.beginSignIn({
-        sessionId: "first",
-        serverName: "company",
-        ownerId: "owner",
-      });
-      yield* Deferred.await(h.dispatched);
-      assert.deepEqual(h.requests, [
-        {
-          method: resetMethod,
-          params: { sessionId: "first", serverName: "company", startOAuth: true },
-        },
-      ]);
-      assert.equal((yield* h.support.getStatus("first", "different-owner")).attempt, null);
-      const wrong = yield* h.support
-        .takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "different-owner" })
-        .pipe(Effect.flip);
-      assert.equal(wrong.code, "attempt_unavailable");
-      const url = "https://login.example.test/authorize?state=private-value";
-      yield* h.emit("_kiro/openExternalUrl", { url });
-      assert.ok(
-        !JSON.stringify(yield* h.support.getStatus("first", "owner")).includes("private-value"),
-      );
-      assert.deepEqual(
-        yield* h.support.takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "owner" }),
-        { url },
-      );
-      assert.equal(
-        (yield* h.support
+      for (const failure of ["unsupported", "unknown-extension", "denied", "timeout"] as const) {
+        const h = yield* setup();
+        yield* h.activate("first", []);
+        yield* h.snapshot([auth]);
+        const { attemptId } = yield* h.support.beginSignIn({
+          sessionId: "first",
+          serverName: "company",
+          ownerId: "owner",
+        });
+        yield* Deferred.await(h.dispatched);
+        const waiting = yield* h.support
           .takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "owner" })
-          .pipe(Effect.flip)).code,
-        "attempt_unavailable",
-      );
-      assert.equal(
-        (yield* h.emit("_kiro/openExternalUrl", { url }).pipe(Effect.asVoid, Effect.flip))._tag,
-        "AcpRequestError",
-      );
+          .pipe(Effect.flip, Effect.forkChild({ startImmediately: true }));
+        if (failure !== "timeout") {
+          yield* Deferred.fail(
+            h.reset,
+            new AcpErrors.AcpRequestError({
+              method: resetMethod,
+              code: failure === "unsupported" ? -32601 : -32603,
+              errorMessage: failure === "denied" ? "Internal error" : "Method not found",
+              data: {
+                details:
+                  failure === "denied"
+                    ? "MCP governance is disabled by your organization"
+                    : `Unknown ext method: ${resetMethod}`,
+              },
+            }),
+          );
+        } else {
+          yield* TestClock.adjust("30 seconds");
+        }
+        const outcome = yield* Fiber.join(waiting);
+        assert.equal(
+          outcome.code,
+          failure === "unsupported" || failure === "unknown-extension"
+            ? "unsupported"
+            : "connection_failed",
+        );
+        assert.isFalse((yield* h.support.getStatus("first", "owner")).canSignIn);
+        assert.equal(
+          (yield* h
+            .emit("_kiro/openExternalUrl", { url: "https://login.example.test/late" })
+            .pipe(Effect.asVoid, Effect.flip))._tag,
+          "AcpRequestError",
+        );
+        assert.equal(h.requests.length, 1);
+      }
     }).pipe(Effect.scoped),
   );
 
