@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   error: null as string | null,
   isPending: false,
   canManage: true,
+  readCanManage: true,
   refresh: vi.fn(),
   search: vi.fn(),
   prepare: vi.fn(),
@@ -30,7 +31,7 @@ vi.mock(import("../../state/server"), async (original) => {
 vi.mock(import("../../state/session"), async (original) => ({
   ...(await original()),
   useEnvironmentScope: () => state.canManage,
-  readEnvironmentScope: () => state.canManage,
+  readEnvironmentScope: () => state.readCanManage,
 }));
 vi.mock(import("../../state/query"), async (original) => ({
   ...(await original()),
@@ -93,6 +94,7 @@ function Step({
 
 function setup() {
   state.canManage = true;
+  state.readCanManage = true;
   state.result = null;
   state.error = null;
   state.isPending = false;
@@ -109,7 +111,7 @@ it("rechecks the grant before preparing an agent", async () => {
   state.result = { agents: [gemini] };
   const onPrepared = vi.fn();
   await using _screen = await render(<Step onPrepared={onPrepared} />);
-  state.canManage = false;
+  state.readCanManage = false;
 
   await page.getByRole("button", { name: "Add Gemini CLI" }).click();
 
