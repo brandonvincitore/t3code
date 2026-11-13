@@ -1,3 +1,5 @@
+import * as Scope from "effect/Scope";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as Digest from "effect/crypto/Digest";
 import * as Hex from "effect/encoding/Hex";
@@ -102,7 +104,17 @@ const testLayer = Layer.mergeAll(
 const SESSION_ID = "sess_abb5e0cf-d4a2-4360-9f03-2f8f0889a707";
 const decodeKiroTestSettings = Schema.decodeSync(KiroSettings);
 const decodeOwnedLease = Schema.decodeEffect(
-  Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown)),
+  Schema.fromJsonString(
+    Schema.Struct({
+      v: Schema.Literal(1),
+      pid: Schema.Int,
+      parentPid: Schema.Int,
+      acquiredAt: Schema.String,
+      hostId: Schema.String,
+      instanceId: Schema.String,
+      token: Schema.String,
+    }),
+  ),
 );
 const ENABLED_KIRO_SETTINGS = decodeKiroTestSettings({ enabled: true });
 
@@ -5667,9 +5679,9 @@ it.effect("refuses a present native lease before spawning or loading any Kiro ru
   }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );
 
-it.live(
-  "continues only under the current Kiro runtime's exact own lease and isolates sibling instances",
-  () =>
+it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
+  "continues only under the current Kiro runtime's exact own lease and isolates sibling instances on %s",
+  (platform) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-own-lease-" });
@@ -5710,6 +5722,9 @@ it.live(
         interactionMode: "default",
       });
       const environment = { HOME: home, KIRO_HOME: native, XDG_CONFIG_HOME: `${home}/xdg` };
+      const runtimeScope = yield* Scope.make();
+      yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
+      let observedRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
       const adapter = yield* makeKiroAdapterV2({
         instanceId,
         settings: ENABLED_KIRO_SETTINGS,
@@ -5718,7 +5733,7 @@ it.live(
         makeRuntime: (input) =>
           AcpSessionRuntime.make({
             ...input,
-            observeProcessIdentity: true,
+            observeProcessIdentity: platform !== "missing identity",
             spawn: {
               command: process.execPath,
               args: [script],
@@ -5726,7 +5741,18 @@ it.live(
               extendEnv: false,
               env: { ...environment, WIRE: wire, LEASE: lease },
             },
-          }),
+          }).pipe(
+            Effect.provideService(
+              HostProcess.Platform,
+              platform === "missing identity" ? "linux" : platform,
+            ),
+            Effect.provideService(Scope.Scope, runtimeScope),
+            Effect.tap((runtime) =>
+              Effect.sync(() => {
+                observedRuntime = runtime;
+              }),
+            ),
+          ),
       });
       const session = yield* adapter.openSession({
         threadId,
@@ -5754,6 +5780,13 @@ it.live(
         yield* session.startTurn(turn(ordinal));
         assert.equal(terminalStatus(yield* Fiber.join(events)), "completed");
       });
+      if (platform === "missing identity") {
+        assert.equal(
+          (yield* session.startTurn(turn(1)).pipe(Effect.flip))._tag,
+          "ProviderAdapterThreadInUseError",
+        );
+        return;
+      }
       yield* send(1);
       assert.equal(yield* fs.readFileString(lease), original);
       assert.equal(
@@ -5783,6 +5816,19 @@ it.live(
         "ProviderAdapterThreadInUseError",
       );
       const stamp = yield* decodeOwnedLease(original);
+      for (const changed of [
+        { ...stamp, pid: stamp.pid + 1 },
+        { ...stamp, parentPid: stamp.parentPid + 1 },
+        { ...stamp, hostId: "foreign-host" },
+        { ...stamp, acquiredAt: "invalid" },
+        { ...stamp, acquiredAt: "2099-01-01T00:00:00.000Z" },
+      ]) {
+        yield* fs.writeFileString(lease, JSON.stringify(changed));
+        assert.equal(
+          (yield* session.startTurn(turn(2)).pipe(Effect.flip))._tag,
+          "ProviderAdapterThreadInUseError",
+        );
+      }
       yield* fs.writeFileString(
         lease,
         JSON.stringify({ ...stamp, acquiredAt: "2020-01-01T00:00:00.000Z" }),
@@ -5799,5 +5845,9 @@ it.live(
         .map((line) => JSON.parse(line) as { method: string });
       assert.equal(calls.filter((call) => call.method === "session/prompt").length, 2);
       assert.equal(calls.filter((call) => call.method === "session/load").length, 0);
+      yield* Scope.close(runtimeScope, Exit.void);
+      assert.isFalse(
+        yield* observedRuntime!.ownsProcess!(stamp.pid, stamp.parentPid, stamp.acquiredAt),
+      );
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );

@@ -1525,20 +1525,6 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
     );
   }
 
-  const hostPlatform = yield* HostProcess.Platform;
-  const nativeLeaseIdentity =
-    options.observeProcessIdentity === true &&
-    (hostPlatform === "linux" || hostPlatform === "darwin")
-      ? yield* Effect.sync(() => {
-          try {
-            const controller = makePosixProcessTreeController(hostPlatform);
-            const root = controller.identity(Number(child.pid));
-            return root === undefined ? undefined : { controller, root };
-          } catch {
-            return undefined;
-          }
-        })
-      : undefined;
   const posixOwnershipLedger = new Map<string, AcpOwnedPosixProcess>();
   const posixOwnershipFrontier = new Map<number, AcpOwnedPosixProcess>();
   const posixOwnershipChildQueues = new Map<number, Array<number>>();
@@ -2479,23 +2465,32 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
   });
 
   return {
-    ownsProcess: (pid, parentPid, acquiredAt) =>
-      Effect.try({
-        try: () => {
-          if (!Number.isFinite(Date.parse(acquiredAt)) || Date.parse(acquiredAt) < spawnedAt)
-            return false;
-          const controller = nativeLeaseIdentity?.controller ?? posixController;
-          if (!controller) return false;
-          const owned =
-            nativeLeaseIdentity?.root.pid === pid
-              ? nativeLeaseIdentity.root
-              : [...posixOwnershipLedger.values()].find((entry) => entry.pid === pid);
-          if (!owned || owned.ppid !== parentPid) return false;
-          const current = controller.identity(pid);
-          return current?.state !== "Z" && samePosixProcessIdentity(owned, current);
-        },
-        catch: () => false,
-      }).pipe(Effect.orElseSucceed(() => false)),
+    ownsProcess: Effect.fn("AcpSessionRuntime.ownsProcess")(
+      function* (pid: number, parentPid: number, acquiredAt: string) {
+        const now = yield* Clock.currentTimeMillis.pipe(withWallClock);
+        if (
+          options.observeProcessIdentity !== true ||
+          !Number.isFinite(Date.parse(acquiredAt)) ||
+          Date.parse(acquiredAt) < spawnedAt ||
+          Date.parse(acquiredAt) > now
+        )
+          return false;
+        // The handle's exit signal belongs to this spawn, unlike probing a reusable PID.
+        if (pid === Number(child.pid) && parentPid === process.pid) return yield* child.isRunning;
+        if (!posixController) return false;
+        const owned = [...posixOwnershipLedger.values()].find((entry) => entry.pid === pid);
+        if (!owned || owned.ppid !== parentPid) return false;
+        const current = yield* Effect.sync(() => {
+          try {
+            return posixController.identity(pid);
+          } catch {
+            return undefined;
+          }
+        });
+        return current?.state !== "Z" && samePosixProcessIdentity(owned, current);
+      },
+      Effect.orElseSucceed(() => false),
+    ),
     handleRequestPermission: acp.handleRequestPermission,
     handleElicitation: acp.handleElicitation,
     handleMcpConnect: acp.handleMcpConnect,

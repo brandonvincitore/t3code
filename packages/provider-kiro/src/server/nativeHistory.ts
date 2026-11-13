@@ -12,6 +12,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+// Node exposes no portable openat; capture needs the Linux descriptor path boundary.
 const MAX_BYTES = 8 * 1_024 * 1_024;
 const MAX_ROWS = 4_096;
 const MAX_TEXT = 256 * 1_024;
@@ -121,6 +122,32 @@ const payloadSchemas = {
   usage_summary: Schema.Struct({
     type: Schema.Literal("usage_summary"),
     promptTurnSummaries: Schema.Array(Schema.Unknown),
+  }),
+  pending_interaction: Schema.Struct({
+    type: Schema.Literal("pending_interaction"),
+    interactionType: Schema.Literals(["tool_approval", "user_input"]),
+    toolCallId: Schema.String,
+    question: Schema.String,
+    options: Schema.Array(Schema.Unknown),
+    executionId: Schema.String,
+    consentRound: Schema.optional(Schema.Number),
+    _meta: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  }),
+  interaction_resolved: Schema.Struct({
+    type: Schema.Literal("interaction_resolved"),
+    toolCallId: Schema.String,
+    outcome: Schema.String,
+    selectedOption: Schema.optional(Schema.Unknown),
+    executionId: Schema.String,
+    consentRound: Schema.optional(Schema.Number),
+    rejectionReason: Schema.optional(Schema.String),
+  }),
+  session_metadata: Schema.Struct({
+    type: Schema.Literal("session_metadata"),
+    turnId: Schema.optional(Schema.String),
+    key: Schema.String,
+    value: Schema.Unknown,
+    executionId: Schema.String,
   }),
   ContextualHookInvoked: Schema.Struct({
     type: Schema.Literal("ContextualHookInvoked"),
@@ -279,6 +306,157 @@ async function leaseAt(root: string, id: string) {
   }
 }
 
+type DirectoryHandle = Awaited<ReturnType<typeof NodeFSP.open>>;
+const inode = (stat: Awaited<ReturnType<typeof NodeFSP.stat>>) => `${stat.dev}:${stat.ino}`;
+async function anchoredRoot(root: string) {
+  const frames: Array<{
+    handle: DirectoryHandle;
+    parent?: DirectoryHandle;
+    name: string;
+    identity: string;
+  }> = [];
+  const openedDirectories = new Map<string, DirectoryHandle>();
+  const at = (parent: DirectoryHandle, name: string) => `/proc/self/fd/${parent.fd}/${name}`;
+  const close = async () => {
+    for (const frame of frames.toReversed()) await frame.handle.close();
+  };
+  const enter = async (parent: DirectoryHandle | undefined, name: string) => {
+    const path = parent ? at(parent, name) : "/";
+    const existing = openedDirectories.get(path);
+    if (existing) return existing;
+    const handle = await NodeFSP.open(
+      path,
+      NodeFS.constants.O_RDONLY | NodeFS.constants.O_DIRECTORY | NodeFS.constants.O_NOFOLLOW,
+    );
+    const stat = await handle.stat();
+    frames.push({ handle, ...(parent ? { parent } : {}), name, identity: inode(stat) });
+    if (!stat.isDirectory()) fail("unsafe", "invalid_source");
+    openedDirectories.set(path, handle);
+    return handle;
+  };
+  try {
+    const parts = root.split("/").filter(Boolean);
+    if (parts.length > 64 || root !== NodePath.resolve(root)) fail("unsafe", "invalid_source");
+    let handle = await enter(undefined, "");
+    for (const part of parts) handle = await enter(handle, part);
+    const native = handle;
+    const rootIdentity = inode(await native.stat());
+    const read = async (parent: DirectoryHandle, name: string, limit: number) => {
+      const file = at(parent, name);
+      const handle = await NodeFSP.open(
+        file,
+        NodeFS.constants.O_RDONLY | NodeFS.constants.O_NOFOLLOW | NodeFS.constants.O_NONBLOCK,
+      );
+      try {
+        const before = await handle.stat();
+        if (!before.isFile() || before.size > limit) fail("unsafe", "invalid_source");
+        const buffer = Buffer.alloc(Math.min(limit + 1, before.size + 1));
+        let size = 0;
+        while (size < buffer.length) {
+          const read = await handle.read(buffer, size, buffer.length - size, size);
+          if (read.bytesRead === 0) break;
+          size += read.bytesRead;
+        }
+        const after = await handle.stat();
+        const current = await NodeFSP.lstat(file);
+        if (
+          size !== before.size ||
+          statKey(before) !== statKey(after) ||
+          statKey(after) !== statKey(current)
+        )
+          fail("busy", "source_changed");
+        return {
+          text: new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)),
+          stamp: statKey(current),
+        };
+      } finally {
+        await handle.close();
+      }
+    };
+    const lease = async (id: string) => {
+      let leases: DirectoryHandle;
+      try {
+        leases = await enter(native, "session-leases");
+      } catch (error) {
+        if (missing(error)) return;
+        throw error;
+      }
+      try {
+        await NodeFSP.lstat(at(leases, `${id}.lease.lock`));
+        fail("busy", "lease_present");
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+      try {
+        return await read(leases, `${id}.lease`, 8192);
+      } catch (error) {
+        if (!missing(error)) throw error;
+      }
+    };
+    const verify = async () => {
+      for (const frame of frames) {
+        if (
+          inode(await frame.handle.stat()) !== frame.identity ||
+          (frame.parent &&
+            inode(await NodeFSP.lstat(at(frame.parent, frame.name))) !== frame.identity)
+        )
+          fail("busy", "source_changed");
+      }
+      return frames.map((frame) => frame.identity).join("/");
+    };
+    return { native, rootIdentity, enter, read, lease, verify, close };
+  } catch (error) {
+    await close();
+    throw error;
+  }
+}
+
+async function admissionLease(root: string, id: string, platform: NodeJS.Platform) {
+  if (platform !== "linux") return leaseAt(root, id);
+  let anchored: Awaited<ReturnType<typeof anchoredRoot>>;
+  try {
+    anchored = await anchoredRoot(root);
+  } catch (error) {
+    if (missing(error)) return;
+    throw error;
+  }
+  try {
+    const lease = await anchored.lease(id);
+    await anchored.verify();
+    return lease;
+  } finally {
+    await anchored.close();
+  }
+}
+
+const isRecord = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+function visibleMetadata(payload: Record<string, unknown>): boolean {
+  if (payload._meta === undefined) return true;
+  if (!isRecord(payload._meta) || Object.keys(payload._meta).some((key) => key !== "kiro"))
+    fail("unsupported", "invalid_source");
+  const kiro = payload._meta.kiro;
+  if (kiro === undefined) return true;
+  if (!isRecord(kiro)) fail("unsupported", "invalid_source");
+  const hidden = [
+    "syntheticUserMessageReason",
+    "notification",
+    "peerMessage",
+    "peerReceiverPromptGeneration",
+    "agentInitiated",
+    "agentInitiatedReason",
+    "agentInitiatedPromptFramed",
+  ];
+  if (hidden.some((key) => kiro[key] !== undefined)) return false;
+  const benign = ["peerPromptGeneration", "userMessageTag", "classifierApproved", "classifierFlag"];
+  if (Object.keys(kiro).some((key) => !benign.includes(key))) fail("unsupported", "invalid_source");
+  if (
+    (kiro.userMessageTag !== undefined && typeof kiro.userMessageTag !== "string") ||
+    (kiro.classifierApproved !== undefined && typeof kiro.classifierApproved !== "boolean")
+  )
+    fail("unsafe", "invalid_source");
+  return true;
+}
+
 function materialize(text: string): NativeHistoryCapture["rows"] {
   if (text.length > 0 && !text.endsWith("\n")) fail("busy", "incomplete");
   const lines = text.length === 0 ? [] : text.slice(0, -1).split("\n");
@@ -316,10 +494,11 @@ function materialize(text: string): NativeHistoryCapture["rows"] {
         user = row.id;
         closed = false;
         kind = "user";
+        if (payload.kind !== undefined) fail("unsupported", "invalid_source");
         displayTurn =
           (payload.source === undefined || payload.source === "chat") &&
           payload.kind === undefined &&
-          payload._meta === undefined;
+          visibleMetadata(payload);
         if (displayTurn)
           content = typeof payload.content === "string" ? payload.content : undefined;
         else if (typeof payload.content !== "string") fail("unsafe", "invalid_source");
@@ -345,7 +524,13 @@ function materialize(text: string): NativeHistoryCapture["rows"] {
       if (
         displayTurn &&
         payload.subExecutionId === undefined &&
-        payload._meta === undefined &&
+        payload.operationType === undefined
+      )
+        fail("unsupported", "invalid_source");
+      if (
+        displayTurn &&
+        payload.subExecutionId === undefined &&
+        visibleMetadata(payload) &&
         payload.reasoningRedactedContent === undefined
       ) {
         if (payload.operationType === "Say" || payload.operationType === "Print")
@@ -390,58 +575,75 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
             nativeId.toLowerCase() === "workflows"
           )
             fail("unsafe", "invalid_source");
+          if (platform !== "linux") fail("unsupported", "unsupported");
           const root = await nativeRoot(environment, fallbackHome, platform);
           const workspace = normalize(cwd, platform);
           const bucket = hash(workspace).slice(0, 16);
-          const session = NodePath.join(root, "sessions", bucket, nativeId);
-          const observe = async () => {
-            if (await leaseAt(root, nativeId)) fail("busy", "lease_present");
-            for (const component of [
-              NodePath.join(root, "sessions"),
-              NodePath.join(root, "sessions", bucket),
-              session,
-            ])
-              await directory(component);
-            const metadata = await bounded(NodePath.join(session, "session.json"), 65_536);
-            const transcript = await bounded(NodePath.join(session, "messages.jsonl"), MAX_BYTES);
-            if (await leaseAt(root, nativeId)) fail("busy", "lease_present");
-            return { metadata, transcript, directory: statKey(await NodeFSP.stat(session)) };
-          };
-          const first = await observe();
-          const record = parseMetadata(first.metadata.text);
-          if (record.schemaVersion !== "1.0.0") fail("unsupported", "unsupported");
-          if (
-            record.id !== nativeId ||
-            record.workspacePaths.length !== 1 ||
-            record.workspacePaths.some(
-              (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== workspace,
-            ) ||
-            record.rootPaths?.some(
-              (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== workspace,
-            ) ||
-            record.parentSessionId !== undefined ||
-            record.parentExecutionId !== undefined ||
-            record.forkedAtMessageId !== undefined ||
-            record.workflowLaunch !== undefined ||
-            (record.executionTarget !== undefined && record.executionTarget !== "local") ||
-            (record._meta !== undefined && Object.keys(record._meta).length > 0) ||
-            !Number.isFinite(Date.parse(record.createdAt)) ||
-            !Number.isFinite(Date.parse(record.lastModifiedAt)) ||
-            Date.parse(record.lastModifiedAt) < Date.parse(record.createdAt)
-          )
-            fail("unsafe", "invalid_source");
-          const rows = materialize(first.transcript.text);
-          if (rows.some((row) => Date.parse(row.timestamp) > Date.parse(record.lastModifiedAt)))
-            fail("busy", "incomplete");
-          const second = await observe();
-          if (fingerprint(first) !== fingerprint(second)) fail("busy", "source_changed");
-          return {
-            source: hash(
-              encodeIdentity([root, workspace, nativeId, record.schemaVersion, record.createdAt]),
-            ),
-            identity: fingerprint(second),
-            rows,
-          };
+          const anchored = await anchoredRoot(root);
+          try {
+            if (await anchored.lease(nativeId)) fail("busy", "lease_present");
+            const sessions = await anchored.enter(anchored.native, "sessions");
+            const workspaceDirectory = await anchored.enter(sessions, bucket);
+            const session = await anchored.enter(workspaceDirectory, nativeId);
+            const observe = async () => {
+              if (await anchored.lease(nativeId)) fail("busy", "lease_present");
+              const metadata = await anchored.read(session, "session.json", 65_536);
+              const transcript = await anchored.read(session, "messages.jsonl", MAX_BYTES);
+              if (await anchored.lease(nativeId)) fail("busy", "lease_present");
+              return {
+                metadata,
+                transcript,
+                directory: (await anchored.verify()) + statKey(await session.stat()),
+              };
+            };
+            const first = await observe();
+            const record = parseMetadata(first.metadata.text);
+            if (record.schemaVersion !== "1.0.0") fail("unsupported", "unsupported");
+            if (
+              record.id !== nativeId ||
+              record.workspacePaths.length !== 1 ||
+              record.workspacePaths.some(
+                (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== workspace,
+              ) ||
+              record.rootPaths?.some(
+                (p) => !NodePath.isAbsolute(p) || normalize(p, platform) !== workspace,
+              ) ||
+              record.parentSessionId !== undefined ||
+              record.parentExecutionId !== undefined ||
+              record.forkedAtMessageId !== undefined ||
+              record.workflowLaunch !== undefined ||
+              (record.executionTarget !== undefined && record.executionTarget !== "local") ||
+              (record._meta !== undefined && Object.keys(record._meta).length > 0) ||
+              !Number.isFinite(Date.parse(record.createdAt)) ||
+              !Number.isFinite(Date.parse(record.lastModifiedAt)) ||
+              Date.parse(record.lastModifiedAt) < Date.parse(record.createdAt)
+            )
+              fail("unsafe", "invalid_source");
+            const rows = materialize(first.transcript.text);
+            if (rows.some((row) => Date.parse(row.timestamp) > Date.parse(record.lastModifiedAt)))
+              fail("busy", "incomplete");
+            const second = await observe();
+            if (fingerprint(first) !== fingerprint(second)) fail("busy", "source_changed");
+            return {
+              source: hash(
+                encodeIdentity([
+                  root,
+                  anchored.rootIdentity,
+                  inode(await sessions.stat()),
+                  inode(await workspaceDirectory.stat()),
+                  inode(await session.stat()),
+                  workspace,
+                  nativeId,
+                  record.schemaVersion,
+                  record.createdAt,
+                ]),
+              ),
+              identity: fingerprint(second),
+              rows,
+            };
+          } finally {
+            await anchored.close();
+          }
         },
         catch: (error) =>
           isHistoryReadError(error)
@@ -463,9 +665,10 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
           try: async () => {
             if (!NodePath.isAbsolute(input.cwd) || !/^[A-Za-z0-9_-]{1,128}$/.test(input.nativeId))
               fail("unsafe", "invalid_source");
-            return leaseAt(
+            return admissionLease(
               await nativeRoot(environment, fallbackHome, platform, true),
               input.nativeId,
+              platform,
             );
           },
           catch: () => new NativeHistoryReadError({ status: "busy", reason: "lease_present" }),
@@ -483,7 +686,11 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
         ) {
           const current = yield* Effect.tryPromise({
             try: async () =>
-              leaseAt(await nativeRoot(environment, fallbackHome, platform), input.nativeId),
+              admissionLease(
+                await nativeRoot(environment, fallbackHome, platform),
+                input.nativeId,
+                platform,
+              ),
             catch: () => new NativeHistoryReadError({ status: "busy", reason: "lease_present" }),
           });
           if (current?.text === lease.text) return;

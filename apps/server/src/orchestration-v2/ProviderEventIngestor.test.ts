@@ -521,10 +521,182 @@ layer("ProviderEventIngestorV2", (it) => {
           },
         },
       };
-      yield* eventSink.write({
+      let runOrdinal = 0;
+      for (const route of ["direct", "owner", "run", "cas"] as const)
+        for (const oldReceipt of [false, true]) {
+          runOrdinal++;
+          const nativeId = `native-${route}-${oldReceipt}`;
+          const binding = {
+            ...kiro,
+            lastRunOrdinal: runOrdinal,
+            nativeThreadRef: { ...kiro.nativeThreadRef, nativeId },
+          };
+          const receipt = { ...kiro.nativeMetadata.nativeHistory, nativeThreadId: nativeId };
+          const current = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+            "providerThreads",
+          ])).providerThreads[0]!;
+          yield* eventSink.writeIfProviderThreadUnchanged({
+            expected: current,
+            events: [
+              {
+                id: EventId.make(`seed-${nativeId}`),
+                type: "provider-thread.updated",
+                threadId: threadEvent.threadId,
+                occurredAt: now,
+                payload: {
+                  ...binding,
+                  nativeMetadata: oldReceipt ? { nativeHistory: receipt } : null,
+                },
+              },
+            ],
+          });
+          if (oldReceipt) {
+            const expected = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+              "providerThreads",
+            ])).providerThreads[0]!;
+            yield* eventSink.writeIfProviderThreadUnchanged({
+              expected,
+              updateNativeHistory: true,
+              events: [
+                {
+                  id: EventId.make(`receipt-${nativeId}`),
+                  type: "provider-thread.updated",
+                  threadId: threadEvent.threadId,
+                  occurredAt: now,
+                  payload: { ...binding, nativeMetadata: { nativeHistory: receipt } },
+                },
+              ],
+            });
+          }
+          const runId = RunId.make(`run-${nativeId}`);
+          const attemptId = RunAttemptId.make(`attempt-${nativeId}`);
+          yield* eventSink.write({
+            events: [
+              {
+                id: EventId.make(`run-${nativeId}`),
+                type: "run.updated",
+                threadId: threadEvent.threadId,
+                occurredAt: now,
+                payload: {
+                  id: runId,
+                  threadId: threadEvent.threadId,
+                  ordinal: runOrdinal,
+                  providerInstanceId: modelSelection.instanceId,
+                  modelSelection,
+                  providerThreadId: kiro.id,
+                  userMessageId: MessageId.make(`user-${nativeId}`),
+                  rootNodeId: NodeId.make(`node-${nativeId}`),
+                  activeAttemptId: attemptId,
+                  status: "completed",
+                  requestedAt: now,
+                  startedAt: now,
+                  completedAt: now,
+                  checkpointId: null,
+                  contextHandoffId: null,
+                },
+              },
+            ],
+          });
+          const ready = yield* Deferred.make<void>();
+          const release = yield* Deferred.make<void>();
+          const stale = yield* Effect.gen(function* () {
+            const events = yield* ingestor.normalize({
+              providerSessionId,
+              providerInstanceId: modelSelection.instanceId,
+              threadId: threadEvent.threadId,
+              event: {
+                type: "provider_thread.updated",
+                driver: kiro.driver,
+                providerThread: {
+                  ...binding,
+                  nativeMetadata: oldReceipt ? { nativeHistory: receipt } : null,
+                },
+              },
+            });
+            yield* Deferred.succeed(ready, undefined);
+            yield* Deferred.await(release);
+            if (route === "direct") yield* eventSink.write({ events });
+            else if (route === "owner")
+              yield* eventSink.writeIfProviderThreadOwner({
+                providerThreadId: kiro.id,
+                runId,
+                activeAttemptId: attemptId,
+                expectedLastRunOrdinal: runOrdinal,
+                events,
+              });
+            else if (route === "cas") {
+              const expected = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+                "providerThreads",
+              ])).providerThreads[0]!;
+              yield* eventSink.writeIfProviderThreadUnchanged({ expected, events });
+            } else
+              yield* eventSink.writeIfRunCurrent({
+                threadId: threadEvent.threadId,
+                runId,
+                activeAttemptId: attemptId,
+                expectedStatus: "completed",
+                events,
+              });
+          }).pipe(Effect.forkChild);
+          yield* Deferred.await(ready);
+          const expected = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+            "providerThreads",
+          ])).providerThreads[0]!;
+          const r1 = {
+            ...receipt,
+            rows: [
+              ...receipt.rows,
+              { id: "new-row", digest: "new-digest", itemId: TurnItemId.make("new-synced-item") },
+            ],
+          };
+          yield* eventSink.writeIfProviderThreadUnchanged({
+            expected,
+            updateNativeHistory: true,
+            events: [
+              {
+                id: EventId.make(`sync-${nativeId}`),
+                type: "provider-thread.updated",
+                threadId: threadEvent.threadId,
+                occurredAt: now,
+                payload: { ...binding, nativeMetadata: { nativeHistory: r1 } },
+              },
+            ],
+          });
+          yield* Deferred.succeed(release, undefined);
+          yield* Fiber.join(stale);
+          const after = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+            "providerThreads",
+          ])).providerThreads[0]!;
+          assert.deepEqual(
+            after.nativeMetadata?.nativeHistory,
+            r1,
+            `${route} / R0 ${oldReceipt ? "old" : "absent"}`,
+          );
+        }
+      const expected = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+        "providerThreads",
+      ])).providerThreads[0]!;
+      yield* eventSink.writeIfProviderThreadUnchanged({
+        expected,
         events: [
           {
             id: EventId.make("durable-native-receipt"),
+            type: "provider-thread.updated",
+            threadId: threadEvent.threadId,
+            occurredAt: now,
+            payload: { ...kiro, nativeMetadata: null },
+          },
+        ],
+      });
+      const bound = (yield* projectionStore.getThreadRecords(threadEvent.threadId, [
+        "providerThreads",
+      ])).providerThreads[0]!;
+      yield* eventSink.writeIfProviderThreadUnchanged({
+        expected: bound,
+        updateNativeHistory: true,
+        events: [
+          {
+            id: EventId.make("current-native-receipt"),
             type: "provider-thread.updated",
             threadId: threadEvent.threadId,
             occurredAt: now,

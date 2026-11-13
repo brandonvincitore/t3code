@@ -162,6 +162,7 @@ export interface EventSinkV2Shape {
   readonly writeIfProviderThreadUnchanged: (input: {
     readonly expected: OrchestrationV2ProviderThread;
     readonly runlessItemRunOrdinal?: number;
+    readonly updateNativeHistory?: true;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<
     {
@@ -380,10 +381,12 @@ const layerBase: Layer.Layer<
         });
       });
 
-    const normalizeEvents = (
+    // Receipt authority is merged on this transaction's connection, after any stale normalization.
+    const normalizeEvents = Effect.fnUntraced(function* (
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
       runlessItemRunOrdinal?: number,
-    ) => {
+      historyWriterId?: OrchestrationV2ProviderThread["id"],
+    ) {
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -391,22 +394,81 @@ const layerBase: Layer.Layer<
             : [],
         ),
       );
-      return Effect.forEach(
+      const providerRows = new Map<
+        OrchestrationV2ProviderThread["id"],
+        OrchestrationV2ProviderThread
+      >();
+      return yield* Effect.forEach(
         events,
         (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
-            ? turnItemPositions
-                .normalize(
+          Effect.gen(function* () {
+            if (event.type === "turn-item.updated")
+              return {
+                ...event,
+                payload: yield* turnItemPositions.normalize(
                   event.payload,
                   event.payload.runId === null
                     ? runlessItemRunOrdinal
                     : runOrdinals.get(event.payload.runId),
-                )
-                .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+                ),
+              };
+            if (event.type !== "provider-thread.updated") return event;
+            const offered = event.payload;
+            if (offered.driver !== "kiro" && offered.nativeMetadata?.nativeHistory === undefined) {
+              providerRows.set(offered.id, offered);
+              return event;
+            }
+            let current = providerRows.get(offered.id);
+            if (!current) {
+              const records = yield* projectionStore
+                .getThreadRecords(event.threadId, ["providerThreads"])
+                .pipe(
+                  Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
+                );
+              current = records?.providerThreads.find((row) => row.id === offered.id);
+            }
+            const sameBinding =
+              current?.driver === "kiro" &&
+              offered.driver === "kiro" &&
+              current.appThreadId === event.threadId &&
+              offered.appThreadId === event.threadId &&
+              current.ownerNodeId === offered.ownerNodeId &&
+              current.providerInstanceId === offered.providerInstanceId &&
+              current.nativeThreadRef?.driver === "kiro" &&
+              offered.nativeThreadRef?.driver === "kiro" &&
+              current.nativeThreadRef.strength === "strong" &&
+              offered.nativeThreadRef.strength === "strong" &&
+              current.nativeThreadRef.nativeId === offered.nativeThreadRef.nativeId;
+            const candidate =
+              sameBinding && offered.id === historyWriterId
+                ? offered.nativeMetadata?.nativeHistory
+                : undefined;
+            const receipt =
+              candidate?.providerInstanceId === offered.providerInstanceId &&
+              candidate.nativeThreadId === offered.nativeThreadRef?.nativeId &&
+              offered.driver === "kiro" &&
+              offered.appThreadId === event.threadId &&
+              offered.nativeThreadRef?.driver === "kiro" &&
+              offered.nativeThreadRef.strength === "strong"
+                ? candidate
+                : sameBinding
+                  ? current?.nativeMetadata?.nativeHistory
+                  : undefined;
+            const { nativeHistory: _untrusted, ...metadata } = offered.nativeMetadata ?? {};
+            const payload = {
+              ...offered,
+              nativeMetadata: receipt
+                ? { ...metadata, nativeHistory: receipt }
+                : offered.nativeMetadata === null
+                  ? null
+                  : metadata,
+            };
+            providerRows.set(payload.id, payload);
+            return { ...event, payload };
+          }),
         { concurrency: 1 },
       );
-    };
+    });
 
     const applyStoredEvents =
       /* This helper runs for individual orchestration events; the enclosing operation owns the span. */
@@ -668,6 +730,7 @@ const layerBase: Layer.Layer<
       expectedJson: string,
       events: ReadonlyArray<OrchestrationV2DomainEvent>,
       runlessItemRunOrdinal?: number,
+      historyWriterId?: OrchestrationV2ProviderThread["id"],
     ) =>
       commitThenPublish(
         Effect.gen(function* () {
@@ -679,7 +742,7 @@ const layerBase: Layer.Layer<
             };
           }
 
-          const normalized = yield* normalizeEvents(events, runlessItemRunOrdinal);
+          const normalized = yield* normalizeEvents(events, runlessItemRunOrdinal, historyWriterId);
           const storedEvents = yield* eventStore.append({ events: normalized });
           const outcomes = yield* applyStoredEvents(storedEvents);
           return { committed: true as const, storedEvents, outcomes };
@@ -708,6 +771,7 @@ const layerBase: Layer.Layer<
         expectedJson,
         input.events,
         input.runlessItemRunOrdinal,
+        input.updateNativeHistory === true ? input.expected.id : undefined,
       );
     });
 

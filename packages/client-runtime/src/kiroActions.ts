@@ -178,7 +178,7 @@ export function nativeHistorySyncMessage(result: NativeHistorySyncResult): strin
     case "unsafe":
       return "Native history changed or cannot be read safely. The existing thread has been kept. Continue in Kiro or start a new T3 conversation with selected context.";
     case "unsupported":
-      return "Safe native history sync is unavailable for this provider or history format.";
+      return "Safe native history sync is unavailable for this provider, server platform or history format.";
     case "unavailable":
       return "Native history is unavailable in this environment. Check the provider and project, then retry.";
   }

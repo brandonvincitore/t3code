@@ -37,14 +37,13 @@ export function reconcileNativeHistory(
     return { status: "unsafe", reason: "source_changed" } as const;
   const turns = projection.providerTurns.filter((turn) => turn.providerThreadId === owner.id);
   const knownUsers = new Set<string>();
-  const completedRuns = projection.runs.filter(
-    (run) =>
-      run.providerThreadId === owner.id && run.startedAt !== null && run.status !== "cancelled",
+  const startedRuns = projection.runs.filter(
+    (run) => run.providerThreadId === owner.id && run.startedAt !== null,
   );
-  const latestRun = completedRuns.reduce((max, run) => Math.max(max, run.ordinal), 0);
+  const latestRun = startedRuns.reduce((max, run) => Math.max(max, run.ordinal), 0);
   const mustJoin = receipt
-    ? completedRuns.filter((run) => run.ordinal > receipt.coveredRunOrdinal)
-    : completedRuns.filter((run) => run.ordinal === latestRun);
+    ? startedRuns.filter((run) => run.ordinal > receipt.coveredRunOrdinal)
+    : startedRuns.filter((run) => run.ordinal === latestRun);
   for (const run of mustJoin) {
     const accepted = turns.filter((turn) =>
       projection.attempts.some(
@@ -70,7 +69,7 @@ export function reconcileNativeHistory(
     for (const turn of accepted) knownUsers.add(turn.nativeTurnRef!.nativeId!);
   }
   let baselineRows = receipt?.baselineRows ?? 0;
-  if (!receipt && (projection.turnItems.length > 0 || completedRuns.length > 0)) {
+  if (!receipt && (projection.turnItems.length > 0 || startedRuns.length > 0)) {
     const boundary = capture.rows.findLastIndex(
       (row) =>
         row.boundary === "end" && row.userRowId !== undefined && knownUsers.has(row.userRowId),

@@ -637,6 +637,7 @@ const make = Effect.gen(function* () {
           );
           const committed = yield* eventSink.writeIfProviderThreadUnchanged({
             expected: active,
+            updateNativeHistory: true,
             runlessItemRunOrdinal: current.runs.reduce(
               (max, run) => (run.startedAt === null ? max : Math.max(max, run.ordinal)),
               0,

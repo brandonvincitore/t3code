@@ -5,7 +5,6 @@ import {
   OrchestrationV2StoredEvent,
   type OrchestrationV2PlanArtifact,
   type OrchestrationV2Run,
-  type OrchestrationV2ProviderThread,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type ModelSelection,
@@ -502,33 +501,10 @@ export const layer: Layer.Layer<
               ];
             case "provider_thread.updated": {
               const threadId = input.event.providerThread.appThreadId ?? input.threadId;
-              const offered = input.event.providerThread;
-              let current: OrchestrationV2ProviderThread | undefined;
-              if (offered.driver === "kiro") {
-                const records = yield* projections
-                  .getThreadRecords(threadId, ["providerThreads"])
-                  .pipe(
-                    Effect.catchTags({
-                      ProjectionStoreThreadNotFoundError: () => Effect.undefined,
-                    }),
-                  );
-                current = records?.providerThreads.find((thread) => thread.id === offered.id);
-              }
-              const receipt = current?.nativeMetadata?.nativeHistory;
-              const preserve =
-                receipt !== undefined &&
-                current?.driver === offered.driver &&
-                current.providerInstanceId === offered.providerInstanceId &&
-                current.nativeThreadRef?.nativeId === offered.nativeThreadRef?.nativeId;
               const updated = yield* makeDomainEvent(input, {
                 type: "provider-thread.updated",
                 threadId,
-                payload: preserve
-                  ? {
-                      ...offered,
-                      nativeMetadata: { ...offered.nativeMetadata, nativeHistory: receipt },
-                    }
-                  : offered,
+                payload: input.event.providerThread,
               });
               return input.event.retainedNativeTurnIds === undefined
                 ? [updated]

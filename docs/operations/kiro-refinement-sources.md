@@ -380,3 +380,18 @@ Exact-session receipts suppress echo on successful same-native continuation and
 retain portable recovery history on replacement. Independent source review and
 the integrated client pass belong to the parent; no live native compatibility
 or paid provider/model/eval proof is claimed here.
+
+
+### Native history review corrections (2026-11-13)
+
+Dependent on `fb12e04d37b1ec9ed6872d88e1828d39de5e8a5b`; fork-owned corrections
+follow the independent static review pinned in the external evidence package.
+The same supplied 3.2.1 excerpts establish ordinary row metadata and hidden
+approval/memory controls. Unknown display/framing forms defer without receipts.
+Started cancellations retain native input ownership; receipt merges now run in
+the sink transaction. Direct-child lease proof uses the spawn handle's lifetime,
+independently of Linux cleanup; platform simulations are not native Mac/Windows
+proof. Descriptor-anchored capture is implemented on Linux. Other server platforms
+explicitly report unsupported pending an equivalent verified filesystem boundary.
+Earlier ledger bytes and pins remain unchanged; no native session or paid turn
+was used for these corrections.

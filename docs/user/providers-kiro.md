@@ -88,7 +88,10 @@ for updates without copying them. The operation runs on the selected environment
 
 T3 never clears native leases, including stale or uncertain ones. Older histories need a verified
 native T3 turn boundary; without one, T3 keeps the timeline unchanged and reports ambiguity.
-Sync supports saved root chat-user, assistant and reasoning text in the supported local format.
+Sync currently requires a Linux server with descriptor-anchored file access. macOS and Windows
+servers report unsupported until an equivalent safe file reader is available. Normal native
+sending remains separate from that restriction. Sync supports saved root chat-user, assistant
+and reasoning text in the supported local format.
 Interrupted responses remain marked interrupted; API-injected user text is not copied.
 Tools, attachments, internal records, workflows, rewritten or compacted histories, and unfinished
 turns are not imported. A legacy catch-up starts after the verified boundary and does not fill

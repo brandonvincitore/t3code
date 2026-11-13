@@ -1,6 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off - Fixture bucket hashes must match the native on-disk workspace format.
+import * as NodeFS from "node:fs";
+import * as NodeModule from "node:module";
+import * as NodePath from "node:path";
 import * as NodeCrypto from "node:crypto";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { makeKiroNativeHistory } from "@t3tools/provider-kiro/testing";
 import * as Effect from "effect/Effect";
@@ -115,6 +118,191 @@ it.effect(
       assert.equal(capture.rows.find((row) => row.id === "start")?.userRowId, "row-user");
       assert.equal(capture.rows.find((row) => row.id === "api-user")?.userRowId, "api-user");
       assert.deepEqual(yield* h.capture, capture);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  "ordinary",
+  "synthetic",
+  "unknown user",
+  "unknown assistant",
+  "unknown operation",
+  "unknown framing",
+  "controls",
+] as const)("classifies native metadata without silent receipt coverage: %s", (kind) =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const rows = complete.map((row) => ({ ...row, payload: { ...row.payload } }));
+    rows[0]!.payload._meta = {
+      kiro:
+        kind === "synthetic"
+          ? { syntheticUserMessageReason: "agent-initiated-prompt" }
+          : { peerPromptGeneration: false, userMessageTag: "tag" },
+    };
+    rows[2]!.payload._meta = { kiro: {} };
+    rows[3]!.payload._meta = { kiro: {} };
+    if (kind === "unknown user") rows[0]!.payload._meta = { kiro: { unknownFraming: "private" } };
+    if (kind === "unknown assistant")
+      rows[3]!.payload._meta = { kiro: { unknownFraming: "private" } };
+    if (kind === "unknown operation") delete rows[3]!.payload.operationType;
+    if (kind === "unknown framing")
+      rows[0]!.payload._meta = { kiro: { steeringConsumedIds: ["private"] } };
+    if (kind === "controls")
+      rows.splice(
+        4,
+        0,
+        row("pending", {
+          type: "pending_interaction",
+          interactionType: "tool_approval",
+          toolCallId: "tool",
+          question: "private approval",
+          options: [],
+          executionId: "execution",
+        }),
+        row("resolved", {
+          type: "interaction_resolved",
+          toolCallId: "tool",
+          outcome: "approved",
+          executionId: "execution",
+        }),
+        row("memory", {
+          type: "session_metadata",
+          key: "memoryExposureMessage",
+          value: "private memory",
+          executionId: "execution",
+        }),
+      );
+    yield* h.write(rows);
+    if (kind.startsWith("unknown")) {
+      assert.equal((yield* h.capture.pipe(Effect.flip)).status, "unsupported");
+    } else {
+      const captured = yield* h.capture;
+      assert.deepEqual(
+        captured.rows.filter((row) => row.text !== undefined).map((row) => row.text),
+        kind === "synthetic" ? [] : ["CLI request", "A thought", "CLI response"],
+      );
+      assert.isFalse(JSON.stringify(captured).includes("private"));
+    }
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect("rejects ancestor ABA substitution during an awaited leaf resolution", () =>
+  Effect.gen(function* () {
+    const h = yield* fixture();
+    const bucket = NodePath.dirname(h.directory);
+    const parked = bucket + "-parked";
+    const outside = `${h.root}/OUTSIDE`;
+    const outsideSession = `${outside}/${h.nativeId}`;
+    yield* h.fs.makeDirectory(outsideSession, { recursive: true });
+    yield* h.fs.writeFileString(`${outsideSession}/session.json`, JSON.stringify(h.metadata));
+    yield* h.fs.writeFileString(
+      `${outsideSession}/messages.jsonl`,
+      complete
+        .map((r) =>
+          JSON.stringify({
+            ...r,
+            payload: {
+              ...r.payload,
+              ...(r.payload.type === "user" ? { content: "OUTSIDE MARKER" } : {}),
+            },
+          }),
+        )
+        .join("\n") + "\n",
+    );
+    const lstat = NodeFS.promises.lstat;
+    const realpath = NodeFS.promises.realpath;
+    const open = NodeFS.promises.open;
+    let swapped = false;
+    let substitutions = 0;
+    const swap = async () => {
+      if (swapped) return;
+      await NodeFS.promises.rename(bucket, parked);
+      await NodeFS.promises.symlink(outside, bucket);
+      swapped = true;
+      substitutions++;
+    };
+    const restore = async () => {
+      if (!swapped) return;
+      await NodeFS.promises.unlink(bucket);
+      await NodeFS.promises.rename(parked, bucket);
+      swapped = false;
+    };
+    using _lstat = vi.spyOn(NodeFS.promises, "lstat").mockImplementation(async (...args) => {
+      if (
+        String(args[0]) === `${h.directory}/session.json` ||
+        String(args[0]) === `${h.directory}/messages.jsonl`
+      )
+        await swap();
+      if (
+        String(args[0]).startsWith("/proc/self/fd/") &&
+        String(args[0]).endsWith("/" + NodePath.basename(bucket))
+      )
+        await restore();
+      return lstat(...args);
+    });
+    using _realpath = vi.spyOn(NodeFS.promises, "realpath").mockImplementation(async (...args) => {
+      if (String(args[0]).startsWith(h.directory)) await restore();
+      return realpath(...args);
+    });
+    using _open = vi.spyOn(NodeFS.promises, "open").mockImplementation(async (...args) => {
+      if (
+        String(args[0]).startsWith("/proc/self/fd/") &&
+        (String(args[0]).endsWith("/session.json") || String(args[0]).endsWith("/messages.jsonl"))
+      )
+        await swap();
+      return open(...args);
+    });
+    NodeModule.syncBuiltinESMExports();
+    const result = yield* h.capture.pipe(
+      Effect.result,
+      Effect.ensuring(Effect.promise(restore)),
+      Effect.ensuring(
+        Effect.sync(() => {
+          _open.mockRestore();
+          _realpath.mockRestore();
+          _lstat.mockRestore();
+          NodeModule.syncBuiltinESMExports();
+        }),
+      ),
+    );
+    assert.isAbove(substitutions, 0);
+    assert.isFalse(JSON.stringify(result).includes("OUTSIDE MARKER"));
+    if (result._tag === "Success")
+      assert.deepEqual(
+        result.success.rows.filter((row) => row.text !== undefined).map((row) => row.text),
+        ["CLI request", "A thought", "CLI response"],
+      );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect(
+  "binds captures to native ancestor identity even when retained rows are byte-identical",
+  () =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const before = yield* h.capture;
+      yield* h.fs.rename(h.directory, h.directory + "-retired");
+      yield* h.fs.makeDirectory(h.directory);
+      yield* h.fs.writeFileString(`${h.directory}/session.json`, JSON.stringify(h.metadata));
+      yield* h.write();
+      const after = yield* h.capture;
+      assert.notEqual(after.source, before.source);
+      assert.deepEqual(after.rows, before.rows);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each(["darwin", "win32"] as const)(
+  "refuses capture without a descriptor-beneath primitive on %s",
+  (platform) =>
+    Effect.gen(function* () {
+      const h = yield* fixture();
+      const reader = yield* makeKiroNativeHistory({ HOME: h.home, KIRO_HOME: h.native }).pipe(
+        Effect.provideService(HostProcess.Platform, platform),
+      );
+      assert.equal(
+        (yield* reader.capture({ cwd: h.cwd, nativeId: h.nativeId }).pipe(Effect.flip)).status,
+        "unsupported",
+      );
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );
 

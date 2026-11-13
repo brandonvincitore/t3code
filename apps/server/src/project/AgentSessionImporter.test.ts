@@ -1285,6 +1285,126 @@ it.effect(
     }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
 
+it.effect.each(["legacy", "receipt", "receipt unstarted", "unstarted", "uncertain"] as const)(
+  "does not reimport a T3 cancelled native input: %s",
+  (kind) =>
+    Effect.gen(function* () {
+      const h = yield* setupKiroSync(true);
+      if (kind.startsWith("receipt")) yield* h.importer.syncNativeHistory(h.input);
+      const records = yield* h.projections.getThreadRecords(h.input.threadId, [
+        "runs",
+        "providerTurns",
+        "attempts",
+      ]);
+      const run = records.runs[0]!;
+      const turn = records.providerTurns[0]!;
+      const attempt = records.attempts[0]!;
+      const later = kind.startsWith("receipt");
+      const runId = later ? RunId.make("cancelled-run") : run.id;
+      const attemptId = later ? RunAttemptId.make("cancelled-attempt") : attempt.id;
+      const turnId = later ? ProviderTurnId.make("cancelled-turn") : turn.id;
+      const nativeUser = later ? "cancelled-user" : "anchored-user";
+      yield* h.sink.write({
+        events: [
+          {
+            id: EventId.make("cancel-run"),
+            type: "run.updated",
+            threadId: h.input.threadId,
+            occurredAt: now,
+            payload: {
+              ...run,
+              id: runId,
+              ordinal: later ? 2 : 1,
+              activeAttemptId: attemptId,
+              status: "cancelled",
+              startedAt: kind.endsWith("unstarted") ? null : now,
+            },
+          },
+          {
+            id: EventId.make("cancel-attempt"),
+            type: "run-attempt.updated",
+            threadId: h.input.threadId,
+            occurredAt: now,
+            payload: { ...attempt, id: attemptId, runId, providerTurnId: turnId },
+          },
+          {
+            id: EventId.make("cancel-turn"),
+            type: "provider-turn.updated",
+            threadId: h.input.threadId,
+            occurredAt: now,
+            payload: {
+              ...turn,
+              id: turnId,
+              ordinal: later ? 2 : 1,
+              runAttemptId: attemptId,
+              status: kind === "uncertain" ? "interrupted" : "completed",
+              nativeTurnRef: { ...turn.nativeTurnRef!, nativeId: nativeUser },
+            },
+          },
+        ],
+      });
+      if (later)
+        h.state.capture = {
+          ...h.capture,
+          identity: "after-cancel",
+          rows: [
+            ...h.capture.rows,
+            ...(kind === "receipt unstarted"
+              ? []
+              : ([
+                  {
+                    id: nativeUser,
+                    digest: nativeUser,
+                    timestamp,
+                    kind: "user",
+                    text: "Already delivered cancelled input",
+                    userRowId: nativeUser,
+                  },
+                  {
+                    id: "cancelled-end",
+                    digest: "cancelled-end",
+                    timestamp,
+                    kind: "control",
+                    boundary: "end",
+                    userRowId: nativeUser,
+                  },
+                ] as const)),
+            {
+              id: "later-external",
+              digest: "later-external",
+              timestamp,
+              kind: "user",
+              text: "External after cancel",
+              userRowId: "later-external",
+            },
+            {
+              id: "later-end",
+              digest: "later-end",
+              timestamp,
+              kind: "control",
+              boundary: "end",
+              userRowId: "later-external",
+            },
+          ],
+        };
+      const result = yield* h.importer.syncNativeHistory(h.input);
+      expect(result.status).toBe(
+        kind === "unstarted" || kind === "uncertain" ? "ambiguous" : "synced",
+      );
+      if (result.status === "synced") {
+        expect(result.addedItems).toBe(later ? 1 : 3);
+        expect(
+          (yield* h.read()).messages.filter((message) => message.text === "Earlier T3 prompt"),
+        ).toHaveLength(1);
+        expect(
+          (yield* h.read()).messages.some(
+            (message) => message.text === "Already delivered cancelled input",
+          ),
+        ).toBe(false);
+      }
+    }).pipe(Effect.scoped, Effect.provide(persistence)),
+);
+
 it.effect.each([
   "unanchored",
   "unsupported",
@@ -1300,7 +1420,7 @@ it.effect.each([
   "cwd replacement",
   "busy",
   "unstable",
-] as const)("keeps receipts and timeline unchanged on %s sync", (kind) =>
+] as const)("keeps the timeline unchanged and receipts bound to their owner on %s sync", (kind) =>
   Effect.gen(function* () {
     const h = yield* setupKiroSync(kind === "unanchored");
     if (kind !== "unanchored") yield* h.importer.syncNativeHistory(h.input);
@@ -1443,7 +1563,11 @@ it.effect.each([
     const after = yield* h.read();
     expect(after.messages).toEqual(before.messages);
     expect(after.providerThreads[0]?.nativeMetadata).toEqual(
-      before.providerThreads[0]?.nativeMetadata,
+      ["unsupported", "native replacement", "provider replacement", "driver replacement"].includes(
+        kind,
+      )
+        ? {}
+        : before.providerThreads[0]?.nativeMetadata,
     );
   }).pipe(Effect.scoped, Effect.provide(persistence)),
 );
@@ -1468,8 +1592,12 @@ it.live(
       fs.mkdirSync(directory, { recursive: true }); fs.mkdirSync(path.join(root,'session-leases'), {recursive:true});
       const at = '2026-11-13T00:00:00.000Z';
       fs.writeFileSync(path.join(directory,'session.json'),JSON.stringify({schemaVersion:'1.0.0',id,workspacePaths:[cwd],createdAt:at,lastModifiedAt:at}));
-      const rows = [{id:'writer-user',timestamp:at,payload:{type:'user',content:'Synthetic CLI request'}},
-        {id:'writer-answer',timestamp:at,payload:{type:'assistant',operationType:'Say',content:'Synthetic CLI answer'}},
+      const rows = [{id:'writer-user',timestamp:at,payload:{type:'user',content:'Synthetic CLI request',_meta:{kiro:{peerPromptGeneration:false,userMessageTag:'synthetic-tag'}}}},
+        {id:'writer-thought',timestamp:at,payload:{type:'assistant',operationType:'Reasoning',content:'Synthetic reasoning',_meta:{kiro:{}}}},
+        {id:'writer-answer',timestamp:at,payload:{type:'assistant',operationType:'Say',content:'Synthetic CLI answer',_meta:{kiro:{classifierApproved:true}}}},
+        {id:'writer-pending',timestamp:at,payload:{type:'pending_interaction',interactionType:'tool_approval',toolCallId:'synthetic-tool',question:'Private native approval',options:[],executionId:'synthetic-execution'}},
+        {id:'writer-resolved',timestamp:at,payload:{type:'interaction_resolved',toolCallId:'synthetic-tool',outcome:'approved',executionId:'synthetic-execution'}},
+        {id:'writer-memory',timestamp:at,payload:{type:'session_metadata',key:'memoryExposureMessage',value:'Private memory control',executionId:'synthetic-execution'}},
         {id:'writer-end',timestamp:at,payload:{type:'turn_end',stopReason:'end_turn'}}];
       fs.writeFileSync(path.join(directory,'messages.jsonl'),rows.map(row=>JSON.stringify(row)).join('\n')+'\n');
       fs.writeFileSync(path.join(root,'session-leases',id+'.lease'),'synthetic foreign lease');
@@ -1523,7 +1651,12 @@ it.live(
       // The fixture acts as the user releasing a lease; production never removes one.
       yield* fs.remove(lease);
       const synced = yield* importer.syncNativeHistory(input);
-      expect(synced).toMatchObject({ status: "synced", addedItems: 2 });
+      expect(synced).toMatchObject({ status: "synced", addedItems: 3 });
+      const reconstructed = yield* makeImporter([], Effect.void, () => Effect.succeed(adapter));
+      expect(yield* reconstructed.syncNativeHistory(input)).toMatchObject({
+        status: "synced",
+        addedItems: 0,
+      });
       expect(yield* importer.syncNativeHistory(input)).toMatchObject({
         status: "synced",
         addedItems: 0,
@@ -1533,9 +1666,57 @@ it.live(
         ["runs", "messages"],
       );
       expect(projection.runs).toHaveLength(0);
-      expect(projection.messages).toHaveLength(2);
+      expect(projection.messages.map((message) => message.text)).toEqual([
+        "Synthetic CLI request",
+        "Synthetic CLI answer",
+      ]);
+      const sourceState = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+        threadId,
+        ["providerThreads", "turnItems", "runtimeRequests"],
+      );
+      expect(sourceState.turnItems.map((item) => item.type)).toEqual([
+        "user_message",
+        "reasoning",
+        "assistant_message",
+      ]);
+      expect(sourceState.runtimeRequests).toHaveLength(0);
+      const bucket = (yield* fs.readDirectory(`${native}/sessions`))[0]!;
+      const transcriptFile = `${native}/sessions/${bucket}/pipe-proof/messages.jsonl`;
+      const saved = yield* fs.readFileString(transcriptFile);
+      const uncertain = [
+        {
+          id: "unknown-user",
+          timestamp: "2026-11-13T00:00:00.000Z",
+          payload: {
+            type: "user",
+            content: "NEVER VISIBLE",
+            _meta: { kiro: { unknownFraming: true } },
+          },
+        },
+        {
+          id: "unknown-end",
+          timestamp: "2026-11-13T00:00:00.000Z",
+          payload: { type: "turn_end", stopReason: "end_turn" },
+        },
+      ];
+      yield* fs.writeFileString(
+        transcriptFile,
+        saved + uncertain.map((row) => JSON.stringify(row)).join("\n") + "\n",
+      );
+      expect(yield* reconstructed.syncNativeHistory(input)).toMatchObject({
+        status: "unsupported",
+        addedItems: 0,
+      });
+      const afterUncertain = yield* (yield* ProjectionStore.ProjectionStoreV2).getThreadRecords(
+        threadId,
+        ["providerThreads", "turnItems"],
+      );
+      expect(afterUncertain.providerThreads[0]?.nativeMetadata?.nativeHistory).toEqual(
+        sourceState.providerThreads[0]?.nativeMetadata?.nativeHistory,
+      );
+      expect(afterUncertain.turnItems).toEqual(sourceState.turnItems);
       yield* Effect.logInfo(
-        "SYNTHETIC RUNTIME PROOF: Node pipe writer exited 0; lease blocked sync unchanged; fixture released lease; synced 2 items into same owner; repeat added 0; native open/load/model calls 0; fake runs 0.",
+        "SYNTHETIC RUNTIME PROOF: Node pipe writer exited 0; lease blocked sync unchanged; fixture released lease; synced 3 items including reasoning into same owner; repeat added 0; native open/load/model calls 0; fake runs 0.",
       );
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(persistence, NodeServices.layer))),
 );
