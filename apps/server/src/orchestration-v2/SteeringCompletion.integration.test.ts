@@ -628,18 +628,16 @@ const nextTurnSelectionHarness = Effect.fn("nextTurnSelectionHarness")(function*
                   (turn) =>
                     turnUpdated(turn, "interrupted").pipe(
                       Effect.andThen(
-                        nativeStart === undefined
-                          ? Effect.void
-                          : Queue.offer(events, {
-                              type: "turn.terminal",
-                              driver,
-                              providerThreadId: turn.providerThread.id,
-                              providerTurnId,
-                              runOrdinal: turn.runOrdinal,
-                              status: "interrupted",
-                              failure: null,
-                              threadDisposition: "reusable",
-                            }),
+                        Queue.offer(events, {
+                          type: "turn.terminal",
+                          driver,
+                          providerThreadId: turn.providerThread.id,
+                          providerTurnId,
+                          runOrdinal: turn.runOrdinal,
+                          status: "interrupted",
+                          failure: null,
+                          threadDisposition: "reusable",
+                        }),
                       ),
                     ),
                   { discard: true },
