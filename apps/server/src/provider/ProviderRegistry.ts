@@ -1080,22 +1080,27 @@ export const layer = Layer.effect(
         ? (instance.invalidateCaches ?? Effect.void).pipe(
             Effect.andThen(refreshInstance(input.instanceId)),
             Effect.andThen(Ref.get(providersRef)),
-            Effect.map((current) =>
-              workspaceSnapshotOf(
-                current.find((candidate) => candidate.instanceId === input.instanceId),
-              ),
-            ),
+            Effect.map((current) => {
+              const refreshed = current.find(
+                (candidate) => candidate.instanceId === input.instanceId,
+              );
+              return {
+                snapshot: workspaceSnapshotOf(refreshed),
+                revision: refreshed?.workspaceRevision,
+              };
+            }),
           )
-        : Effect.succeed(scannedFrom);
+        : Effect.succeed({ snapshot: scannedFrom, revision: provider.workspaceRevision });
       const runScan = refreshMachineSnapshot.pipe(
-        Effect.flatMap((scanBase) =>
+        Effect.flatMap(({ snapshot: scanBase, revision: scanRevision }) =>
           Effect.map(snapshotForCwd(input.scanCwd ?? input.cwd), (scopedSnapshot) => ({
             scanBase,
+            scanRevision,
             scopedSnapshot,
           })),
         ),
         // Scans fail on error; returned inventory remains valid even when provider health reports an error.
-        Effect.flatMap(({ scanBase, scopedSnapshot }) =>
+        Effect.flatMap(({ scanBase, scanRevision, scopedSnapshot }) =>
           instanceRegistry.getInstance(input.instanceId).pipe(
             Effect.flatMap((currentInstance) => {
               if (currentInstance !== instance) return Ref.get(providersRef);
@@ -1106,7 +1111,7 @@ export const layer = Layer.effect(
                 }
                 return currentProviders.map((candidate) =>
                   candidate.instanceId === input.instanceId &&
-                  candidate.workspaceRevision === provider.workspaceRevision &&
+                  candidate.workspaceRevision === scanRevision &&
                   Equal.equals(workspaceSnapshotOf(candidate), scanBase)
                     ? upsertProviderWorkspaceSnapshot(candidate, input.cwd, {
                         ...scopedSnapshot,

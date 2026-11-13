@@ -2481,6 +2481,7 @@ it.layer(
           models: [machineModel],
           slashCommands: [],
           skills: [],
+          workspaceRevision: 0,
         } as const satisfies ServerProvider;
         const machineProvider = yield* Ref.make<ServerProvider>(provider);
         const scanResult = yield* Ref.make<ProviderWorkspaceSnapshot>({
@@ -2488,6 +2489,9 @@ it.layer(
           slashCommandsPending: false,
           workspaceModelsPending: true,
         });
+        const scanStarted = yield* Deferred.make<void>();
+        const releaseScan = yield* Deferred.make<void>();
+        const scanGate = yield* Ref.make(Effect.void);
         const instance: ProviderInstance = {
           instanceId,
           driverKind: driver,
@@ -2510,7 +2514,8 @@ it.layer(
             streamChanges: Stream.empty,
             applyUsageLimits: () => Effect.void,
           },
-          snapshotForCwd: () => Ref.get(scanResult),
+          snapshotForCwd: () =>
+            Ref.get(scanResult).pipe(Effect.tap(() => Ref.get(scanGate).pipe(Effect.flatten))),
           orchestrationAdapter: {} as ProviderInstance["orchestrationAdapter"],
           textGeneration: {} as ProviderInstance["textGeneration"],
         };
@@ -2561,16 +2566,49 @@ it.layer(
           // A fresh refresh whose machine models change still publishes the folder read it ran.
           const addedModel = { ...machineModel, slug: "opencode/new", name: "New" };
           const nextWorkspaceModels = [machineModel, addedModel, projectModel];
-          yield* Ref.set(machineProvider, { ...provider, models: [machineModel, addedModel] });
+          yield* Ref.set(machineProvider, {
+            ...provider,
+            workspaceRevision: 1,
+            models: [machineModel, addedModel],
+          });
           yield* Ref.set(scanResult, {
             ...provider,
             slashCommandsPending: false,
             workspaceModels: nextWorkspaceModels,
+            workspaceRevision: 1,
           });
-          yield* registry.refreshWorkspaceSnapshot({ instanceId, cwd: "/project", fresh: true });
+          const refreshed = yield* registry.refreshWorkspaceSnapshot({
+            instanceId,
+            cwd: "/project",
+            fresh: true,
+          });
+          assert.deepStrictEqual(
+            refreshed[0]?.workspaceSnapshots?.[0]?.models,
+            nextWorkspaceModels,
+          );
           const rescanned = yield* workspaceOf;
           assert.deepStrictEqual(rescanned?.models, nextWorkspaceModels);
           assert.strictEqual(rescanned?.modelsPending, undefined);
+
+          yield* Ref.set(machineProvider, { ...provider, workspaceRevision: 2 });
+          yield* registry.refresh();
+          yield* Ref.update(scanResult, (snapshot) => ({ ...snapshot, workspaceRevision: 2 }));
+          yield* Ref.set(
+            scanGate,
+            Deferred.succeed(scanStarted, undefined).pipe(
+              Effect.andThen(Deferred.await(releaseScan)),
+            ),
+          );
+          const held = yield* registry
+            .refreshWorkspaceSnapshot({ instanceId, cwd: "/project", fresh: true })
+            .pipe(Effect.forkChild);
+          yield* Deferred.await(scanStarted);
+          yield* Ref.set(machineProvider, { ...provider, workspaceRevision: 3 });
+          yield* registry.refresh();
+          assert.strictEqual((yield* registry.getProviders)[0]?.workspaceRevision, 3);
+          yield* Deferred.succeed(releaseScan, undefined);
+          assert.deepStrictEqual((yield* Fiber.join(held))[0]?.workspaceSnapshots, []);
+          assert.strictEqual(yield* workspaceOf, undefined);
         }).pipe(Effect.provide(runtimeServices));
       }),
     );
