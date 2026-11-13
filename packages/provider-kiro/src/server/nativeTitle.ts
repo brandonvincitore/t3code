@@ -53,7 +53,7 @@ export const initializeKiroThreadTitle = Effect.fn("Kiro.initializeThreadTitle")
   observedTitle,
   onRenaming,
 }: Parameters<NonNullable<AcpAdapterV2Flavor["initializeThreadTitle"]>>[0] & {
-  readonly onRenaming?: (title: string) => Effect.Effect<void>;
+  readonly onRenaming?: (title: string) => Effect.Effect<boolean, AcpErrors.AcpError>;
 }) {
   const methods = Option.getOrUndefined(
     decodeMethods(session.initializeResult.agentCapabilities?._meta),
@@ -79,7 +79,7 @@ export const initializeKiroThreadTitle = Effect.fn("Kiro.initializeThreadTitle")
     return;
   const title = normalizeTitle(turn.appThread.title);
   if (title === undefined) return;
-  yield* onRenaming?.(title) ?? Effect.void;
+  if (onRenaming && !(yield* onRenaming(title))) return;
   const result = yield* runtime
     .request("_kiro/session/rename", {
       sessionId: session.sessionId,
@@ -416,13 +416,19 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
     yield* lock.withPermit(
       Effect.gen(function* () {
         const filePath = yield* location(input.turn.appThread, input.turn.providerThread);
-        if (owner.retired || (yield* readReceipt(filePath))?.owned === false) return;
+        const receipt = yield* readReceipt(filePath);
+        if (owner.retired || receipt?.owned === false) return;
         const title = yield* initializeKiroThreadTitle({
           ...input,
-          onRenaming: (title) =>
-            Effect.sync(() => {
-              owner.pending = title;
-            }),
+          onRenaming: Effect.fn("KiroNativeTitles.admitInitialRename")(function* (title: string) {
+            if (owner.retired || owner.unverified?.trim()) {
+              yield* retire(filePath, owner);
+              return false;
+            }
+            owner.unverified = undefined;
+            owner.pending = title;
+            return true;
+          }),
         });
         if (!title || input.turn.appThread.titleManuallySet === true) return;
         const source = yield* readRecord(input.runtime, input.session.sessionId);

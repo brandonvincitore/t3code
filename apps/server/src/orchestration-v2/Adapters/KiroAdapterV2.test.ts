@@ -52,6 +52,7 @@ import {
   refusedBeforePrompt,
 } from "@t3tools/provider-core/server/failure";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
   type ProviderAdapterV2Error,
@@ -1194,16 +1195,77 @@ it.effect.each(["CLI manual name", "New Session"] as const)(
 );
 
 it.live.each([
-  { renameOutcome: "confirmed", observation: "live" },
-  { renameOutcome: "confirmed", observation: "aba" },
-  { renameOutcome: "rejected", observation: "aba" },
+  {
+    renameOutcome: "confirmed",
+    observation: "live",
+    admission: "ordinary",
+    initialObservation: undefined,
+  },
+  {
+    renameOutcome: "confirmed",
+    observation: "aba",
+    admission: "ordinary",
+    initialObservation: undefined,
+  },
+  {
+    renameOutcome: "rejected",
+    observation: "aba",
+    admission: "ordinary",
+    initialObservation: undefined,
+  },
+  {
+    renameOutcome: "confirmed",
+    observation: "aba",
+    admission: "manual",
+    initialObservation: "Native manual name before first rename",
+  },
+  { renameOutcome: "confirmed", observation: "aba", admission: "null", initialObservation: null },
+  { renameOutcome: "confirmed", observation: "aba", admission: "empty", initialObservation: "" },
+  {
+    renameOutcome: "confirmed",
+    observation: "aba",
+    admission: "whitespace",
+    initialObservation: " \t ",
+  },
 ] as const)(
-  "initial native title persists through list, CLI manual rename and process reload: $renameOutcome/$observation",
-  ({ renameOutcome, observation }) =>
+  "initial native title persists through list, CLI manual rename and process reload: $renameOutcome/$observation/$admission",
+  ({ renameOutcome, observation, admission, initialObservation }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-title-persistence-" });
+      const host = yield* ProviderHost.ProviderHost;
+      const receiptDirectory = path.join(host.paths.stateDir, "kiro-native-title-v1");
+      const lookupEntered = yield* Deferred.make<void>();
+      const releaseLookup = yield* Deferred.make<void>();
+      const milestones: string[] = [];
+      let holdFirstLookup = initialObservation !== undefined;
+      const titleFileSystem = {
+        ...fs,
+        lstat: (filePath: string) => {
+          const read = fs.lstat(filePath);
+          if (!holdFirstLookup || path.dirname(filePath) !== receiptDirectory) return read;
+          holdFirstLookup = false;
+          milestones.push("first initial receipt lookup held");
+          return Deferred.succeed(lookupEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(releaseLookup)),
+            Effect.andThen(read),
+          );
+        },
+      };
+      const observationUpdatedAt = "2026-11-13T01:00:00.000Z";
+      const normalizedInitial =
+        initialObservation === null ? null : initialObservation?.trim() || undefined;
+      const meaningfulInitial =
+        typeof initialObservation === "string" && initialObservation.trim().length > 0;
+      const ownsTitle = renameOutcome === "confirmed" && !meaningfulInitial;
+      const evidenceDir = Option.getOrUndefined(
+        yield* Config.option(Config.String("T3_KIRO_TITLE_TEST_EVIDENCE_DIR")),
+      );
+      const outcomeDir =
+        evidenceDir === undefined
+          ? undefined
+          : path.join(evidenceDir, `${renameOutcome}-${observation}-${admission}`);
       const script = path.join(root, "peer.mjs");
       const digest = yield* Digest.Digest;
       const bucket = Hex.encode(
@@ -1281,7 +1343,8 @@ createInterface({ input: process.stdin }).on('line', line => {
   } else if (method === 'session/load') {
     result = { _meta: { source: 'local', title: read().title, titleSetByUser:read().titleSetByUser }, configOptions: [] };
   } else if (method === '_fixture/observe-title') {
-    reply({method:'session/update',params:{sessionId:params.sessionId ?? sessionId,update:{sessionUpdate:'session_info_update',title:params.title}}});
+    if (params.persist) save({ ...read(), title:params.title, titleSetByUser:true });
+    reply({method:'session/update',params:{sessionId:params.sessionId ?? sessionId,update:{sessionUpdate:'session_info_update',title:params.title,...(params.updatedAt ? {updatedAt:params.updatedAt} : {})}}});
   } else if (method === '_fixture/user-rename') {
     save({ ...read(), title: 'CLI deliberate name', titleSetByUser: true });
   }
@@ -1325,7 +1388,7 @@ createInterface({ input: process.stdin }).on('line', line => {
               }),
             ),
           ),
-      });
+      }).pipe(Effect.provideService(FileSystem.FileSystem, titleFileSystem));
       const now = yield* DateTime.now;
       for (const reloaded of [false, true]) {
         yield* Effect.gen(function* () {
@@ -1353,14 +1416,78 @@ createInterface({ input: process.stdin }).on('line', line => {
               ordinal,
               messageText: "Fix login\nDetails",
             });
-            return session.startTurn({ ...turn, appThread: { ...turn.appThread, title } }).pipe(
-              Effect.andThen(collectTurn(session.events)),
-              Effect.tap((events) =>
-                Effect.sync(() => assert.equal(terminalStatus(events), "completed")),
-              ),
-            );
+            return Effect.gen(function* () {
+              const start = session.startTurn({ ...turn, appThread: { ...turn.appThread, title } });
+              if (!reloaded && ordinal === 1 && initialObservation !== undefined) {
+                const starting = yield* start.pipe(Effect.forkScoped);
+                yield* Effect.gen(function* () {
+                  yield* Deferred.await(lookupEntered);
+                  yield* request("_fixture/observe-title", {
+                    title: initialObservation,
+                    persist: meaningfulInitial,
+                    updatedAt: observationUpdatedAt,
+                  });
+                  const admitted = yield* session.events.pipe(
+                    Stream.filter(
+                      (event) =>
+                        event.type === "provider_thread.updated" &&
+                        event.providerThread.nativeThreadRef?.nativeId === "native-fresh-root" &&
+                        event.providerThread.nativeMetadata?.updatedAt === observationUpdatedAt &&
+                        event.providerThread.nativeMetadata?.title === normalizedInitial,
+                    ),
+                    Stream.runHead,
+                  );
+                  assert.isTrue(Option.isSome(admitted));
+                  milestones.push(
+                    "native session info processed; admitted title observer or normalized empty completed",
+                  );
+                }).pipe(Effect.ensuring(Deferred.succeed(releaseLookup, undefined)));
+                milestones.push("first initial receipt lookup released");
+                yield* Fiber.join(starting);
+              } else yield* start;
+              assert.equal(terminalStatus(yield* collectTurn(session.events)), "completed");
+            });
           };
           yield* send(1, reloaded ? "Different T3 title" : "Fix login");
+          if (!reloaded && initialObservation !== undefined) {
+            milestones.push("first turn completed");
+            const receiptFiles = (yield* fs.exists(receiptDirectory))
+              ? yield* fs.readDirectory(receiptDirectory)
+              : [];
+            const receipts = yield* Effect.forEach(receiptFiles, (name) =>
+              fs
+                .readFileString(path.join(receiptDirectory, name))
+                .pipe(Effect.map((raw) => JSON.parse(raw))),
+            );
+            const firstWire = (yield* fs.readFileString(wirePath))
+              .trim()
+              .split("\n")
+              .map((line) => JSON.parse(line));
+            const admissionState = {
+              nativeRenames: firstWire.filter((row) => row.method === "_kiro/session/rename")
+                .length,
+              ownedReceipts: receipts.filter((receipt) => receipt.owned === true).length,
+            };
+            if (outcomeDir !== undefined) {
+              yield* fs.makeDirectory(outcomeDir, { recursive: true });
+              yield* fs.copyFile(wirePath, path.join(outcomeDir, "first-turn-wire.jsonl"));
+              yield* fs.copyFile(statePath, path.join(outcomeDir, "first-turn-native-state.json"));
+              yield* fs.writeFileString(
+                path.join(outcomeDir, "initial-admission.json"),
+                JSON.stringify(
+                  { initialObservation, milestones, admissionState, receipts },
+                  null,
+                  2,
+                ),
+              );
+            }
+            assert.deepEqual(
+              admissionState,
+              meaningfulInitial
+                ? { nativeRenames: 0, ownedReceipts: 0 }
+                : { nativeRenames: 1, ownedReceipts: 1 },
+            );
+          }
           const list = yield* request("session/list", {});
           assert.deepEqual(list, {
             sessions: [
@@ -1369,16 +1496,18 @@ createInterface({ input: process.stdin }).on('line', line => {
                 cwd: root,
                 title: reloaded
                   ? "CLI deliberate name"
-                  : renameOutcome === "confirmed"
-                    ? "Fix login"
-                    : "Framework/setup-derived fallback",
+                  : meaningfulInitial
+                    ? initialObservation
+                    : ownsTitle
+                      ? "Fix login"
+                      : "Framework/setup-derived fallback",
               },
             ],
           });
           if (!reloaded) {
             const first = JSON.parse(yield* fs.readFileString(statePath));
-            assert.equal(first.titleSetByUser === true, renameOutcome === "confirmed");
-            assert.equal(first.titleModelAttempts, renameOutcome === "confirmed" ? 0 : 1);
+            assert.equal(first.titleSetByUser === true, ownsTitle || meaningfulInitial);
+            assert.equal(first.titleModelAttempts, ownsTitle || meaningfulInitial ? 0 : 1);
             const generated = makeTurnInput({
               threadId,
               providerThread,
@@ -1396,9 +1525,11 @@ createInterface({ input: process.stdin }).on('line', line => {
             const afterGenerated = JSON.parse(yield* fs.readFileString(statePath));
             assert.equal(
               afterGenerated.title,
-              renameOutcome === "confirmed"
-                ? "Later generated T3 title"
-                : "Framework/setup-derived fallback",
+              meaningfulInitial
+                ? initialObservation
+                : ownsTitle
+                  ? "Later generated T3 title"
+                  : "Framework/setup-derived fallback",
             );
             const observe = (title: string) =>
               request("_fixture/observe-title", { title }).pipe(
@@ -1442,30 +1573,39 @@ createInterface({ input: process.stdin }).on('line', line => {
       assert.equal(saved.title, "CLI deliberate name");
       assert.equal(saved.titleSetByUser, true);
       assert.equal(saved.promptCount, 4);
-      assert.equal(saved.titleModelAttempts, renameOutcome === "confirmed" ? 0 : 1);
+      assert.equal(saved.titleModelAttempts, ownsTitle || meaningfulInitial ? 0 : 1);
       const firstPrompt = wire.findIndex((event) => event.method === "session/prompt");
       const persisted = wire.findIndex((event) => event.method === "fixture/title-persisted");
       const confirmed = wire.findIndex(
         (event) => event.direction === "peer" && event.result?.success === true,
       );
-      if (renameOutcome === "confirmed") {
+      if (ownsTitle) {
         assert.isTrue(persisted >= 0 && confirmed > persisted && firstPrompt > confirmed);
         assert.isFalse(wire.some((event) => event.method === "fixture/title-model-attempt"));
       } else {
         assert.equal(persisted, -1);
         assert.equal(confirmed, -1);
-        assert.isTrue(
+        assert.equal(
           wire.some((event) => event.direction === "peer" && event.error?.code === -32603),
+          renameOutcome === "rejected",
         );
       }
       assert.deepEqual(
         wire.filter((event) => event.method === "_kiro/session/rename"),
         [
-          {
-            method: "_kiro/session/rename",
-            params: { sessionId: "native-fresh-root", title: "Fix login", sessionSource: "local" },
-          },
-          ...(renameOutcome === "confirmed"
+          ...(meaningfulInitial
+            ? []
+            : [
+                {
+                  method: "_kiro/session/rename",
+                  params: {
+                    sessionId: "native-fresh-root",
+                    title: "Fix login",
+                    sessionSource: "local",
+                  },
+                },
+              ]),
+          ...(ownsTitle
             ? [
                 {
                   method: "_kiro/session/rename",
@@ -1487,11 +1627,7 @@ createInterface({ input: process.stdin }).on('line', line => {
           ),
       );
       yield* Effect.logInfo("Synthetic native title persistence evidence", { saved, wire });
-      const evidenceDir = Option.getOrUndefined(
-        yield* Config.option(Config.String("T3_KIRO_TITLE_TEST_EVIDENCE_DIR")),
-      );
-      if (evidenceDir) {
-        const outcomeDir = path.join(evidenceDir, renameOutcome);
+      if (outcomeDir !== undefined) {
         yield* fs.makeDirectory(outcomeDir, { recursive: true });
         for (const [source, name] of [
           [script, "synthetic-peer.mjs"],
