@@ -1000,7 +1000,8 @@ it.layer(
       );
       assert.strictEqual(withoutModels.workspaceSnapshots?.[0]?.models, undefined);
 
-      const { optionDescriptors, workspaceModels, ...failedSnapshot } = scopedSnapshot;
+      const { optionDescriptors, workspaceModels, ...withoutDiscovery } = scopedSnapshot;
+      const failedSnapshot = { ...withoutDiscovery, workspaceModelsPending: true };
       const firstFailure = ProviderRegistry.upsertProviderWorkspaceSnapshot(
         provider,
         "/project",

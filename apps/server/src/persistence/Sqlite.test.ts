@@ -321,7 +321,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI database own
         const { dbPath } = yield* ServerConfig.ServerConfig;
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
-          yield* sql`ALTER TABLE scheduled_tasks RENAME TO migration_probe_tasks`;
+          yield* sql`ALTER TABLE orchestration_v2_projection_turn_items RENAME TO migration_probe_items`;
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
         const failed = yield* Effect.void.pipe(
           Effect.provide(SqlitePersistence.layerCliConfig),
@@ -334,7 +334,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI database own
             readonly id: number;
           }>`SELECT MAX(migration_id) AS id FROM effect_sql_migrations`;
           assert.equal(rows[0]?.id, Math.max(...migrationManifest.map(([id]) => id)) - 1);
-          yield* sql`ALTER TABLE migration_probe_tasks RENAME TO scheduled_tasks`;
+          yield* sql`ALTER TABLE migration_probe_items RENAME TO orchestration_v2_projection_turn_items`;
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
         yield* Effect.void.pipe(Effect.provide(SqlitePersistence.layerCliConfig));
         const acquired = yield* Deferred.make<void>();

@@ -1119,31 +1119,31 @@ describe("AcpRuntimeModel", () => {
       meta: { source: "agent" },
     });
     expect(patchCompaction({ status: "completed", summary: null, _meta: null })).toEqual({
-      summary: null,
-      meta: null,
+      summary: undefined,
+      meta: undefined,
     });
     expect(patchCompaction({ status: "completed", summary: kept })).toEqual({
       summary: "Kept the plan.",
-      meta: null,
+      meta: undefined,
     });
     expect(patchCompaction({ status: "completed", summary: [] })).toEqual({
-      summary: null,
-      meta: null,
+      summary: undefined,
+      meta: undefined,
     });
     expect(patchCompaction({ status: "failed", error: "Context is still too large." })).toEqual({
-      summary: null,
+      summary: undefined,
       error: "Context is still too large.",
-      meta: null,
+      meta: undefined,
     });
     expect(patchCompaction({ status: "failed" })).toEqual({
-      summary: null,
+      summary: undefined,
       error: "Context is still too large.",
-      meta: null,
+      meta: undefined,
     });
     expect(patchCompaction({ status: "failed", error: null })).toEqual({
-      summary: null,
-      error: null,
-      meta: null,
+      summary: undefined,
+      error: undefined,
+      meta: undefined,
     });
   });
 

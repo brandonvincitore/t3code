@@ -2047,7 +2047,25 @@ it.effect.each([
                     });
                   }),
                 steerTurn: () => Effect.die("unused"),
-                interruptTurn: (interrupt) => Effect.sync(() => interrupted.push(interrupt)),
+                interruptTurn: (interrupt) =>
+                  Effect.gen(function* () {
+                    interrupted.push(interrupt);
+                    const turn = started.find(
+                      (turn) =>
+                        ProviderTurnId.make(`provider-turn:${turn.attemptId}`) ===
+                        interrupt.providerTurnId,
+                    )!;
+                    yield* Queue.offer(events, {
+                      type: "turn.terminal",
+                      driver,
+                      providerThreadId: turn.providerThread.id,
+                      providerTurnId: interrupt.providerTurnId,
+                      runOrdinal: turn.runOrdinal,
+                      status: "interrupted",
+                      failure: null,
+                      threadDisposition: "reusable",
+                    });
+                  }),
                 respondToRuntimeRequest: () => Effect.die("unused"),
                 readThreadSnapshot: () => Effect.die("unused"),
                 rollbackThread: () => Effect.die("unused"),
@@ -2151,7 +2169,7 @@ it.effect.each([
           );
           assert.equal(
             opened,
-            switchesInstance || freshContext ? 2 : 1,
+            switchesInstance || freshContext || !startedBeforeRelease ? 2 : 1,
             "Force stop tore down the session the follow-up was promoted onto",
           );
           const [stopped, followUp] = [started[0]!, started[1]!];
@@ -2177,7 +2195,7 @@ it.effect.each([
             "Force stop detached the thread the follow-up runs on as if its session were shared",
           );
 
-          // The first run's provider never confirms the stop; the follow-up's turn ends normally.
+          // A same-native follow-up starts only after the old turn confirms cancellation.
           yield* Queue.offer(eventQueues.get(providerSessionId)!, {
             type: "turn.terminal",
             driver,
@@ -2192,7 +2210,7 @@ it.effect.each([
           yield* TestClock.adjust("31 minutes");
           assert.isFalse(
             yield* sessions.isLive(providerSessionId),
-            "the stopped run's unconfirmed turn kept the session from going idle",
+            "the completed follow-up kept the session from going idle",
           );
         }).pipe(Effect.provide(layerLive));
       }),
