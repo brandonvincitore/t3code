@@ -666,20 +666,30 @@ it.effect.each([
               Effect.ensuring(Deferred.succeed(ingestionExited, undefined)),
             );
           }
-          const hold =
-            scenario === "pending-ingestion" &&
-            input.events.some(
-              (event) =>
-                event.type === "provider-turn.updated" && event.payload.status === "running",
-            );
-          return (
-            hold
-              ? Deferred.succeed(ingestionHeld, undefined).pipe(
-                  Effect.andThen(Deferred.await(releaseIngestion)),
-                )
-              : Effect.void
-          ).pipe(Effect.andThen(originalWrite(input)));
+          return originalWrite(input);
         });
+        const originalConsume = sink.consumeProviderEvents;
+        using _pendingIngestion =
+          scenario === "pending-ingestion"
+            ? vi
+                .spyOn(sink, "consumeProviderEvents")
+                .mockImplementation((source, ...args) =>
+                  originalConsume(
+                    source.pipe(
+                      Stream.tap((event) =>
+                        event.type === "provider_turn.updated" &&
+                        "providerTurn" in event &&
+                        event.providerTurn === active
+                          ? Deferred.succeed(ingestionHeld, undefined).pipe(
+                              Effect.andThen(Deferred.await(releaseIngestion)),
+                            )
+                          : Effect.void,
+                      ),
+                    ),
+                    ...args,
+                  ),
+                )
+            : undefined;
         yield* send("first");
         if (handoff) {
           const pending = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
@@ -1445,10 +1455,11 @@ it.effect.each([
         if (!startPending) {
           yield* Fiber.join(startup);
           milestones.push("start-returned");
-          yield* Fiber.join(accepted);
-        } else if (scenario === "pending-ingestion") yield* Deferred.await(ingestionHeld);
+        }
         yield* Deferred.succeed(releaseSnapshot, undefined);
         yield* Fiber.join(stop);
+        if (!startPending) yield* Fiber.join(accepted);
+        else if (scenario === "pending-ingestion") yield* Deferred.await(ingestionHeld);
         milestones.push(`stop-request:${run.id}`);
         if (scenario === "pending-ingestion")
           yield* orchestrator.dispatch({

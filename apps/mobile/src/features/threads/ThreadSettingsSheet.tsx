@@ -1389,7 +1389,7 @@ export function ExistingThreadSettingsRouteScreen({
     lockedProviderInstanceId,
     selectedThread.projectId,
     false,
-    selectedThread.worktreePath ?? selectedThreadProject?.workspaceRoot,
+    selectedThreadCwd,
   );
   const currentModelOption =
     modelOptions.find(

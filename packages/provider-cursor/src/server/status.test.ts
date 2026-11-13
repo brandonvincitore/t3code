@@ -1,12 +1,11 @@
 import * as Fiber from "effect/Fiber";
 import * as TestClock from "effect/testing/TestClock";
-import * as Deferred from "effect/Deferred";
 import type { SDKModel } from "@cursor/sdk";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
-import * as Fiber from "effect/Fiber";
+
 import * as Schema from "effect/Schema";
-import * as TestClock from "effect/testing/TestClock";
+
 import type { CursorSettings } from "../settings.ts";
 import { CursorSettings as CursorSettingsSchema } from "../settings.ts";
 import { createModelCapabilities } from "@t3tools/shared/model";

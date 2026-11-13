@@ -996,7 +996,16 @@ function makeLocalCommandHarness(input: {
             }),
         }),
         IdAllocator.layer,
-        Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({}),
+        Layer.mock(TurnItemPositionStore.TurnItemPositionStoreV2)({
+          allocate: ({ runOrdinal }) =>
+            Effect.sync(
+              () =>
+                Math.max(
+                  (runOrdinal ?? 0) * 1_000_000,
+                  ...projection.turnItems.map((item) => item.ordinal),
+                ) + 1,
+            ),
+        }),
         layerWorktreeLocation(input.worktreesDir),
         input.fileSystem === undefined
           ? FileSystem.layerNoop({ exists: () => Effect.succeed(true) })

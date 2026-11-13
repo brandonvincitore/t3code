@@ -3544,7 +3544,6 @@ export const layer = Layer.unwrap(
               // Handler-context reporters see only request defects, not server-wide defects.
               Layer.provide(DefectReporter.layer),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
-              Layer.provide(AgentSessionScanner.layer),
               Layer.provide(AcpRegistrySessions.layer),
               Layer.provide(KiroMemoryService.layer),
               Layer.provide(KiroPowersService.layer),

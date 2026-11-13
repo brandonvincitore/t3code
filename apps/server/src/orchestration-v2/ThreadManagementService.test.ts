@@ -986,7 +986,7 @@ it.effect(
           Deferred.makeUnsafe<void, Orchestrator.OrchestratorV2Error>(),
         ]),
       );
-      const layerTest = ThreadManagementService.layer.pipe(
+      const layerTest = layerThreadManagement.pipe(
         Layer.provide(Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({})),
         Layer.provide(
           Layer.mock(Orchestrator.OrchestratorV2)({

@@ -17,7 +17,6 @@ import {
   resolveProviderModelsForCwd,
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
-  resolveProvidersForCwd,
 } from "./providerSkills.ts";
 
 const provider = {

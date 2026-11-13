@@ -36,6 +36,7 @@ import { kiroWorkflowPreferenceDescriptor } from "./workflowPreferences.ts";
 import {
   AUTH_PROBE_TIMEOUT_MS,
   buildServerProvider,
+  COMPACT_SLASH_COMMAND,
   isCommandMissingCause,
   parseCliVersionResult,
   type ProviderProbeResult,

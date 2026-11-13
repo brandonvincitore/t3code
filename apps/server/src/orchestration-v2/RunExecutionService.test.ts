@@ -70,14 +70,16 @@ const layerRunExecution = RunExecutionService.layer.pipe(
 );
 const mockEventSink = (
   implementation: Partial<EventSink.EventSinkV2["Service"]>,
-  afterEvent: (event: ProviderAdapter.ProviderAdapterV2Event) => Effect.Effect<void> = () =>
-    Effect.void,
+  afterEvent: (event: unknown) => Effect.Effect<void> = () => Effect.void,
 ) =>
   Layer.mock(EventSink.EventSinkV2)({
     consumeProviderEvents: (source, process, after) =>
       source.pipe(
         Stream.mapEffect((event) =>
-          process(event).pipe(Effect.andThen(afterEvent(event)), Effect.andThen(after)),
+          process(event).pipe(
+            Effect.andThen(after),
+            Effect.tap(() => afterEvent(event)),
+          ),
         ),
         Stream.takeUntil(Boolean),
         Stream.runDrain,
@@ -2601,7 +2603,7 @@ it.effect("settles native subagents when a workspace handoff completes the root 
     const providerInstanceId = ProviderInstanceId.make("codex");
     const written = yield* Ref.make<ReadonlyArray<OrchestrationV2DomainEvent>>([]);
     const ingestionDone = yield* Deferred.make<void>();
-    const layerTest = RunExecutionService.layer.pipe(
+    const layerTest = layerRunExecution.pipe(
       Layer.provide(
         Layer.mergeAll(
           McpAppModelContext.layerEmpty,
@@ -2704,32 +2706,30 @@ it.effect("settles native subagents when a workspace handoff completes the root 
           },
         },
       });
+      yield* Deferred.await(ingestionDone);
+
+      const events = yield* Ref.get(written);
+      const statusOf = (type: OrchestrationV2DomainEvent["type"], id: string) =>
+        events.flatMap((event) => {
+          if (event.type !== type) return [];
+          const payload = (
+            event as { readonly payload: { readonly id: string; readonly status: string } }
+          ).payload;
+          return payload.id === id ? [payload.status] : [];
+        });
+      assert.deepEqual(statusOf("subagent.updated", runningSubagent.id), ["interrupted"]);
+      assert.deepEqual(statusOf("turn-item.updated", runningTurnItem.id), ["interrupted"]);
+      assert.deepEqual(statusOf("node.updated", runningNode.id), ["interrupted"]);
+      assert.deepEqual(statusOf("node.updated", runningChildNode.id), ["interrupted"]);
+      assert.deepEqual(statusOf("run.updated", ids.runId), ["waiting"]);
+      assert.deepEqual(statusOf("run-attempt.updated", ids.attemptId), ["completed"]);
+      assert.isFalse(
+        events.some(
+          (event) =>
+            event.type === "turn-item.updated" && event.payload.type === "run_interrupt_result",
+        ),
+      );
     }).pipe(Effect.provide(layerTest));
-
-    const closed = yield* Deferred.await(ingestionDone).pipe(Effect.timeoutOption("2 seconds"));
-    assert.isTrue(Option.isSome(closed), "settled children must end event ingestion");
-
-    const events = yield* Ref.get(written);
-    const statusOf = (type: OrchestrationV2DomainEvent["type"], id: string) =>
-      events.flatMap((event) => {
-        if (event.type !== type) return [];
-        const payload = (
-          event as { readonly payload: { readonly id: string; readonly status: string } }
-        ).payload;
-        return payload.id === id ? [payload.status] : [];
-      });
-    assert.deepEqual(statusOf("subagent.updated", runningSubagent.id), ["interrupted"]);
-    assert.deepEqual(statusOf("turn-item.updated", runningTurnItem.id), ["interrupted"]);
-    assert.deepEqual(statusOf("node.updated", runningNode.id), ["interrupted"]);
-    assert.deepEqual(statusOf("node.updated", runningChildNode.id), ["interrupted"]);
-    assert.deepEqual(statusOf("run.updated", ids.runId), ["waiting"]);
-    assert.deepEqual(statusOf("run-attempt.updated", ids.attemptId), ["completed"]);
-    assert.isFalse(
-      events.some(
-        (event) =>
-          event.type === "turn-item.updated" && event.payload.type === "run_interrupt_result",
-      ),
-    );
   }),
 );
 
@@ -3348,12 +3348,15 @@ it.effect.each([
               : []),
             rootTerminalEvent(ids, "completed"),
           ] satisfies ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>),
-          Stream.fromEffect(
-            Deferred.succeed(consumerWaiting, undefined).pipe(
-              Effect.andThen(Deferred.await(release)),
-            ),
-          ).pipe(Stream.drain),
+          Stream.fromEffect(Deferred.await(release)).pipe(Stream.drain),
         ),
+      afterEvent: (event) =>
+        typeof event === "object" &&
+        event !== null &&
+        "type" in event &&
+        event.type === "turn.terminal"
+          ? Deferred.succeed(consumerWaiting, undefined).pipe(Effect.asVoid)
+          : Effect.void,
       afterStart: (closed) =>
         Effect.gen(function* () {
           yield* Deferred.await(consumerWaiting);
@@ -3460,6 +3463,7 @@ function captureRootRunTermination(input: {
   readonly beforeTerminalWrite?: (
     request: Parameters<EventSink.EventSinkV2["Service"]["writeIfRunCurrent"]>[0],
   ) => Effect.Effect<boolean, EventSink.EventSinkV2Error>;
+  readonly afterEvent?: (event: unknown) => Effect.Effect<void>;
   readonly afterStart?: (
     closed: Deferred.Deferred<void>,
   ) => Effect.Effect<void, never, PreviewAgentActivity.PreviewAgentActivity>;
@@ -3502,39 +3506,48 @@ function captureRootRunTermination(input: {
           }),
           Layer.mock(CheckpointService.CheckpointServiceV2)({ captureBaseline: () => Effect.void }),
           layerTurnItemPositionsTest,
-          mockEventSink({
-            write: (payload) =>
-              Effect.gen(function* () {
-                for (const event of payload.events) {
-                  if (event.type === "turn-item.updated") {
-                    yield* captureTurnItem(event.payload);
+          mockEventSink(
+            {
+              write: (payload) =>
+                Effect.gen(function* () {
+                  for (const event of payload.events) {
+                    if (event.type === "turn-item.updated") {
+                      yield* captureTurnItem(event.payload);
+                    }
                   }
-                }
-                return [];
-              }),
-            writeWithEffects: (payload) =>
-              Effect.gen(function* () {
-                yield* Ref.update(submittedEffects, (current) => [...current, ...payload.effects]);
-                yield* Ref.update(committedEffects, (current) => [...current, ...payload.effects]);
-                yield* captureFinalEvents(payload.events);
-                return [];
-              }),
-            writeIfRunCurrent: (payload) =>
-              Effect.gen(function* () {
-                const effects = payload.effects ?? [];
-                yield* Ref.update(submittedEffects, (current) => [...current, ...effects]);
-                if (
-                  input.rejectTerminalWrite === true ||
-                  (input.beforeTerminalWrite !== undefined &&
-                    !(yield* input.beforeTerminalWrite(payload)))
-                ) {
-                  return { committed: false, storedEvents: [] };
-                }
-                yield* Ref.update(committedEffects, (current) => [...current, ...effects]);
-                yield* captureFinalEvents(payload.events);
-                return { committed: true, storedEvents: [] };
-              }),
-          }),
+                  return [];
+                }),
+              writeWithEffects: (payload) =>
+                Effect.gen(function* () {
+                  yield* Ref.update(submittedEffects, (current) => [
+                    ...current,
+                    ...payload.effects,
+                  ]);
+                  yield* Ref.update(committedEffects, (current) => [
+                    ...current,
+                    ...payload.effects,
+                  ]);
+                  yield* captureFinalEvents(payload.events);
+                  return [];
+                }),
+              writeIfRunCurrent: (payload) =>
+                Effect.gen(function* () {
+                  const effects = payload.effects ?? [];
+                  yield* Ref.update(submittedEffects, (current) => [...current, ...effects]);
+                  if (
+                    input.rejectTerminalWrite === true ||
+                    (input.beforeTerminalWrite !== undefined &&
+                      !(yield* input.beforeTerminalWrite(payload)))
+                  ) {
+                    return { committed: false, storedEvents: [] };
+                  }
+                  yield* Ref.update(committedEffects, (current) => [...current, ...effects]);
+                  yield* captureFinalEvents(payload.events);
+                  return { committed: true, storedEvents: [] };
+                }),
+            },
+            input.afterEvent,
+          ),
           IdAllocator.layer,
           ThreadCommandExecutor.layer,
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({

@@ -3333,7 +3333,10 @@ describe.each(["boolean", "select"] as const)("native Approve for Me %s contract
                     event.type === "turn_item.updated" &&
                     event.turnItem.type === "assistant_message" &&
                     event.turnItem.streaming
-                      ? Deferred.succeed(published, { raw: event, delivered: filter(event, 0) })
+                      ? Deferred.succeed(published, {
+                          raw: event,
+                          delivered: filter.filter(event, 0),
+                        })
                       : Effect.void,
                   ),
                 ),

@@ -36,11 +36,10 @@ import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
-import * as Queue from "effect/Queue";
+
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
 
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
@@ -62,7 +61,7 @@ import {
   makeProviderFailureTurnItem,
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
-import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
+
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
 import { userFacingDatabaseErrorMessage } from "./UserFacingErrors.ts";
 

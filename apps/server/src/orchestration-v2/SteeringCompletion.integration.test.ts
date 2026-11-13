@@ -1431,6 +1431,7 @@ it.effect.each(["complete", "stop-before-decline", "stop-after-decline", "queued
           Effect.void,
           true,
           undefined,
+          undefined,
           (turn) =>
             Effect.suspend(() => beforeDecline).pipe(
               Effect.andThen(
@@ -2841,6 +2842,7 @@ const goalHarness = Effect.fn("goalHarness")(function* (name: string, nativeGoal
     true,
     Effect.void,
     true,
+    undefined,
     nativeGoals,
   );
   const send = (id: string, text: string, delivery: "queue" | "auto", freshContext = false) =>
@@ -2998,33 +3000,20 @@ it.effect("starts a restart that stops the running turn ahead of an older held q
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
         const threadId = yield* startFirstTurn;
         yield* send("queued", "queued", "queue");
-        yield* orchestrator.dispatch({
-          type: "thread.stop",
-          commandId: CommandId.make("stop"),
-          threadId,
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const queued = projection.runs.find((run) => run.userMessageId === "message:queued")!;
+        // Keep native work running: an agent start after Stop deliberately stays behind the hold.
+        yield* (yield* EventSink.EventSinkV2).write({
+          events: [
+            {
+              id: EventId.make("older-queue-held"),
+              type: "run.updated",
+              threadId,
+              occurredAt: yield* DateTime.now,
+              payload: { ...queued, queueHeld: true },
+            },
+          ],
         });
-        yield* worker.drain();
-        const secondRunning = yield* orchestrator.streamDomainEvents.pipe(
-          Stream.filter(
-            (event) => event.type === "provider-turn.updated" && event.payload.status === "running",
-          ),
-          Stream.take(1),
-          Stream.runDrain,
-          Effect.forkScoped,
-        );
-        yield* orchestrator.dispatch({
-          type: "message.dispatch",
-          commandId: CommandId.make("second"),
-          threadId,
-          messageId: MessageId.make("message:second"),
-          text: "second",
-          attachments: [],
-          dispatchMode: { type: "start_immediately" },
-          createdBy: "agent",
-          creationSource: "mcp",
-        });
-        yield* worker.drain();
-        yield* Fiber.join(secondRunning);
         yield* orchestrator.dispatch({
           type: "message.dispatch",
           commandId: CommandId.make("restart"),
@@ -3032,7 +3021,7 @@ it.effect("starts a restart that stops the running turn ahead of an older held q
           messageId: MessageId.make("message:restart"),
           text: "do this instead",
           attachments: [],
-          dispatchMode: { type: "restart_active", targetRunId: started[1]!.runId },
+          dispatchMode: { type: "restart_active", targetRunId: started[0]!.runId },
           createdBy: "agent",
           creationSource: "mcp",
         });
@@ -3041,7 +3030,7 @@ it.effect("starts a restart that stops the running turn ahead of an older held q
         const { queue, started: startedTexts } = yield* read(threadId);
         assert.deepEqual(
           { queue, started: startedTexts },
-          { queue: ["queued"], started: ["first", "second", "do this instead"] },
+          { queue: ["queued"], started: ["first", "do this instead"] },
         );
       }).pipe(Effect.provide(layer));
     }),

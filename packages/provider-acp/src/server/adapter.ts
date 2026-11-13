@@ -153,7 +153,9 @@ const ACP_BUSY_PROMPT_RETRY_INTERVAL: Duration.Input = "1 second";
 
 // pi-agent-core agents (oh-my-pi) end a turn while background work runs and reject
 // prompts until it finishes; the prompt is resent rather than failing the turn.
-function isAgentBusyPromptError(error: EffectAcpErrors.AcpError): boolean {
+type AcpPromptError = EffectAcpErrors.AcpError | AcpSessionRuntime.AcpPromptAdmissionError;
+
+function isAgentBusyPromptError(error: AcpPromptError): boolean {
   return (
     error._tag === "AcpRequestError" && error.errorMessage.startsWith("Agent is already processing")
   );
@@ -161,8 +163,8 @@ function isAgentBusyPromptError(error: EffectAcpErrors.AcpError): boolean {
 
 function sendPromptWhenIdle<A>(
   turn: { readonly interrupted: boolean; readonly finalized: boolean },
-  prompt: () => Effect.Effect<A, EffectAcpErrors.AcpError>,
-): Effect.Effect<A, EffectAcpErrors.AcpError> {
+  prompt: () => Effect.Effect<A, AcpPromptError>,
+): Effect.Effect<A, AcpPromptError> {
   // A Stop can land during the wait, so the flags are rechecked before each resend.
   const stopped = () => turn.interrupted || turn.finalized;
   return prompt().pipe(
@@ -4035,7 +4037,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const nativeTaskId = previous?.task.nativeTaskRef?.nativeId ?? reportedTaskId;
             const childThreadId =
               previous?.childThreadId ??
-              idAllocator.derive.threadFromProviderThread({
+              idAllocator.derive.subagentThread({
                 driver,
                 providerInstanceId: entry.members.input.modelSelection.instanceId,
                 nativeThreadId: `${entry.members.nativeThreadId}:task:${nativeTaskId}`,

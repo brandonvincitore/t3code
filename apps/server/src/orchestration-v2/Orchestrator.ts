@@ -7130,6 +7130,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         ? latestRun
         : undefined;
     const sentByUserFromClient =
+      command.steerFollowUpOfRunId === undefined &&
       command.createdBy === "user" &&
       (command.creationSource === "web" || command.creationSource === "mobile") &&
       command.scheduledTaskId === undefined;

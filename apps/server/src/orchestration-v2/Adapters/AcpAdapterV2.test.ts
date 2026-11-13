@@ -913,8 +913,6 @@ const makeInstructionCompactionHarness = Effect.fnUntraced(function* (
     authorizationHeader: "Bearer instruction-compaction-token",
     browserToolsAvailable: true,
   });
-  type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
-  let sessionUpdate: Parameters<Runtime["handleSessionUpdate"]>[0] | undefined;
   let copilotSessionEvent:
     | ((event: unknown) => Effect.Effect<void, EffectAcpErrors.AcpError>)
     | undefined;

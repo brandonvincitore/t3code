@@ -126,20 +126,6 @@ export function resolveProviderModelsForCwd(
   return resolveProviderWorkspaceSnapshot(provider, cwd)?.models ?? provider.models;
 }
 
-export function resolveProvidersForCwd(
-  providers: ReadonlyArray<ServerProvider>,
-  cwd: string | null | undefined,
-): ReadonlyArray<ServerProvider> {
-  let changed = false;
-  const scoped = providers.map((provider) => {
-    const models = resolveProviderModelsForCwd(provider, cwd);
-    if (models === provider.models) return provider;
-    changed = true;
-    return { ...provider, models };
-  });
-  return changed ? scoped : providers;
-}
-
 export function resolveProviderSkillsForCwd(
   provider: ServerProvider,
   cwd: string | null | undefined,
@@ -152,14 +138,6 @@ export function resolveProviderSlashCommandsForCwd(
   cwd: string | null | undefined,
 ): ServerProvider["slashCommands"] {
   return resolveProviderWorkspaceSnapshot(provider, cwd)?.slashCommands ?? provider.slashCommands;
-}
-
-/** A project's own provider config can add models that only its workspace snapshot lists. */
-function resolveProviderModelsForCwd(
-  provider: ServerProvider,
-  cwd: string | null | undefined,
-): ServerProvider["models"] {
-  return resolveProviderWorkspaceSnapshot(provider, cwd)?.models ?? provider.models;
 }
 
 /** Providers keep their identity unless the cwd has its own catalog. */

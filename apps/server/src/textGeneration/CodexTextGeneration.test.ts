@@ -1,5 +1,4 @@
 import {
-  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   ProjectId,
   ProviderDriverKind,
   type ModelSelection,
