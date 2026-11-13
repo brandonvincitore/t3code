@@ -21,6 +21,10 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import type * as AcpErrors from "effect-acp/errors";
 import { makeTurnInput } from "../orchestration-v2/Adapters/AcpAdapterV2.testkit.ts";
 
 const layer = Layer.mergeAll(
@@ -56,7 +60,7 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
   const recordPath = `${nativeHome}/sessions/${bucket}/${sessionId}/session.json`;
   const now = DateTime.makeUnsafe("2026-11-13T00:00:00.000Z");
   const instanceId = ProviderInstanceId.make("kiro-test");
-  const threadId = ThreadId.make("thread-test");
+  const threadId = ThreadId.make(`thread-${root.split("/").at(-1)}`);
   const providerThread = OrchestrationV2ProviderThread.make({
     id: ProviderThreadId.make("provider-thread-test"),
     driver: ProviderDriverKind.make("kiro"),
@@ -98,6 +102,7 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
   yield* write();
   let renames = 0;
   let succeed = true;
+  let duringRename: (title: string) => Effect.Effect<void, AcpErrors.AcpError> = () => Effect.void;
   const runtime = {
     request: (_method: string, params: unknown) =>
       Effect.gen(function* () {
@@ -108,6 +113,7 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
         if (!succeed) return { success: false };
         record = { ...record, title: input.title, titleSetByUser: true };
         yield* write();
+        yield* duringRename(input.title);
         return { success: true };
       }),
   } as unknown as Parameters<typeof initializeKiroThreadTitle>[0]["runtime"];
@@ -122,7 +128,20 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
   };
   const bind = (support: Effect.Success<ReturnType<typeof makeKiroNativeTitles>>) =>
     support.bindRuntime(runtime, { HOME: `${root}/user`, KIRO_HOME: nativeHome }, cwd);
-  const support = yield* makeKiroNativeTitles(instanceId);
+  let receiptWrite: Effect.Effect<void> = Effect.void;
+  const support = yield* makeKiroNativeTitles(instanceId).pipe(
+    Effect.provideService(FileSystem.FileSystem, {
+      ...fs,
+      writeFileString: (...args) =>
+        args[0].includes("/kiro-native-title-v1/")
+          ? receiptWrite.pipe(Effect.andThen(fs.writeFileString(...args)))
+          : fs.writeFileString(...args),
+    }),
+  );
+  const host = yield* ProviderHost.ProviderHost;
+  const receiptDirectory = `${host.paths.stateDir}/kiro-native-title-v1`;
+  const observe = (title: string, target = support) =>
+    target.observe({ runtime, providerThread, title });
   const scope = yield* Scope.make();
   yield* Effect.addFinalizer(() => Scope.close(scope, Exit.void));
   yield* bind(support).pipe(Scope.provide(scope));
@@ -158,6 +177,14 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
     sync,
     title,
     external,
+    observe,
+    receiptDirectory,
+    setReceiptWrite: (effect: Effect.Effect<void>) => {
+      receiptWrite = effect;
+    },
+    onRename: (callback: typeof duringRename) => {
+      duringRename = callback;
+    },
     renames: () => renames,
     setSuccess: (value: boolean) => {
       succeed = value;
@@ -169,22 +196,41 @@ it.effect(
   "forwards generated titles from a durable receipt and permanently retires observed native divergence",
   () =>
     Effect.gen(function* () {
-      const h = yield* fixture();
-      yield* h.initialize;
-      assert.equal(yield* h.title, h.turn.appThread.title);
-      yield* h.sync("Generated title");
-      assert.equal(yield* h.title, "Generated title");
-      const restarted = yield* makeKiroNativeTitles(h.turn.providerThread.providerInstanceId);
-      yield* h.bind(restarted);
-      yield* h.sync("Later generated title", {}, restarted);
-      assert.equal(yield* h.title, "Later generated title");
-      yield* h.external("Manual native title");
-      yield* h.sync("Must stay in T3", {}, restarted);
-      assert.equal(yield* h.title, "Manual native title");
-      yield* h.external("Later generated title");
-      yield* h.sync("Still must stay in T3", {}, restarted);
-      assert.equal(yield* h.title, "Later generated title");
-      assert.equal(h.renames(), 3);
+      for (const divergence of ["disk", "live", "aba"]) {
+        const h = yield* fixture();
+        h.onRename((title) => h.observe(title));
+        yield* h.initialize;
+        assert.equal(yield* h.title, h.turn.appThread.title);
+        yield* h.sync("Generated title");
+        assert.equal(yield* h.title, "Generated title");
+        const restarted = yield* makeKiroNativeTitles(h.turn.providerThread.providerInstanceId);
+        yield* h.bind(restarted);
+        yield* Scope.close(h.scope, Exit.void);
+        yield* h.observe("Late old-runtime manual title");
+        yield* h.observe("Generated title", restarted);
+        h.onRename((title) => h.observe(title, restarted));
+        yield* h.sync("Later generated title", {}, restarted);
+        assert.equal(yield* h.title, "Later generated title");
+        if (divergence === "disk") yield* h.external("Manual native title");
+        else {
+          const persisted = yield* h.fs.readFileString(h.recordPath);
+          if (divergence === "live") yield* h.fs.remove(h.recordPath);
+          yield* h.observe("Manual native title", restarted);
+          if (divergence === "live") yield* h.fs.writeFileString(h.recordPath, persisted);
+          if (divergence === "aba") yield* h.observe("Later generated title", restarted);
+        }
+        yield* h.sync("Must stay in T3", {}, restarted);
+        assert.equal(
+          yield* h.title,
+          divergence === "disk" ? "Manual native title" : "Later generated title",
+        );
+        yield* h.external("Later generated title");
+        const reconstructed = yield* makeKiroNativeTitles(h.turn.providerThread.providerInstanceId);
+        yield* h.bind(reconstructed);
+        yield* h.sync("Still must stay in T3", {}, reconstructed);
+        assert.equal(yield* h.title, "Later generated title");
+        assert.equal(h.renames(), 3);
+      }
     }).pipe(Effect.provide(layer), Effect.scoped),
 );
 
@@ -231,5 +277,54 @@ it.effect(
       yield* h.sync("Manual T3 title", { manual: true });
       yield* h.sync("Generated after observed relinquishment");
       assert.equal(yield* h.title, "Retry confirmed");
+
+      const racing = yield* fixture();
+      yield* racing.initialize;
+      racing.onRename((title) =>
+        racing.observe("Manual during rename").pipe(Effect.andThen(racing.observe(title))),
+      );
+      yield* racing.sync("In-flight generated title");
+      const reconstructed = yield* makeKiroNativeTitles(
+        racing.turn.providerThread.providerInstanceId,
+      );
+      yield* racing.bind(reconstructed);
+      yield* racing.sync("Cannot revive a retired receipt", {}, reconstructed);
+      assert.equal(racing.renames(), 2);
+
+      const interrupted = yield* fixture();
+      yield* interrupted.initialize;
+      const entered = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      interrupted.setReceiptWrite(
+        Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
+      );
+      const retirement = yield* interrupted.observe("Manual before close").pipe(Effect.forkScoped);
+      yield* Deferred.await(entered);
+      const cancel = yield* Fiber.interrupt(retirement).pipe(Effect.forkScoped);
+      yield* Scope.close(interrupted.scope, Exit.void);
+      yield* Deferred.succeed(release, undefined);
+      yield* Fiber.join(cancel);
+      const afterClose = yield* makeKiroNativeTitles(
+        interrupted.turn.providerThread.providerInstanceId,
+      );
+      yield* interrupted.bind(afterClose);
+      yield* interrupted.sync("Cannot revive after cancellation", {}, afterClose);
+      assert.equal(interrupted.renames(), 1);
+
+      const failed = yield* fixture();
+      yield* failed.initialize;
+      yield* failed.fs.rename(failed.receiptDirectory, `${failed.receiptDirectory}.backup`);
+      yield* failed.fs.writeFileString(failed.receiptDirectory, "Synthetic persistence failure");
+      const error = yield* failed.observe("Manual with unavailable persistence").pipe(Effect.flip);
+      assert.equal(error._tag, "AcpTransportError");
+      yield* failed.fs.remove(failed.receiptDirectory);
+      yield* failed.fs.rename(`${failed.receiptDirectory}.backup`, failed.receiptDirectory);
+      yield* failed.sync("Retirement must remain latched");
+      const afterFailure = yield* makeKiroNativeTitles(
+        failed.turn.providerThread.providerInstanceId,
+      );
+      yield* failed.bind(afterFailure);
+      yield* failed.sync("Still cannot revive", {}, afterFailure);
+      assert.equal(failed.renames(), 1);
     }).pipe(Effect.provide(layer), Effect.scoped),
 );

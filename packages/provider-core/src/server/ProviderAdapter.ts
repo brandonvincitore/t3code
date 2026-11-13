@@ -657,7 +657,7 @@ export interface ProviderAdapterV2SessionRuntime {
     readonly appThread: OrchestrationV2AppThread;
     readonly providerThread: OrchestrationV2ProviderThread;
     readonly isCurrent: Effect.Effect<boolean>;
-  }) => Effect.Effect<void>;
+  }) => Effect.Effect<void, ProviderAdapterV2Error>;
   readonly ensureThread: (
     input: ProviderAdapterV2EnsureThreadInput,
   ) => Effect.Effect<OrchestrationV2ProviderThread, ProviderAdapterV2Error>;

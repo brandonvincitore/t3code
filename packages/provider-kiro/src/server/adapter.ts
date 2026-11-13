@@ -766,6 +766,7 @@ function makeKiroAcpAdapterFlavor(
     capabilities: KiroProviderCapabilitiesV2,
     initializeThreadTitle: nativeTitles.initialize,
     syncGeneratedTitle: nativeTitles.synchronize,
+    observeThreadTitle: nativeTitles.observe,
     getModelContextWindow: kiroModelContextWindow,
     contextUsageFromSession: kiroContextUsageFromSession,
     contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,

@@ -1193,9 +1193,13 @@ it.effect.each(["CLI manual name", "New Session"] as const)(
     }).pipe(Effect.provide(testLayer), Effect.scoped),
 );
 
-it.live.each(["confirmed", "rejected"] as const)(
-  "initial native title persists through list, CLI manual rename and process reload: %s",
-  (renameOutcome) =>
+it.live.each([
+  { renameOutcome: "confirmed", observation: "live" },
+  { renameOutcome: "confirmed", observation: "aba" },
+  { renameOutcome: "rejected", observation: "aba" },
+] as const)(
+  "initial native title persists through list, CLI manual rename and process reload: $renameOutcome/$observation",
+  ({ renameOutcome, observation }) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -1261,6 +1265,7 @@ createInterface({ input: process.stdin }).on('line', line => {
     }
     save({ ...state, title: params.title, titleSetByUser: true });
     appendFileSync(wirePath, JSON.stringify({method:'fixture/title-persisted',titleSetByUser:read().titleSetByUser}) + '\\n');
+    reply({method:'session/update',params:{sessionId,update:{sessionUpdate:'session_info_update',title:params.title}}});
     result = { success: true };
   } else if (method === 'session/prompt') {
     const state = read();
@@ -1275,6 +1280,8 @@ createInterface({ input: process.stdin }).on('line', line => {
     result = { sessions: [{ sessionId, cwd: process.cwd(), title: read().title }] };
   } else if (method === 'session/load') {
     result = { _meta: { source: 'local', title: read().title, titleSetByUser:read().titleSetByUser }, configOptions: [] };
+  } else if (method === '_fixture/observe-title') {
+    reply({method:'session/update',params:{sessionId:params.sessionId ?? sessionId,update:{sessionUpdate:'session_info_update',title:params.title}}});
   } else if (method === '_fixture/user-rename') {
     save({ ...read(), title: 'CLI deliberate name', titleSetByUser: true });
   }
@@ -1392,6 +1399,32 @@ createInterface({ input: process.stdin }).on('line', line => {
               renameOutcome === "confirmed"
                 ? "Later generated T3 title"
                 : "Framework/setup-derived fallback",
+            );
+            const observe = (title: string) =>
+              request("_fixture/observe-title", { title }).pipe(
+                Effect.andThen(
+                  session.events.pipe(
+                    Stream.filter(
+                      (event) =>
+                        event.type === "provider_thread.updated" &&
+                        event.providerThread.nativeMetadata?.title === title,
+                    ),
+                    Stream.runHead,
+                  ),
+                ),
+              );
+            yield* request("_fixture/observe-title", {
+              title: "Sibling manual title",
+              sessionId: "sibling-session",
+            });
+            yield* observe(afterGenerated.title);
+            yield* synchronize(afterGenerated.title);
+            yield* observe("Observed manual title");
+            if (observation === "aba") yield* observe(afterGenerated.title);
+            yield* synchronize("Must not overwrite an observed native edit");
+            assert.equal(
+              JSON.parse(yield* fs.readFileString(statePath)).title,
+              afterGenerated.title,
             );
             yield* request("_fixture/user-rename", {});
             yield* synchronize("Generated after CLI edit");

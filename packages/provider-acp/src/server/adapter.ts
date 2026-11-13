@@ -429,7 +429,7 @@ export interface AcpAdapterV2Flavor {
     readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
     readonly turn: ProviderAdapter.ProviderAdapterV2TurnInput;
     readonly observedTitle: string | null | undefined;
-  }) => Effect.Effect<void>;
+  }) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   readonly syncGeneratedTitle?: (
     input: Parameters<
       NonNullable<ProviderAdapter.ProviderAdapterV2SessionRuntime["syncGeneratedTitle"]>
@@ -437,7 +437,12 @@ export interface AcpAdapterV2Flavor {
       readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
       readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
     },
-  ) => Effect.Effect<void>;
+  ) => Effect.Effect<void, EffectAcpErrors.AcpError>;
+  readonly observeThreadTitle?: (input: {
+    readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
+    readonly providerThread: OrchestrationV2ProviderThread;
+    readonly title: string | null;
+  }) => Effect.Effect<void, EffectAcpErrors.AcpError>;
   readonly getModelContextWindow?: (
     selection: ModelSelection,
     session: AcpSessionRuntime.AcpSessionRuntimeStartResult,
@@ -5724,6 +5729,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         const handleSessionUpdate = Effect.fnUntraced(function* (
           notification: EffectAcpSchema.SessionNotification,
+          targetRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"],
         ) {
           const context = yield* Ref.get(activeTurn);
           const update = notification.update;
@@ -5802,6 +5808,27 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const knownProviderThread = (yield* Ref.get(providerThreadByNativeSessionId)).get(
               notification.sessionId,
             );
+            if (
+              stateEvent._tag === "SessionInfoUpdated" &&
+              stateEvent.metadata.title !== undefined &&
+              targetRuntime === runtime &&
+              notification.sessionId === (yield* Ref.get(activeSessionId)) &&
+              notification.sessionId === (yield* Ref.get(activeSessionSetup))?.sessionId &&
+              knownProviderThread?.nativeThreadRef?.nativeId === notification.sessionId &&
+              knownProviderThread.providerSessionId === input.providerSessionId &&
+              knownProviderThread.providerInstanceId === options.instanceId &&
+              knownProviderThread.appThreadId === input.threadId &&
+              knownProviderThread.ownerNodeId === null &&
+              knownProviderThread.forkedFrom === null
+            ) {
+              yield* (
+                flavor.observeThreadTitle?.({
+                  runtime: targetRuntime,
+                  providerThread: knownProviderThread,
+                  title: stateEvent.metadata.title,
+                }) ?? Effect.void
+              );
+            }
             if (knownProviderThread !== undefined) {
               const now = yield* DateTime.now;
               const providerThread: OrchestrationV2ProviderThread = {
@@ -7177,7 +7204,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         const projectAcpRuntimeSessionUpdateEffect =
           /* Provider events include streaming deltas; avoid a span for each update. */
           Effect.fnUntraced(
-            function* (rawNotification: EffectAcpSchema.SessionNotification) {
+            function* (
+              rawNotification: EffectAcpSchema.SessionNotification,
+              targetRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"],
+            ) {
               if (flavor.ignoreSessionUpdate?.(rawNotification) === true) return;
               yield* notePromptProgress(rawNotification);
               const nativePromptId = flavor.forkFromTurn?.nativeTurnId(rawNotification);
@@ -7240,7 +7270,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 ) {
                   yield* markSessionCompacted(normalized.sessionId, normalized.update.compactionId);
                 }
-                yield* handleSessionUpdate(normalized);
+                yield* handleSessionUpdate(normalized, targetRuntime);
               }
             },
             Effect.mapError(
@@ -7266,7 +7296,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             return;
           yield* runRuntimeCallbackAtGeneration(
             handlerGeneration,
-            projectAcpRuntimeSessionUpdateEffect(rawNotification),
+            projectAcpRuntimeSessionUpdateEffect(rawNotification, targetRuntime),
           );
         });
 
@@ -8107,7 +8137,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     yield* Effect.forEach(
                       buffered,
                       (notification) =>
-                        projectAcpRuntimeSessionUpdateEffect(notification).pipe(
+                        projectAcpRuntimeSessionUpdateEffect(
+                          notification,
+                          replacementExit.value.replacementRuntime,
+                        ).pipe(
                           Effect.catchCause((cause) =>
                             Effect.logError("failed to replay staged ACP session update", {
                               driver,
@@ -9371,6 +9404,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       requestedSessionId,
                     )?.title,
                   }) ?? Effect.void
+                ).pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new ProviderAdapter.ProviderAdapterTurnPreparationError({ driver, cause }),
+                  ),
                 );
               }
             }
@@ -9606,9 +9644,13 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 yield* runtimeCallbackPermit.withPermit(
                   Effect.gen(function* () {
                     const liveWork = agentWork;
-                    yield* Effect.forEach(yield* takeWakeBuffer, handleSessionUpdate, {
-                      discard: true,
-                    });
+                    yield* Effect.forEach(
+                      yield* takeWakeBuffer,
+                      (notification) => handleSessionUpdate(notification, runtime),
+                      {
+                        discard: true,
+                      },
+                    );
                     agentWork = liveWork;
                     context.workAccepted = true;
                     yield* settleIdleWork(context);
@@ -9618,10 +9660,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }
               const drainedWakeCount = yield* takeWakeBuffer.pipe(
                 Effect.tap((drained) =>
-                  Effect.forEach(drained, handleSessionUpdate, {
-                    concurrency: 1,
-                    discard: true,
-                  }),
+                  Effect.forEach(
+                    drained,
+                    (notification) => handleSessionUpdate(notification, runtime),
+                    {
+                      concurrency: 1,
+                      discard: true,
+                    },
+                  ),
                 ),
                 Effect.map((drained) => drained.length),
               );
@@ -10015,6 +10061,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                             session,
                             isCurrent,
                           }) ?? Effect.void
+                        ).pipe(
+                          Effect.mapError(
+                            (cause) =>
+                              new ProviderAdapter.ProviderAdapterProtocolError({
+                                driver,
+                                detail: "Failed to persist native title ownership",
+                                cause,
+                              }),
+                          ),
                         );
                       }),
                     );

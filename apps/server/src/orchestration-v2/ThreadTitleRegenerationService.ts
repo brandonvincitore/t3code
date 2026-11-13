@@ -113,7 +113,11 @@ const make = Effect.gen(function* () {
         );
       }).pipe(Effect.orElseSucceed(() => false));
       if (thread.titleManuallySet !== true && !(yield* isCurrent)) return;
-      yield* runtime.value.syncGeneratedTitle({ appThread: thread, providerThread, isCurrent });
+      yield* runtime.value
+        .syncGeneratedTitle({ appThread: thread, providerThread, isCurrent })
+        .pipe(
+          Effect.tapError(() => Effect.logWarning("Failed to synchronize native title ownership")),
+        );
     },
     Effect.orElseSucceed(() => undefined),
   );

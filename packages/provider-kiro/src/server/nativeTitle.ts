@@ -10,6 +10,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as AcpErrors from "effect-acp/errors";
 import type { AcpAdapterV2Flavor } from "@t3tools/provider-acp/server/adapter";
 
 const decodeMethods = Schema.decodeUnknownOption(
@@ -33,6 +34,7 @@ const decodeSession = Schema.decodeUnknownOption(
     ),
   }),
 );
+const isTransportError = Schema.is(AcpErrors.AcpTransportError);
 const decodeRenamed = Schema.decodeUnknownOption(Schema.Struct({ success: Schema.Boolean }));
 
 function normalizeTitle(value: string | null | undefined) {
@@ -49,7 +51,10 @@ export const initializeKiroThreadTitle = Effect.fn("Kiro.initializeThreadTitle")
   session,
   turn,
   observedTitle,
-}: Parameters<NonNullable<AcpAdapterV2Flavor["initializeThreadTitle"]>>[0]) {
+  onRenaming,
+}: Parameters<NonNullable<AcpAdapterV2Flavor["initializeThreadTitle"]>>[0] & {
+  readonly onRenaming?: (title: string) => Effect.Effect<void>;
+}) {
   const methods = Option.getOrUndefined(
     decodeMethods(session.initializeResult.agentCapabilities?._meta),
   )?.kiro.extensionMethods;
@@ -74,6 +79,7 @@ export const initializeKiroThreadTitle = Effect.fn("Kiro.initializeThreadTitle")
     return;
   const title = normalizeTitle(turn.appThread.title);
   if (title === undefined) return;
+  yield* onRenaming?.(title) ?? Effect.void;
   const result = yield* runtime
     .request("_kiro/session/rename", {
       sessionId: session.sessionId,
@@ -103,13 +109,16 @@ const Record = Schema.Struct({
   forkedAtMessageId: Schema.optional(Schema.String),
   parentExecutionId: Schema.optional(Schema.String),
 });
-const Receipt = Schema.Struct({
-  version: Schema.Literal(1),
-  binding: Schema.String,
-  createdAt: Schema.String,
-  title: Schema.String,
-  owned: Schema.Boolean,
-});
+const Receipt = Schema.Union([
+  Schema.Struct({
+    version: Schema.Literal(1),
+    binding: Schema.String,
+    createdAt: Schema.String,
+    title: Schema.String,
+    owned: Schema.Literal(true),
+  }),
+  Schema.Struct({ version: Schema.Literal(1), owned: Schema.Literal(false) }),
+]);
 const decodeRecord = Schema.decodeOption(Schema.fromJsonString(Record));
 const decodeReceipt = Schema.decodeOption(Schema.fromJsonString(Receipt));
 const encodeReceipt = Schema.encodeSync(Schema.fromJsonString(Receipt));
@@ -127,6 +136,32 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
   const fallbackHome = yield* HostProcess.HomeDirectory;
   const platform = yield* HostProcess.Platform;
   const lock = yield* Semaphore.make(1);
+  // Notification persistence must never wait for the rename RPC that its reader is draining.
+  const receiptLock = yield* Semaphore.make(1);
+  type Owner = {
+    expected: string | undefined;
+    pending: string | undefined;
+    unverified: string | null | undefined;
+    retired: boolean;
+  };
+  const owners = new WeakMap<Runtime, Map<string, Owner>>();
+  const ownerFor = (runtime: Runtime, providerThread: OrchestrationV2ProviderThread) => {
+    let bound = owners.get(runtime);
+    if (!bound) owners.set(runtime, (bound = new Map()));
+    const key = `${providerThread.id}/${providerThread.nativeThreadRef?.nativeId ?? ""}`;
+    let owner = bound.get(key);
+    if (!owner)
+      bound.set(
+        key,
+        (owner = {
+          expected: undefined,
+          pending: undefined,
+          unverified: undefined,
+          retired: false,
+        }),
+      );
+    return owner;
+  };
   const runtimes = new WeakMap<
     Runtime,
     { environment: NodeJS.ProcessEnv; cwd: string; closed: boolean }
@@ -260,7 +295,7 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
     Effect.orElseSucceed(() => undefined),
   );
   const location = Effect.fn("KiroNativeTitles.location")(function* (
-    appThread: OrchestrationV2AppThread,
+    appThread: Pick<OrchestrationV2AppThread, "id">,
     providerThread: OrchestrationV2ProviderThread,
   ) {
     const encoded = yield* encodeIdentity([appThread.id, instanceId, providerThread.id]);
@@ -268,9 +303,9 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
     return path.join(host.paths.stateDir, "kiro-native-title-v1", `${key}.json`);
   });
   const binding = (
-    appThread: OrchestrationV2AppThread,
+    appThread: Pick<OrchestrationV2AppThread, "id">,
     providerThread: OrchestrationV2ProviderThread,
-    source: NonNullable<Effect.Success<ReturnType<typeof readRecord>>>,
+    source: Pick<NonNullable<Effect.Success<ReturnType<typeof readRecord>>>, "root" | "workspace">,
   ) =>
     encodeIdentity([
       appThread.id,
@@ -289,39 +324,148 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
       Effect.provideService(FileSystem.FileSystem, fs),
       Effect.provideService(Path.Path, path),
     );
+  const readReceipt = Effect.fn("KiroNativeTitles.readReceipt")(function* (filePath: string) {
+    const raw = yield* readBounded(filePath).pipe(Effect.orElseSucceed(() => undefined));
+    return raw ? Option.getOrUndefined(decodeReceipt(raw)) : undefined;
+  });
+  const persist = Effect.fn("KiroNativeTitles.persist")(function* (
+    filePath: string,
+    owner: Owner,
+    receipt: typeof Receipt.Type,
+  ) {
+    yield* save(filePath, receipt).pipe(
+      Effect.tapError(() =>
+        Effect.sync(() => {
+          owner.retired = true;
+        }),
+      ),
+      Effect.mapError(
+        (cause) =>
+          new AcpErrors.AcpTransportError({
+            detail: "Failed to persist Kiro native title ownership",
+            cause,
+          }),
+      ),
+    );
+  });
+  const retire = Effect.fn("KiroNativeTitles.retire")(function* (filePath: string, owner: Owner) {
+    owner.retired = true;
+    yield* receiptLock.withPermit(persist(filePath, owner, { version: 1, owned: false }));
+  }, Effect.uninterruptible);
+  const writeOwned = Effect.fn("KiroNativeTitles.writeOwned")(function* (
+    filePath: string,
+    owner: Owner,
+    receipt: typeof Receipt.Type,
+  ) {
+    yield* receiptLock.withPermit(
+      Effect.gen(function* () {
+        const previous = yield* readReceipt(filePath);
+        if (previous?.owned === false) owner.retired = true;
+        yield* persist(filePath, owner, owner.retired ? { version: 1, owned: false } : receipt);
+        if (!owner.retired && receipt.owned) owner.expected = receipt.title;
+      }),
+    );
+  }, Effect.uninterruptible);
+  const observe: NonNullable<AcpAdapterV2Flavor["observeThreadTitle"]> = Effect.fn(
+    "KiroNativeTitles.observe",
+  )(
+    function* ({ runtime, providerThread, title }) {
+      const bound = runtimes.get(runtime);
+      if (!bound || bound.closed || providerThread.appThreadId === null) return;
+      const appThread = { id: providerThread.appThreadId };
+      const owner = ownerFor(runtime, providerThread);
+      if (title === owner.pending || title === owner.expected) return;
+      if (owner.expected !== undefined || owner.pending !== undefined) owner.retired = true;
+      else owner.unverified = title;
+      const filePath = yield* location(appThread, providerThread);
+      if (owner.retired) return yield* retire(filePath, owner);
+      yield* receiptLock.withPermit(
+        Effect.gen(function* () {
+          const receipt = yield* readReceipt(filePath);
+          if (!receipt) return;
+          if (!receipt.owned) {
+            owner.retired = true;
+            return;
+          }
+          const home = yield* nativeHome(bound.environment);
+          if (!home || !path.isAbsolute(bound.cwd)) return;
+          const source = { root: yield* fs.realPath(home), workspace: normalize(bound.cwd) };
+          if (receipt.binding !== (yield* binding(appThread, providerThread, source))) return;
+          owner.expected = receipt.title;
+          owner.unverified = undefined;
+          if (title === owner.expected || title === owner.pending) return;
+          owner.retired = true;
+          yield* persist(filePath, owner, { version: 1, owned: false });
+        }),
+      );
+    },
+    Effect.uninterruptible,
+    Effect.mapError((cause) =>
+      isTransportError(cause)
+        ? cause
+        : new AcpErrors.AcpTransportError({
+            detail: "Failed to record a Kiro native title observation",
+            cause,
+          }),
+    ),
+  );
   const initialize: NonNullable<AcpAdapterV2Flavor["initializeThreadTitle"]> = Effect.fn(
     "KiroNativeTitles.initialize",
   )(function* (input) {
+    const owner = ownerFor(input.runtime, input.turn.providerThread);
     yield* lock.withPermit(
       Effect.gen(function* () {
-        const title = yield* initializeKiroThreadTitle(input);
+        const filePath = yield* location(input.turn.appThread, input.turn.providerThread);
+        if (owner.retired || (yield* readReceipt(filePath))?.owned === false) return;
+        const title = yield* initializeKiroThreadTitle({
+          ...input,
+          onRenaming: (title) =>
+            Effect.sync(() => {
+              owner.pending = title;
+            }),
+        });
         if (!title || input.turn.appThread.titleManuallySet === true) return;
         const source = yield* readRecord(input.runtime, input.session.sessionId);
         if (!source || source.record.title !== title) return;
-        const filePath = yield* location(input.turn.appThread, input.turn.providerThread);
-        yield* save(filePath, {
+        yield* writeOwned(filePath, owner, {
           version: 1,
           binding: yield* binding(input.turn.appThread, input.turn.providerThread, source),
           createdAt: source.record.createdAt,
           title,
           owned: true,
         });
-      }).pipe(Effect.orElseSucceed(() => undefined)),
+      }).pipe(
+        Effect.mapError((cause) =>
+          isTransportError(cause)
+            ? cause
+            : new AcpErrors.AcpTransportError({
+                detail: "Failed to persist Kiro native title ownership",
+                cause,
+              }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            owner.pending = undefined;
+          }),
+        ),
+      ),
     );
   });
   const synchronize: NonNullable<AcpAdapterV2Flavor["syncGeneratedTitle"]> = Effect.fn(
     "KiroNativeTitles.synchronize",
   )(function* (input) {
+    const owner = ownerFor(input.runtime, input.providerThread);
     yield* lock.withPermit(
       Effect.gen(function* () {
+        if (input.appThread.titleManuallySet === true) owner.retired = true;
         const filePath = yield* location(input.appThread, input.providerThread);
-        const raw = yield* readBounded(filePath);
-        if (!raw) return;
-        const decoded = decodeReceipt(raw);
-        if (Option.isNone(decoded) || !decoded.value.owned) return;
-        const receipt = decoded.value;
-        const retire = save(filePath, { ...receipt, owned: false });
-        if (input.appThread.titleManuallySet === true) return yield* retire;
+        if (owner.retired) return yield* retire(filePath, owner);
+        const receipt = yield* readReceipt(filePath);
+        if (!receipt || !receipt.owned) return;
+        owner.expected = receipt.title;
+        if (owner.unverified !== undefined && owner.unverified !== receipt.title)
+          return yield* retire(filePath, owner);
+        owner.unverified = undefined;
         const source = yield* readRecord(input.runtime, input.session.sessionId);
         if (!source) return;
         if (
@@ -329,9 +473,9 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
           receipt.createdAt !== source.record.createdAt ||
           receipt.title !== source.record.title
         )
-          return yield* retire;
+          return yield* retire(filePath, owner);
         const title = normalizeTitle(input.appThread.title);
-        if (!title || title === receipt.title || !(yield* input.isCurrent)) return;
+        if (!title || title === receipt.title || !(yield* input.isCurrent) || owner.retired) return;
         const methods = Option.getOrUndefined(
           decodeMethods(input.session.initializeResult.agentCapabilities?._meta),
         )?.kiro.extensionMethods;
@@ -340,6 +484,7 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
           runtimes.get(input.runtime)?.closed !== false
         )
           return;
+        owner.pending = title;
         const result = yield* input.runtime
           .request("_kiro/session/rename", {
             sessionId: input.session.sessionId,
@@ -353,9 +498,23 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
         )
           return;
         if (!(yield* input.isCurrent) || runtimes.get(input.runtime)?.closed !== false)
-          return yield* retire;
-        yield* save(filePath, { ...receipt, title });
-      }).pipe(Effect.orElseSucceed(() => undefined)),
+          return yield* retire(filePath, owner);
+        yield* writeOwned(filePath, owner, { ...receipt, title });
+      }).pipe(
+        Effect.mapError((cause) =>
+          isTransportError(cause)
+            ? cause
+            : new AcpErrors.AcpTransportError({
+                detail: "Failed to persist Kiro native title ownership",
+                cause,
+              }),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            owner.pending = undefined;
+          }),
+        ),
+      ),
     );
   });
   const bindRuntime = Effect.fn("KiroNativeTitles.bindRuntime")(function* (
@@ -371,5 +530,5 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
       }),
     );
   });
-  return { initialize, synchronize, bindRuntime };
+  return { initialize, synchronize, observe, bindRuntime };
 });
