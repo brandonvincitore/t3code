@@ -921,6 +921,13 @@ describe("KiroProvider", () => {
             sessionUpdate: "config_option_update",
             configOptions: [
               agent,
+              {
+                id: "memoryReflection",
+                name: "Memory reflection",
+                type: "select",
+                currentValue: "off",
+                options: [],
+              },
               model,
               {
                 id: "effortLevel",
@@ -1044,6 +1051,15 @@ describe("KiroProvider", () => {
             );
           }
         };
+        for (const descriptors of [
+          snapshot.optionDescriptors,
+          ...snapshot.models.map((entry) => entry.capabilities?.optionDescriptors),
+          ...(snapshot.workspaceModels ?? []).map((entry) => entry.capabilities?.optionDescriptors),
+        ]) {
+          const reflection = descriptors?.find((option) => option.id === "memoryReflection");
+          assert.equal(reflection?.type, "select");
+          assert.deepEqual(reflection?.type === "select" ? reflection.options : undefined, []);
+        }
         assert.deepEqual(choices(snapshot), ["cached-agent", "native-agent"]);
         assertNativeModel(snapshot);
         for (const result of [

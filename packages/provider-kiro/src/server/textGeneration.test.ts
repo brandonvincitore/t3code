@@ -54,6 +54,8 @@ if (process.argv.includes('--list-models')) { console.log(${JSON.stringify(JSON.
 const record = value => appendFileSync(process.env.T3_TITLE_LOG, JSON.stringify(value)+'\\n');
 const option = (id, value, options) => ({ type: 'select', id, name: id, currentValue: value, options: options.map(value => ({value,name:value})) });
 let configOptions = [option('mode','vibe',['vibe','t3-title']),option('model','auto',['auto','cheap'])];
+const collection = process.env.T3_TITLE_COLLECTION;
+if (collection !== 'absent') configOptions.push(option('contentCollection','enabled',collection === 'empty' ? [] : ['enabled','disabled']));
 createInterface({input:process.stdin}).on('line', line => {
  const {id,method,params} = JSON.parse(line);
  record({method,params,cwd:process.cwd(),home:process.env.KIRO_HOME,classifier:process.env.KIRO_TRUST_CLASSIFIER_MODE});
@@ -61,7 +63,7 @@ createInterface({input:process.stdin}).on('line', line => {
  let result = {};
  if (method === 'initialize') result = {protocolVersion:1,agentCapabilities:{sessionCapabilities:{delete:{}},_meta:{kiro:{extensionMethods:['_kiro/memory/list']}}}};
  if (method === 'session/new') { record({agent:JSON.parse(readFileSync(process.env.KIRO_HOME+'/agents/t3-title.json','utf8')), env:{title:process.env.KIRO_DISABLE_SESSION_TITLE_LLM,fallback:process.env.KIRO_FEATURE_MODEL_FALLBACK_AVAILABILITY_ENABLED}}); result = {sessionId:'title-session',configOptions}; }
- if (method === 'session/set_config_option') { configOptions = configOptions.map(o=>o.id===params.configId?{...o,currentValue:params.value}:o); result={configOptions}; }
+ if (method === 'session/set_config_option') { if (params.configId === 'model' && collection === 'withdrawn') configOptions = configOptions.filter(o=>o.id!=='contentCollection'); configOptions = configOptions.map(o=>o.id===params.configId?{...o,currentValue:params.value}:o); result={configOptions}; }
  if (method === 'session/prompt') {
   process.stdout.write(JSON.stringify({jsonrpc:'2.0',method:'session/update',params:{sessionId:'title-session',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:process.env.T3_TITLE_REPLY}}}})+'\\n');
   result={stopReason:'end_turn'};
@@ -72,13 +74,40 @@ createInterface({input:process.stdin}).on('line', line => {
         );
         yield* fs.chmod(binaryPath, 0o700);
         const settings = decodeSettings({ enabled: true, binaryPath });
-        for (const reply of ['{"title":"Fix login","needsRefinement":true}', "invalid"]) {
-          const service = yield* makeKiroTextGeneration(settings, {
-            ...process.env,
-            KIRO_TRUST_CLASSIFIER_MODE: "enforce",
-            T3_TITLE_LOG: log,
-            T3_TITLE_REPLY: reply,
-          });
+        const cases = [
+          {
+            preference: "default",
+            native: "supported",
+            reply: '{"title":"Fix login","needsRefinement":true}',
+          },
+          { preference: "disabled", native: "supported", reply: "invalid" },
+          {
+            preference: "disabled",
+            native: "absent",
+            reply: '{"title":"Fix login","needsRefinement":true}',
+          },
+          {
+            preference: "disabled",
+            native: "empty",
+            reply: '{"title":"Fix login","needsRefinement":true}',
+          },
+          {
+            preference: "disabled",
+            native: "withdrawn",
+            reply: '{"title":"Fix login","needsRefinement":true}',
+          },
+        ] as const;
+        for (const { preference, native, reply } of cases) {
+          const service = yield* makeKiroTextGeneration(
+            decodeSettings({ ...settings, contentCollection: preference }),
+            {
+              ...process.env,
+              KIRO_TRUST_CLASSIFIER_MODE: "enforce",
+              T3_TITLE_LOG: log,
+              T3_TITLE_REPLY: reply,
+              T3_TITLE_COLLECTION: native,
+            },
+          );
           const input = {
             cwd: root,
             message: "Fix login",
@@ -113,8 +142,26 @@ createInterface({input:process.stdin}).on('line', line => {
           .split("\n")
           .map((line) => JSON.parse(line));
         for (const row of rows.filter((row) => row.method)) assert.equal(row.classifier, "off");
-        assert.equal(rows.filter((row) => row.method === "session/delete").length, 2);
-        assert.equal(rows.filter((row) => row.method === "session/prompt").length, 2);
+        assert.equal(rows.filter((row) => row.method === "session/delete").length, cases.length);
+        assert.equal(rows.filter((row) => row.method === "session/prompt").length, cases.length);
+        const prompts = rows.filter((row) => row.method === "session/prompt");
+        for (const [index, entry] of cases.entries()) {
+          const processRows = rows.filter((row) => row.home === prompts[index].home);
+          const writes = processRows.filter(
+            (row) =>
+              row.method === "session/set_config_option" &&
+              row.params.configId === "contentCollection",
+          );
+          assert.deepEqual(
+            writes.map((row) => row.params.value),
+            entry.preference === "disabled" && entry.native === "supported" ? ["disabled"] : [],
+          );
+          if (writes.length > 0)
+            assert.isBelow(
+              processRows.indexOf(writes[0]),
+              processRows.findIndex((row) => row.method === "session/prompt"),
+            );
+        }
         for (const row of rows.filter((row) => row.agent)) {
           assert.deepEqual(row.agent.tools, []);
           assert.deepEqual(row.agent.resources, []);

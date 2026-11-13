@@ -20,20 +20,25 @@ const reflection: ProviderOptionDescriptor = {
   ],
 };
 
-export function kiroChatOptions(options: ReadonlyArray<ProviderOptionDescriptor>) {
+export function kiroChatOptions(
+  options: ReadonlyArray<ProviderOptionDescriptor>,
+  reflectionKnown = false,
+) {
   const filtered = options
     .filter((option) => option.id !== "contentCollection")
     .map((option) => {
       if (option.id !== "memoryReflection") return option;
+      if (option.type !== "select") return { ...reflection, options: [] };
       const { currentValue: _currentValue, ...descriptor } = option;
       return {
         ...descriptor,
-        ...(descriptor.type === "select"
-          ? { options: descriptor.options.map(({ isDefault: _isDefault, ...choice }) => choice) }
-          : {}),
+        options: descriptor.options
+          .filter((choice) => choice.id === "on" || choice.id === "off")
+          .map(({ isDefault: _isDefault, ...choice }) => choice),
       };
     });
-  if (!filtered.some((option) => option.id === "memoryReflection")) filtered.push(reflection);
+  if (!filtered.some((option) => option.id === "memoryReflection"))
+    filtered.push(reflectionKnown ? { ...reflection, options: [] } : reflection);
   const rank = (id: string) =>
     ["reasoningEffort", "effortLevel", "mode", "memoryReflection", "workflowLaunch"].indexOf(id);
   return filtered.toSorted(

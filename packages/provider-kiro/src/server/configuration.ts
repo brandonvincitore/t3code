@@ -20,6 +20,7 @@ import {
 } from "./acpSupport.ts";
 
 interface KiroConfiguration {
+  readonly reflectionKnown: boolean;
   readonly options: ReadonlyArray<ProviderOptionDescriptor>;
   readonly models: ReadonlyArray<KiroConfigModel>;
   readonly agent: string | undefined;
@@ -110,10 +111,17 @@ export const recordKiroConfiguration = Effect.fn("KiroConfiguration.record")(fun
       }
       // Kiro can advertise the model before its effort; absence is not a capability denial.
     }
+    const reflectionKnown =
+      previous?.reflectionKnown === true ||
+      configOptions.some((option) => option.id === "memoryReflection");
     const incoming = {
+      reflectionKnown,
       models: !hasModelCatalog && sameAgent ? (previous?.models ?? models) : models,
       agent: agent ?? previous?.agent,
-      options: kiroChatOptions(descriptors.filter((option) => option.id !== KIRO_EFFORT_CONFIG_ID)),
+      options: kiroChatOptions(
+        descriptors.filter((option) => option.id !== KIRO_EFFORT_CONFIG_ID),
+        reflectionKnown,
+      ),
       effortByModel,
     };
     const comparable = (configuration: KiroConfiguration) => ({

@@ -13,7 +13,7 @@ import * as Schema from "effect/Schema";
 import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as SecureRandom from "effect/crypto/SecureRandom";
-import { makeKiroAcpRuntime } from "./acpSupport.ts";
+import { kiroContentCollectionConfig, makeKiroAcpRuntime } from "./acpSupport.ts";
 import type { KiroSettings } from "../settings.ts";
 
 const isTextGenerationError = Schema.is(TextGenerationError);
@@ -164,6 +164,11 @@ export const makeKiroTextGeneration = Effect.fn("KiroTextGeneration.make")(funct
       );
       yield* runtime.setMode("t3-title");
       yield* runtime.setModel(model);
+      for (const { id, value } of kiroContentCollectionConfig(
+        settings,
+        yield* runtime.getConfigOptions,
+      ))
+        yield* runtime.setConfigOption(id, value);
       const reply = yield* runtime.prompt({ prompt: [{ type: "text", text: input.prompt }] });
       if (reply.stopReason !== "end_turn" || violation)
         return yield* fail("Kiro title generation did not complete.");

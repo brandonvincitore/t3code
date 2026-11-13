@@ -78,7 +78,10 @@ const kiroModels = (
   options: ReadonlyArray<ProviderOptionDescriptor> = [],
 ) =>
   providerModelsFromSettings(listed, settings.customModels, EMPTY_CAPABILITIES).map((model) => {
-    const descriptors = model.capabilities?.optionDescriptors ?? [];
+    const descriptors = (model.capabilities?.optionDescriptors ?? []).filter(
+      (option) =>
+        option.id !== "memoryReflection" || !options.some((incoming) => incoming.id === option.id),
+    );
     const additions = options.filter(
       (option) => !descriptors.some((descriptor) => descriptor.id === option.id),
     );

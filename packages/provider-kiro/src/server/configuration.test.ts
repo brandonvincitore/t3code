@@ -1,7 +1,12 @@
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import { createModelCapabilities } from "@t3tools/shared/model";
+import {
+  createModelCapabilities,
+  getProviderOptionDescriptors,
+  buildProviderOptionSelectionsFromDescriptors,
+} from "@t3tools/shared/model";
+import { kiroChatOptions } from "./models.ts";
 import * as Schema from "effect/Schema";
 import { KiroSettings } from "../settings.ts";
 
@@ -101,6 +106,56 @@ describe("Kiro workspace configuration", () => {
         );
         const cold = yield* applyKiroConfiguration(yield* makeKiroConfigurations(), "/work", base);
         assert.deepEqual(reflection(cold), reflection(base));
+        const supported = {
+          id: "memoryReflection",
+          name: "Memory reflection",
+          type: "select" as const,
+          currentValue: "on",
+          options: [
+            { value: "on", name: "On" },
+            { value: "off", name: "Off" },
+          ],
+        };
+        for (const native of [
+          { ...supported, options: [] },
+          {
+            id: "memoryReflection",
+            name: "Changed type",
+            type: "boolean" as const,
+            currentValue: true,
+          },
+          { ...supported, options: [{ value: "unsupported", name: "Unsupported" }] },
+          undefined,
+        ]) {
+          yield* recordKiroConfiguration(configurations, "/work", native ? [native] : []);
+          const unavailable = yield* applyKiroConfiguration(configurations, "/work", base);
+          const descriptor = reflection(unavailable);
+          assert.equal(descriptor?.type, "select");
+          assert.deepEqual(descriptor?.type === "select" ? descriptor.options : undefined, []);
+          assert.deepEqual(
+            kiroChatOptions(
+              "optionDescriptors" in unavailable ? unavailable.optionDescriptors : [],
+            ).find((option) => option.id === "memoryReflection"),
+            descriptor,
+          );
+          const desired = [{ id: "memoryReflection", value: "on" }];
+          const selected = getProviderOptionDescriptors({
+            caps: unavailable.models[0]!.capabilities!,
+            selections: desired,
+          });
+          assert.deepEqual(buildProviderOptionSelectionsFromDescriptors(selected), desired);
+          assert.deepEqual(
+            reflection(yield* applyKiroConfiguration(configurations, "/other", base)),
+            reflection(base),
+          );
+        }
+        yield* recordKiroConfiguration(configurations, "/work", [supported]);
+        const restored = reflection(yield* applyKiroConfiguration(configurations, "/work", base));
+        assert.deepEqual(
+          restored?.type === "select" ? restored.options.map((option) => option.id) : [],
+          ["on", "off"],
+        );
+        assert.isUndefined(restored?.currentValue);
       }),
   );
   it.effect.each(["denial", "withdrawal"])("scopes %s by workspace and model", (change) =>
