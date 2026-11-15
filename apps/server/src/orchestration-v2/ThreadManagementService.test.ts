@@ -230,6 +230,11 @@ it.effect.each([
   const dispatched: Array<string> = [];
   const layerTest = ThreadManagementService.layerWithLegacyImporter.pipe(
     Layer.provide(
+      Layer.mock(RunExecutionService.RunExecutionServiceV2)({
+        revokeOwnedStart: () => Effect.undefined,
+      }),
+    ),
+    Layer.provide(
       Layer.succeed(ThreadWorktreeRestore, {
         restore: () =>
           Effect.fail(

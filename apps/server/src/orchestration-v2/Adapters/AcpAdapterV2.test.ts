@@ -2843,7 +2843,10 @@ describe("AcpAdapterV2", () => {
           publishedInstructionReceipts,
         } = yield* makeInstructionCompactionHarness({ T3_ACP_ECHO_ACCEPTED_PROMPT: "1" }, true);
         if (stopReason === "refusal") yield* reportNextPromptStopped(stopReason);
-        assertReinjectedInstructions(yield* runTurn("Start work."), "Start work.");
+        assertReinjectedInstructions(
+          yield* runTurn("Start work.", stopReason === "refusal" ? "failed" : "completed"),
+          "Start work.",
+        );
         const receiptsBeforeCallback = [...publishedInstructionReceipts];
         yield* awaitPromptCallback;
         const continued = yield* runTurn("Continue work.", "completed", reopen);

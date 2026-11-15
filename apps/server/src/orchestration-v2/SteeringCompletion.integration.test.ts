@@ -2309,6 +2309,7 @@ const scheduledDeliveryAfterClaudeSwitch = (name: string, text: string) =>
       true,
       undefined,
       undefined,
+      undefined,
       [claudeAdapter],
     );
     const queueAndSwitch = Effect.gen(function* () {
