@@ -31,6 +31,18 @@ describe("ProviderEnvironmentSection saved secrets", () => {
     expect(onChange).not.toHaveBeenCalled();
     await expect.element(name).toBeDisabled();
     await expect.element(lock).toBeDisabled();
+  });
+
+  it("allows renaming, unlocking and removing a stored secret after replacement", async () => {
+    const onChange = vi.fn();
+    await using screen = await render(
+      <ProviderEnvironmentSection environment={[savedSecret]} onChange={onChange} />,
+    );
+    const name = screen.getByRole("textbox", { name: "Environment variable name 1" });
+    const value = screen.getByLabelText("Environment variable value 1");
+    const lock = screen.getByRole("button", {
+      name: "Mark environment variable FAKE_API_KEY as sensitive",
+    });
 
     await userEvent.fill(value, "fake-replacement");
     await userEvent.tab();
