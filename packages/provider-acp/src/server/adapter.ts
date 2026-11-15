@@ -9944,6 +9944,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     workAccepted: false,
                     promptWireSettled,
                     promptDispatched,
+                    foregroundIdle: yield* Deferred.make<void>(),
                     promptSentAt: null,
                     promptStarted,
                     promptUsage: undefined,

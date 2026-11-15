@@ -1885,7 +1885,7 @@ export const layer: Layer.Layer<
           const startInput = noteContinuation ? promptedInput : turnInput;
           const { resume: _resume, ...contextInput } = startInput;
           const { message: resumeMessage, resume: _resumeIntent, ...resumeInput } = startInput;
-          const operation =
+          const operation = Effect.suspend(() =>
             turnInput.resume && context === "" && session.resumeTurn !== undefined
               ? session.resumeTurn({ ...resumeInput, messageId: resumeMessage.messageId })
               : start({
@@ -1897,7 +1897,8 @@ export const layer: Layer.Layer<
                   ...(text === userText
                     ? {}
                     : { inlineContextLength: text.length - userText.length }),
-                });
+                }),
+          );
           yield* Effect.gen(function* () {
             if (!(yield* isCurrentAttemptInStatus("running")))
               return yield* new ProviderAdapter.ProviderAdapterTurnPreparationError({
