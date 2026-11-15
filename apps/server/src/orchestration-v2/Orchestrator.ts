@@ -3786,7 +3786,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
-      titleManuallySet: command.titleManuallySet ?? command.title !== "New thread",
+      titleManuallySet:
+        command.titleManuallySet ??
+        (command.title.trim() !== "New thread" && !isPlaceholderThreadTitle(command.title.trim())),
       providerInstanceId: command.modelSelection.instanceId,
       modelSelection: command.modelSelection,
       runtimeMode: command.runtimeMode,
