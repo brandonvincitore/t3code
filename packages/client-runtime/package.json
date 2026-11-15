@@ -599,11 +599,15 @@
     "effect": "catalog:",
     "jszip": "3.10.1",
     "react": "catalog:",
+    "remark-gfm": "catalog:",
+    "remark-parse": "catalog:",
     "three": "0.180.0",
-    "unbash": "^5.0.0"
+    "unbash": "^5.0.0",
+    "unified": "catalog:"
   },
   "devDependencies": {
     "@effect/vitest": "catalog:",
+    "@types/mdast": "^4.0.4",
     "@types/react": "catalog:",
     "@types/three": "0.180.0",
     "vite-plus": "catalog:"

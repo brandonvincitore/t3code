@@ -412,3 +412,27 @@ Canonical exported rows support repeated capture across temporary paths. The
 Linux descriptor reader remains separate; there is no silent export fallback.
 Synthetic ACP/ZIP/service and platform-override tests are not real Mac/Windows
 or native CLI proof. All prior ledger bytes, source pins and credits remain intact.
+
+
+## November 15 upstream refresh
+
+This normal merge includes all upstream main through
+[`f2c944947ddf2b343395049aa4ffb9792b714a04`](https://github.com/pingdotgg/t3code/commit/f2c944947ddf2b343395049aa4ffb9792b714a04)
+(commit time November 15, 2026, 08:20:39 UTC), from refinement
+[`be4c63e93b694e15cd791d2d7035bd509a38a81e`](https://github.com/brandonvincitore/t3code/commit/be4c63e93b694e15cd791d2d7035bd509a38a81e).
+Earlier source pins and author credits above remain historical attribution.
+
+Upstream's prompt/cancel queue ordering (#30846), recovery disarming (#28360),
+unfinished ACP stop classification (#28797), database-lock retry (#36635), and
+process teardown (#36719) are composed with the fork's start ownership, native
+history receipts, and Approve for Me admission checks. Node 26.13.1 is adopted
+together with migration 026's explicit JSON typing (#34576).
+
+Prepared remote-update retry (#33605) was already adapted by
+[`3a34770f4176f53edcf5641ab1c29ac23839f4cd`](https://github.com/brandonvincitore/t3code/commit/3a34770f4176f53edcf5641ab1c29ac23839f4cd).
+Its upstream merge is overlapping history, not a newly added fork capability;
+the fork retains its event-driven regression coverage and stricter reservation
+identity checks. Native turn Resume (#36526) follows each provider's advertised
+implementation; Kiro does not gain an unsupported native Resume operation.
+Closed, unmerged #36801 is not imported. #30566 and discussion #32345 retain their
+existing ownership and source records.
