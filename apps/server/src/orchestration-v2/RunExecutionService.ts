@@ -1366,6 +1366,12 @@ export const layer: Layer.Layer<
                   .responseStreamingMode,
             ),
           );
+          if (
+            input.shouldStartProviderTurn !== undefined &&
+            !(yield* input.shouldStartProviderTurn())
+          ) {
+            return null;
+          }
           yield* input.baseline ?? captureRunBaseline(input);
           if (
             input.shouldStartProviderTurn !== undefined &&
