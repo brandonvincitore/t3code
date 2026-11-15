@@ -79,7 +79,6 @@ import { AcpSessionConfigError } from "@t3tools/provider-acp/server/AcpSessionRu
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
-import * as ResourceCleanupService from "./ResourceCleanupService.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as ProviderUsageAnalytics from "../telemetry/ProviderUsageAnalytics.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
@@ -1389,7 +1388,6 @@ function layerStartEffectWorker(
       Layer.mergeAll(
         harness.layer,
         Layer.mock(RunExecutionService.RunExecutionServiceV2)({}),
-        Layer.mock(ResourceCleanupService.ResourceCleanupService)({}),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({}),
         Layer.mock(ProviderTurnControlService.ProviderTurnControlServiceV2)(control),
         Layer.mock(RunFinalizationService.RunFinalizationService)({}),

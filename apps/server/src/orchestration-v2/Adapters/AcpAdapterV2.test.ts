@@ -4368,7 +4368,7 @@ describe("AcpAdapterV2", () => {
         flavor: {
           driver: ACP_TEST_DRIVER,
           capabilities: AcpProviderCapabilitiesV2,
-          normalizeSessionUpdate: normalizeDevinSessionUpdate,
+          normalizeSessionUpdate: (notification) => [normalizeDevinSessionUpdate(notification)],
           normalizeToolCall: normalizeDevinToolCall,
           extractSubagentUpdate: extractDevinSubagentUpdate,
           makeRuntime: makeMockRuntime({

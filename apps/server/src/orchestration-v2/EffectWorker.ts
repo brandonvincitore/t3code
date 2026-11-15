@@ -95,7 +95,6 @@ export const layerExecutor: Layer.Layer<
   never,
   | ProviderSessionManager.ProviderSessionManagerV2
   | RunFinalizationService.RunFinalizationService
-  | ResourceCleanupService.ResourceCleanupService
   | CheckpointRollbackService.CheckpointRollbackServiceV2
   | ProviderTurnControlService.ProviderTurnControlServiceV2
   | ProviderTurnStartService.ProviderTurnStartServiceV2
