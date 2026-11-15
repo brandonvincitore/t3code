@@ -25,6 +25,22 @@ const commands = vi.hoisted(() => ({
 const grants = vi.hoisted(() => ({ scopes: new Set<string>() }));
 const dialogs = vi.hoisted(() => ({ confirm: vi.fn() }));
 
+vi.mock(import("../../state/server"), async (original) => {
+  const actual = await original();
+  const { Atom } = await import("effect/reactivity");
+  const allowed = Atom.make(true);
+  return {
+    ...actual,
+    serverEnvironment: {
+      ...actual.serverEnvironment,
+      syncNativeHistory: {
+        ...actual.serverEnvironment.syncNativeHistory,
+        permissionAtom: () => allowed,
+      },
+    },
+  };
+});
+
 vi.mock(import("~/state/session"), async (original) => ({
   ...(await original()),
   useEnvironmentScope: ((_id: unknown, scope: string) => grants.scopes.has(scope)) as never,
@@ -228,6 +244,8 @@ it.each(["Save", "Disable"])("keeps other provider edits through a %s refetch", 
       expect(button.disabled).toBe(true);
     }
   }
+  expect(commands.listProviders).toHaveBeenCalledTimes(2);
+  expect(input("other base URL").disabled).toBe(false);
   await userEvent.fill(input("other base URL"), "https://newer.example.test/v1");
   await act(async () => resolveReload(response));
 
