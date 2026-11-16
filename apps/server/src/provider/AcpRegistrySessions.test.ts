@@ -165,11 +165,43 @@ describe("ACP native session ownership", () => {
           (yield* h.service.deleteSession(target).pipe(Effect.flip)).reason,
           "session_delete_failed",
         );
+        const sql = yield* SqlClient.SqlClient;
+        yield* sql`
+          INSERT INTO orchestration_v2_projection_nodes
+            (node_id, thread_id, root_node_id, kind, status, payload_json)
+          VALUES ('native-owner-node', ${owner}, 'native-owner-node', 'subagent', 'completed', '{}')
+        `;
+        yield* sql`
+          UPDATE orchestration_v2_projection_provider_threads
+          SET thread_id = NULL, owner_node_id = 'native-owner-node'
+          WHERE provider_thread_id = ${`provider:${owner}`}
+        `;
+        assert.deepEqual(yield* h.service.importSession(target), {
+          threadId: owner,
+          imported: false,
+        });
+        assert.equal(
+          (yield* h.service.listSessions({ instanceId, projectId })).sessions[0]?.importedThreadId,
+          owner,
+        );
+        const shell = h.shells.get(owner);
+        assert.ok(shell);
+        h.shells.set(owner, { ...shell, deletedAt: "2026-11-09T00:00:00.000Z" });
+        assert.equal(
+          (yield* h.service.importSession(target).pipe(Effect.flip)).reason,
+          "session_import_failed",
+        );
         h.shells.delete(owner);
+        assert.equal(
+          (yield* h.service.importSession(target).pipe(Effect.flip)).reason,
+          "session_import_failed",
+        );
         assert.equal(
           (yield* h.service.deleteSession(target).pipe(Effect.flip)).reason,
           "session_delete_failed",
         );
+        assert.equal(h.calls.launches, 0);
+        assert.equal(h.calls.imports, 0);
         assert.equal(h.calls.deletions, 0);
       }).pipe(Effect.scoped, Effect.provide(SqlitePersistence.layerMemory)),
   );
