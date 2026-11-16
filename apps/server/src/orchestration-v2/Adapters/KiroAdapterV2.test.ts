@@ -5780,11 +5780,15 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
         yield* session.startTurn(turn(ordinal));
         assert.equal(terminalStatus(yield* Fiber.join(events)), "completed");
       });
+      const refused = Effect.fn("test.ownedLease.refused")(function* () {
+        const before = yield* fs.readFileString(wire);
+        const error = yield* session.startTurn(turn(2)).pipe(Effect.flip);
+        assert.isTrue(refusedBeforePrompt(error));
+        assert.include(knownProviderFailureMessage(error), "native session lease");
+        assert.equal(yield* fs.readFileString(wire), before);
+      });
       if (platform === "missing identity") {
-        assert.equal(
-          (yield* session.startTurn(turn(1)).pipe(Effect.flip))._tag,
-          "ProviderAdapterThreadInUseError",
-        );
+        yield* refused();
         return;
       }
       yield* send(1);
@@ -5824,19 +5828,13 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
         { ...stamp, acquiredAt: "2099-01-01T00:00:00.000Z" },
       ]) {
         yield* fs.writeFileString(lease, JSON.stringify(changed));
-        assert.equal(
-          (yield* session.startTurn(turn(2)).pipe(Effect.flip))._tag,
-          "ProviderAdapterThreadInUseError",
-        );
+        yield* refused();
       }
       yield* fs.writeFileString(
         lease,
         JSON.stringify({ ...stamp, acquiredAt: "2020-01-01T00:00:00.000Z" }),
       );
-      assert.equal(
-        (yield* session.startTurn(turn(2)).pipe(Effect.flip))._tag,
-        "ProviderAdapterThreadInUseError",
-      );
+      yield* refused();
       yield* fs.writeFileString(lease, original);
       yield* send(2);
       const calls = (yield* fs.readFileString(wire))

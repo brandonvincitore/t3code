@@ -1051,7 +1051,21 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
         startTurn: Effect.fn("KiroHistory.startTurn")(function* (
           turn: ProviderAdapter.ProviderAdapterV2TurnInput,
         ) {
-          yield* admitThread(turn.providerThread, turn.runtimePolicy.cwd ?? undefined);
+          yield* admitThread(turn.providerThread, turn.runtimePolicy.cwd ?? undefined).pipe(
+            Effect.mapError(
+              (cause) =>
+                new ProviderAdapter.ProviderAdapterTurnStartError({
+                  driver: KIRO_PROVIDER,
+                  threadId: turn.threadId,
+                  providerThreadId: turn.providerThread.id,
+                  runId: turn.runId,
+                  cause: new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                    driver: KIRO_PROVIDER,
+                    cause,
+                  }),
+                }),
+            ),
+          );
           return yield* session.startTurn(turn);
         }),
       } satisfies ProviderAdapter.ProviderAdapterV2SessionRuntime;

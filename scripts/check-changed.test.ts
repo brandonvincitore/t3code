@@ -18,7 +18,7 @@ import * as TestClock from "effect/testing/TestClock";
 import {
   comparisonBase,
   defaultConcurrency,
-  docReaderTests,
+  crossFileTests,
   gitLines,
   ignoredCheckInputs,
   runSteps,
@@ -43,10 +43,30 @@ describe("check:changed", () => {
     assert.isTrue(
       decide(["docs/user/t3-connect-troubleshooting.md"], packages, false).outputs.test_server,
     );
-    assert.deepStrictEqual(docReaderTests(["docs/user/t3-connect-troubleshooting.md"]), [
+    assert.deepStrictEqual(crossFileTests(["docs/user/t3-connect-troubleshooting.md"]), [
       "apps/server/src/cloud/ConnectReachability.test.ts",
     ]);
     assert.deepStrictEqual(decide(["docs/user/install.md"], packages, false).affected, []);
+  });
+
+  it.each([
+    ["packages/provider-acp/src/server/AcpSessionRuntime.ts", true],
+    ["packages/provider-kiro/src/server/adapter.ts", true],
+    ["apps/server/src/orchestration-v2/RunExecutionService.ts", true],
+    ["apps/server/src/orchestration-v2/ProviderSessionManager.ts", true],
+    ["apps/server/src/orchestration-v2/ProviderTurnStartService.ts", true],
+    ["apps/server/src/orchestration-v2/OrchestrationEffectWorker.ts", true],
+    ["apps/web/src/components/usage/UsagePage.tsx", false],
+    ["docs/user/install.md", false],
+  ] as const)("selects Kiro compatibility tests for %s: %s", (file, expected) => {
+    const files = [file];
+    const affected = decide(files, readWorkspace(), false).affected;
+    assert.equal(
+      crossFileTests(files, affected).includes(
+        "apps/server/src/orchestration-v2/Adapters/KiroAdapterV2.test.ts",
+      ),
+      expected,
+    );
   });
 
   it.effect(

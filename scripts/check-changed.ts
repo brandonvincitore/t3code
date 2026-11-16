@@ -249,11 +249,25 @@ const override = Effect.fn("checkChanged.override")(function* (
   return value;
 });
 
-// Tests that read a doc; a changed doc has no test beside it to select them.
-export const docReaderTests = (files: ReadonlyArray<string>) =>
-  files.includes("docs/user/t3-connect-troubleshooting.md")
+// These cross-package contracts have no adjacent tests to select.
+export const crossFileTests = (
+  files: ReadonlyArray<string>,
+  affected: ReadonlyArray<string> = [],
+) => [
+  ...(files.includes("docs/user/t3-connect-troubleshooting.md")
     ? ["apps/server/src/cloud/ConnectReachability.test.ts"]
-    : [];
+    : []),
+  ...(affected.includes("@t3tools/provider-kiro") ||
+  files.some((file) => file.startsWith("apps/server/src/orchestration-v2/"))
+    ? [
+        "apps/server/src/orchestration-v2/Adapters/KiroAdapterV2.test.ts",
+        "apps/server/src/provider/KiroNativeHistory.test.ts",
+        "apps/server/src/provider/KiroNativeTitles.test.ts",
+        "apps/server/src/provider/KiroSecretStorage.test.ts",
+        "apps/server/src/provider/KiroProvider.test.ts",
+      ]
+    : []),
+];
 
 const checkChanged = Effect.fn("checkChanged")(function* (input: {
   readonly ref: Option.Option<string>;
@@ -363,7 +377,7 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
       if (entry.startsWith(prefix) && TEST.test(entry)) tests.add(path.join(dir, entry));
     }
   }
-  for (const test of docReaderTests(files)) tests.add(test);
+  for (const test of crossFileTests(files, affected)) tests.add(test);
   // It reads files other than the ones beside it, so no changed file selects it.
   if (affected.includes("t3")) tests.add("apps/server/src/provider/AgentContextBudget.test.ts");
   const { vitestTests, nodeTests } = splitTests(tests);
