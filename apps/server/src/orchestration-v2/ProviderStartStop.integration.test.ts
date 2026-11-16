@@ -452,7 +452,7 @@ it.effect.each([
               type: "thread.metadata.update",
               commandId: CommandId.make(`lock:${operation}`),
               threadId,
-              title: `Synthetic native I/O ${operation}`,
+              branch: null,
             })
             .pipe(Effect.asVoid, Effect.orDie);
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
