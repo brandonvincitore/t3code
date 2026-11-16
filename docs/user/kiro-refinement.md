@@ -7,7 +7,8 @@ your organization's approval for the Kiro account, tools, and repositories you u
 ## Start a separate installation
 
 Install [Vite+](https://github.com/pingdotgg/t3code#install-vp), which supplies the required Node
-version, then build the refinement build on the machine where Kiro will run:
+version, and [Rust](https://rust-lang.org/install) for the source build. Then build on the
+machine where Kiro will run:
 
 ```bash
 git clone --branch codex/kiro-refinement https://github.com/brandonvincitore/t3code.git t3code-kiro-refinement
