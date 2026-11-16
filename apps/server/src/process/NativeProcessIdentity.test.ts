@@ -6,6 +6,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as ServerConfig from "../config.ts";
 import * as NativeProcessIdentity from "./NativeProcessIdentity.ts";
+import { probeProcessIdentity } from "./processIdentityProtocol.ts";
 
 it.live.each([
   "identity",
@@ -17,6 +18,7 @@ it.live.each([
   "failed-helper",
   "absent-helper",
   "non-executable",
+  "pid-one",
 ] as const)("reads precise native identity or fails closed: %s", (scenario) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -62,6 +64,11 @@ process.stdout.write(row === undefined ? output : JSON.stringify(row)); process.
         exists: (file) => (file === binary ? fs.exists(file) : Effect.succeed(false)),
       }),
     );
+    if (scenario === "pid-one") {
+      assert.equal((yield* probeProcessIdentity(binary, 1))?.pid, 1);
+      assert.isUndefined(yield* reader.read(1));
+      return;
+    }
     const valid =
       scenario === "identity" || (scenario === "non-executable" && platform === "win32");
     assert.deepEqual(yield* reader.read(127), valid ? identity : undefined);

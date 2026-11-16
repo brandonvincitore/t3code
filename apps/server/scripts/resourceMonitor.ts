@@ -3,7 +3,10 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Option from "effect/Option";
+import * as Stream from "effect/Stream";
 import * as ChildProcess from "effect/process/ChildProcess";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { probeProcessIdentity } from "../src/process/processIdentityProtocol.ts";
 
 class ResourceMonitorBuildError extends Schema.TaggedError<ResourceMonitorBuildError>()(
@@ -15,6 +18,18 @@ class ResourceMonitorBuildError extends Schema.TaggedError<ResourceMonitorBuildE
   }
 }
 const isResourceMonitorBuildError = Schema.is(ResourceMonitorBuildError);
+const decodeArtifact = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({
+      reason: Schema.Literal("compiler-artifact"),
+      target: Schema.Struct({
+        name: Schema.Literal("t3-resource-monitor"),
+        kind: Schema.Array(Schema.String),
+      }),
+      executable: Schema.String,
+    }),
+  ),
+);
 
 export const buildResourceMonitor = Effect.fn("buildResourceMonitor")(
   function* (repoRoot: string) {
@@ -22,21 +37,46 @@ export const buildResourceMonitor = Effect.fn("buildResourceMonitor")(
     const path = yield* Path.Path;
     const platform = yield* HostProcess.Platform;
     const arch = yield* HostProcess.Architecture;
+    const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const crate = path.join(repoRoot, "native/resource-monitor");
-    const exit = yield* ChildProcess.make(
-      "cargo",
-      ["build", "--locked", "--release", "--manifest-path", path.join(crate, "Cargo.toml")],
-      {
-        cwd: repoRoot,
-        stdin: "ignore",
-        stdout: "inherit",
-        stderr: "inherit",
-      },
-    ).pipe(
-      Effect.flatMap((child) => child.exitCode),
-      Effect.scoped,
+    const handle = yield* spawner.spawn(
+      ChildProcess.make(
+        "cargo",
+        [
+          "build",
+          "--locked",
+          "--release",
+          "--message-format=json-render-diagnostics",
+          "--manifest-path",
+          path.join(crate, "Cargo.toml"),
+        ],
+        {
+          cwd: repoRoot,
+          stdin: "ignore",
+          stderr: "inherit",
+        },
+      ),
     );
-    if (exit !== 0) return yield* new ResourceMonitorBuildError({});
+    const [artifact, exit] = yield* Effect.all(
+      [
+        handle.stdout.pipe(
+          Stream.decodeText(),
+          Stream.splitLines,
+          Stream.runFold(
+            () => undefined as string | undefined,
+            (selected, line) => {
+              const row = decodeArtifact(line);
+              return Option.isSome(row) && row.value.target.kind.includes("bin")
+                ? row.value.executable
+                : selected;
+            },
+          ),
+        ),
+        handle.exitCode,
+      ],
+      { concurrency: "unbounded" },
+    );
+    if (exit !== 0 || artifact === undefined) return yield* new ResourceMonitorBuildError({});
     const name = platform === "win32" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
     const directory = path.join(
       repoRoot,
@@ -45,12 +85,13 @@ export const buildResourceMonitor = Effect.fn("buildResourceMonitor")(
     );
     yield* fs.makeDirectory(directory, { recursive: true });
     const staged = path.join(directory, name);
-    yield* fs.copyFile(path.join(crate, "target/release", name), staged);
+    yield* fs.copyFile(artifact, staged);
     const row = yield* probeProcessIdentity(staged, process.pid);
     if (platform !== "win32" && (row === null || row.zombie))
       return yield* new ResourceMonitorBuildError({});
     return staged;
   },
+  Effect.scoped,
   Effect.mapError((cause) =>
     isResourceMonitorBuildError(cause) ? cause : new ResourceMonitorBuildError({ cause }),
   ),

@@ -8,7 +8,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { buildResourceMonitor } from "./resourceMonitor.ts";
 
-it.live.each(["valid", "legacy", "failed build"] as const)(
+it.live.each(["valid", "legacy", "failed build", "custom target"] as const)(
   "stages a standalone compatible helper or rejects the build: %s",
   (scenario) =>
     Effect.gen(function* () {
@@ -16,7 +16,10 @@ it.live.each(["valid", "legacy", "failed build"] as const)(
       const platform = yield* HostProcess.Platform;
       const arch = yield* HostProcess.Architecture;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-clean-helper-build-" });
-      const output = `${root}/native/resource-monitor/target/release`;
+      const output =
+        scenario === "custom target"
+          ? `${root}/configured-target/host/release`
+          : `${root}/native/resource-monitor/target/release`;
       const name = platform === "win32" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
       yield* fs.makeDirectory(output, { recursive: true });
       yield* fs.writeFileString(`${output}/${name}`, "compiled-helper");
@@ -42,9 +45,19 @@ it.live.each(["valid", "legacy", "failed build"] as const)(
             kill: () => Effect.void,
             unref: Effect.succeed(Effect.void),
             stdin: Sink.drain,
-            stdout: cargo
-              ? Stream.empty
-              : Stream.make(new TextEncoder().encode(JSON.stringify(reply))),
+            stdout: Stream.make(
+              new TextEncoder().encode(
+                JSON.stringify(
+                  cargo
+                    ? {
+                        reason: "compiler-artifact",
+                        target: { name: "t3-resource-monitor", kind: ["bin"] },
+                        executable: `${output}/${name}`,
+                      }
+                    : reply,
+                ),
+              ),
+            ),
             stderr: Stream.empty,
             all: Stream.empty,
             getInputFd: () => Sink.drain,
@@ -56,7 +69,10 @@ it.live.each(["valid", "legacy", "failed build"] as const)(
         Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, replacement),
         Effect.result,
       );
-      assert.equal(result._tag, scenario === "valid" ? "Success" : "Failure");
+      assert.equal(
+        result._tag,
+        scenario === "valid" || scenario === "custom target" ? "Success" : "Failure",
+      );
       if (result._tag === "Failure") {
         assert.include(result.failure.message, "Install Rust/Cargo");
         return;
@@ -65,7 +81,7 @@ it.live.each(["valid", "legacy", "failed build"] as const)(
         result.success,
         `${root}/apps/server/dist/resource-monitor/${platform}-${arch}/${name}`,
       );
-      yield* fs.remove(`${root}/native`, { recursive: true });
+      yield* fs.remove(output, { recursive: true });
       assert.equal(yield* fs.readFileString(result.success), "compiled-helper");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

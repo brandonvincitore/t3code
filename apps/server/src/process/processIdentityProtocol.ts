@@ -5,7 +5,7 @@ import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 const Identity = Schema.Struct({
-  pid: Schema.Int.check(Schema.isGreaterThan(1)),
+  pid: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
   ppid: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   birthId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
   startedAtUpperBoundMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
