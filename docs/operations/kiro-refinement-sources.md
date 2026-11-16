@@ -455,3 +455,26 @@ scan-claim guards. Accessible usage labels (#37238, #37241) retain credit-only
 billing, and provider-process failure attribution (#37325) retains terminal
 signals for late subscribers. Earlier monitor-selected fixes remain integrated
 from the preceding refresh; they are not new evening additions.
+
+### November 16 fork-owned launcher lease repair
+
+The [launcher admission repair](https://github.com/brandonvincitore/t3code/commit/30f3d8986de14fbe3950911239f04b3d1e069543)
+replaces direct-child-only lease proof with precise process birth identity and
+rechecked ancestry under the owned live CLI handle. Observation uses the existing
+native helper independently of process-tree cleanup; it grants no authority to
+clear leases or signal holders. Host, canonical-source, lock, unchanged-lease and
+sibling-instance guards remain. Pre-prompt refusals settle as unsent, including
+ownership lost during preparation.
+
+The public macOS Kiro 3.3.0 archive has SHA-256
+`97906d8a4b6c1e77435c1f50048d2da2fbde7755f72cefdb59cc15b1f85575b8`;
+its ACP server matches the earlier `37ad677e...` source pin above. All previous
+source pins and author credits remain. Native Mac qualification uses initialize
+only and synthetic leases over the actual child engine, plus scripted workflow
+checks. It does not establish account-backed prompt success or recovery of the
+reported parent conversation.
+
+Manual source builds must rebuild the helper with `vp run build:resource-monitor`
+alongside the server. Existing release packagers include it; old or unavailable
+helpers fail closed. `check:changed` now selects the cross-package Kiro/ACP suites
+and runs native formatting, tests and a release build when helper sources change.

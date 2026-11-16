@@ -552,6 +552,15 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
             "--manifest-path",
             "native/resource-monitor/Cargo.toml",
           ]),
+          command("native process helper build", [
+            "exec",
+            "cargo",
+            "build",
+            "--locked",
+            "--release",
+            "--manifest-path",
+            "native/resource-monitor/Cargo.toml",
+          ]),
         ]
       : []),
     ...(present.length > 0

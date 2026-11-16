@@ -43,7 +43,8 @@ it.live.each([
     const binary = writeFakeCli({
       directory: root,
       name: "process-identity",
-      source: `process.stdout.write(${JSON.stringify(output)}); process.exit(${scenario === "failed-helper" ? 1 : 0});`,
+      source: `if (process.argv[2] !== '--process-identity' || process.argv[3] !== '127' || process.argv.length !== 4) process.exit(64);
+process.stdout.write(${JSON.stringify(output)}); process.exit(${scenario === "failed-helper" ? 1 : 0});`,
     });
     const read = yield* NativeProcessIdentity.make().pipe(
       Effect.provide(ServerConfig.layerTest(process.cwd(), root)),
