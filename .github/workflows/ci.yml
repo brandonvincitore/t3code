@@ -191,6 +191,12 @@ jobs:
           cat "$RUNNER_TEMP/apt.log"
           exit "$(cat "$RUNNER_TEMP/apt-status")"
 
+      - name: Setup Rust for the bundled resource monitor
+        if: ${{ !cancelled() && needs.changes.outputs.build != 'false' }}
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+
       - name: Build desktop pipeline
         id: build
         if: ${{ !cancelled() && steps.electron.outcome == 'success' && steps.apt.outcome == 'success' && needs.changes.outputs.build != 'false' }}
