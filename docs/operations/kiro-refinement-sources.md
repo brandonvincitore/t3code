@@ -436,3 +436,22 @@ identity checks. Native turn Resume (#36526) follows each provider's advertised
 implementation; Kiro does not gain an unsupported native Resume operation.
 Closed, unmerged #36801 is not imported. #30566 and discussion #32345 retain their
 existing ownership and source records.
+
+### November 15 evening upstream refresh
+
+The next normal merge includes all upstream main through
+[`6b7027b1f43eebc4c7edf5304236a0775b2d8928`](https://github.com/pingdotgg/t3code/commit/6b7027b1f43eebc4c7edf5304236a0775b2d8928)
+(commit time November 16, 2026, 00:58:23 UTC), from published refinement
+[`307ee075801472ad624e2ebacbb727e2a5db0dea`](https://github.com/brandonvincitore/t3code/commit/307ee075801472ad624e2ebacbb727e2a5db0dea).
+It includes all 92 upstream commits after the preceding cutoff. Earlier pins,
+credits and replacement records remain historical attribution.
+
+Upstream ACP session-owner recognition (#37244) is already covered by the
+fork's service-based ownership lookup, including node owners, workspace guards
+and fail-closed deletion. Its arbitrary-thread regression joins that coverage;
+no second ownership query or transport implementation is added. Upstream
+workspace rescan notifications (#37165) compose with the fork's revision and
+scan-claim guards. Accessible usage labels (#37238, #37241) retain credit-only
+billing, and provider-process failure attribution (#37325) retains terminal
+signals for late subscribers. Earlier monitor-selected fixes remain integrated
+from the preceding refresh; they are not new evening additions.
