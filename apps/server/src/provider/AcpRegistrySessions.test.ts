@@ -13,6 +13,7 @@ import {
 } from "@t3tools/contracts";
 import type { ProviderInstance } from "@t3tools/provider-core/server/driver";
 import * as AcpRegistryRuntimeCoordinator from "@t3tools/provider-acp-registry/server/AcpRegistryRuntimeCoordinator";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Result from "effect/Result";
@@ -186,7 +187,10 @@ describe("ACP native session ownership", () => {
         );
         const shell = h.shells.get(owner);
         assert.ok(shell);
-        h.shells.set(owner, { ...shell, deletedAt: "2026-11-09T00:00:00.000Z" });
+        h.shells.set(owner, {
+          ...shell,
+          deletedAt: DateTime.makeUnsafe("2026-11-09T00:00:00.000Z"),
+        });
         assert.equal(
           (yield* h.service.importSession(target).pipe(Effect.flip)).reason,
           "session_import_failed",
