@@ -31,6 +31,14 @@ export interface ProviderCredentials {
   readonly remove: Effect.Effect<void, ProviderCredentialError>;
 }
 
+export interface ProviderProcessIdentity {
+  readonly pid: number;
+  readonly ppid: number;
+  readonly birthId: string;
+  readonly startedAtUpperBoundMs: number;
+  readonly zombie: boolean;
+}
+
 export class ProviderHost extends Context.Service<
   ProviderHost,
   {
@@ -58,6 +66,9 @@ export class ProviderHost extends Context.Service<
       { readonly metadata: string; readonly transcript: string },
       NativeHistoryReadError
     >;
+    readonly readProcessIdentity: (
+      pid: number,
+    ) => Effect.Effect<ProviderProcessIdentity | undefined>;
     readonly resolveExtractedTextPath?: (path: string) => Effect.Effect<string | undefined>;
     readonly credentials: (
       namespace: string,

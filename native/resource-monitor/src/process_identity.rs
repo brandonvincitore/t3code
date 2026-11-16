@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn parses_linux_identity_with_arbitrary_stat_names_and_rejects_invalid_rows() {
         let row = |name: &str, state: &str, ticks: &str| {
-            format!("42 ({name}) {state} 1 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 {ticks} 0\n")
+            format!("42 ({name}) {state} 1 0 0 0 -1 0 0 0 0 0 0 0 0 0 0 0 0 0 {ticks} 0\n")
         };
         for name in ["normal", "a) b (c)", "name\nwith newline"] {
             let stat = parse_linux_stat(row(name, "S", "123").as_bytes(), 42).unwrap();

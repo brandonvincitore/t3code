@@ -49,6 +49,7 @@ import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import { makeAssistantStreamingFilter } from "../assistantStreaming.ts";
 import { makeProviderEventRoutingState, routeProviderEvent } from "../RunExecutionService.ts";
 import * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
+import type { AcpAdapterV2RuntimeInput } from "@t3tools/provider-acp/server/adapter";
 import {
   knownProviderFailureMessage,
   refusedBeforePrompt,
@@ -5679,12 +5680,14 @@ it.effect("refuses a present native lease before spawning or loading any Kiro ru
   }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );
 
-it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
+it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as const)(
   "continues only under the current Kiro runtime's exact own lease and isolates sibling instances on %s",
   (platform) =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-own-lease-" });
+      const root = yield* fs
+        .makeTempDirectoryScoped({ prefix: "kiro-own-lease-" })
+        .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
       const home = `${root}/home`;
       const native = `${home}/.kiro`;
       const lease = `${native}/session-leases/owned-native.lease`;
@@ -5697,7 +5700,15 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
       import { writeFileSync, appendFileSync } from 'node:fs';
       import { hostname } from 'node:os';
       import { createInterface } from 'node:readline';
+      import { spawn } from 'node:child_process';
       const sessionId = 'owned-native';
+      if (process.env.LAUNCHER === '1') {
+        const child = spawn(process.execPath, [process.argv[1]], {
+          stdio: 'inherit', env: { ...process.env, LAUNCHER: '0' },
+        });
+        process.on('SIGTERM', () => child.kill('SIGTERM'));
+        child.on('exit', code => process.exit(code ?? 1));
+      } else {
       createInterface({ input: process.stdin }).on('line', line => {
         const { id, method } = JSON.parse(line); if (id === undefined) return;
         appendFileSync(process.env.WIRE, JSON.stringify({ method })+'\n');
@@ -5711,6 +5722,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
         if (method === 'session/prompt') result = { stopReason:'end_turn' };
         process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id, result })+'\n');
       });
+      }
     `,
       );
       const instanceId = ProviderInstanceId.make("kiro-own-lease");
@@ -5721,51 +5733,102 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
         runtimeMode: "approval-required",
         interactionMode: "default",
       });
-      const environment = { HOME: home, KIRO_HOME: native, XDG_CONFIG_HOME: `${home}/xdg` };
+      const environment = {
+        HOME: home,
+        KIRO_HOME: native,
+        XDG_CONFIG_HOME: `${home}/xdg`,
+        WIRE: wire,
+        LEASE: lease,
+        LAUNCHER: platform === "launcher" ? "1" : "0",
+      };
       const runtimeScope = yield* Scope.make();
       yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
       let observedRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+      const identities = new Map<number, ProviderHost.ProviderProcessIdentity>();
+      let withdrawnLease: string | undefined;
+      const mcp = yield* McpProviderSessions.McpProviderSessions;
+      const host = yield* ProviderHost.ProviderHost;
+      const binaryPath =
+        platform === "launcher"
+          ? writeFakeCli({
+              directory: root,
+              name: "kiro-launcher",
+              source: yield* fs.readFileString(script),
+            })
+          : undefined;
       const adapter = yield* makeKiroAdapterV2({
         instanceId,
-        settings: ENABLED_KIRO_SETTINGS,
+        settings:
+          binaryPath === undefined
+            ? ENABLED_KIRO_SETTINGS
+            : decodeKiroTestSettings({ enabled: true, binaryPath }),
         environment,
         selfInvocation: yield* resolveSelfInvocation(),
-        makeRuntime: (input) =>
-          AcpSessionRuntime.make({
-            ...input,
-            observeProcessIdentity: platform !== "missing identity",
-            spawn: {
-              command: process.execPath,
-              args: [script],
-              cwd: root,
-              extendEnv: false,
-              env: { ...environment, WIRE: wire, LEASE: lease },
-            },
-          }).pipe(
-            Effect.provideService(
-              HostProcess.Platform,
-              platform === "missing identity" ? "linux" : platform,
-            ),
-            Effect.provideService(Scope.Scope, runtimeScope),
-            Effect.tap((runtime) =>
-              Effect.sync(() => {
-                observedRuntime = runtime;
-              }),
-            ),
-          ),
-      });
-      const session = yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("owned-runtime"),
-        modelSelection,
-        runtimePolicy,
-      });
+        ...(platform === "launcher"
+          ? {}
+          : {
+              makeRuntime: (input: AcpAdapterV2RuntimeInput) =>
+                AcpSessionRuntime.make({
+                  ...input,
+                  observeProcessIdentity: platform !== "missing identity",
+                  spawn: {
+                    command: process.execPath,
+                    args: [script],
+                    cwd: root,
+                    extendEnv: false,
+                    env: environment,
+                  },
+                }).pipe(
+                  Effect.provideService(
+                    HostProcess.Platform,
+                    platform === "missing identity" ? "linux" : platform,
+                  ),
+                  Effect.provideService(Scope.Scope, runtimeScope),
+                  Effect.tap((runtime) =>
+                    Effect.sync(() => {
+                      observedRuntime = runtime;
+                    }),
+                  ),
+                ),
+            }),
+      }).pipe(
+        Effect.provideService(ProviderHost.ProviderHost, {
+          ...host,
+          readProcessIdentity: (pid) => Effect.sync(() => identities.get(pid)),
+        }),
+        Effect.provideService(McpProviderSessions.McpProviderSessions, {
+          ...mcp,
+          read: (threadId) =>
+            Effect.gen(function* () {
+              if (withdrawnLease !== undefined) yield* fs.writeFileString(lease, withdrawnLease);
+              return yield* mcp.read(threadId);
+            }),
+        }),
+      );
+      const session = yield* adapter
+        .openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("owned-runtime"),
+          modelSelection,
+          runtimePolicy,
+        })
+        .pipe(Effect.provideService(Scope.Scope, runtimeScope));
       const providerThread = yield* session.ensureThread({
         threadId,
         modelSelection,
         runtimePolicy,
       });
       const original = yield* fs.readFileString(lease);
+      const stamp = yield* decodeOwnedLease(original);
+      for (const pid of [stamp.pid, stamp.parentPid]) {
+        identities.set(pid, {
+          pid,
+          ppid: pid === stamp.pid ? stamp.parentPid : process.pid,
+          birthId: `scripted-birth:${pid}`,
+          startedAtUpperBoundMs: Date.parse(stamp.acquiredAt),
+          zombie: false,
+        });
+      }
       const turn = (ordinal: number) =>
         makeTurnInput({
           threadId,
@@ -5819,7 +5882,6 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
           .pipe(Effect.flip))._tag,
         "ProviderAdapterThreadInUseError",
       );
-      const stamp = yield* decodeOwnedLease(original);
       for (const changed of [
         { ...stamp, pid: stamp.pid + 1 },
         { ...stamp, parentPid: stamp.parentPid + 1 },
@@ -5837,6 +5899,8 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
       yield* refused();
       yield* fs.writeFileString(lease, original);
       yield* send(2);
+      withdrawnLease = JSON.stringify({ ...stamp, hostId: "foreign-host" });
+      yield* refused();
       const calls = (yield* fs.readFileString(wire))
         .trim()
         .split("\n")
@@ -5844,8 +5908,14 @@ it.live.each(["linux", "darwin", "win32", "missing identity"] as const)(
       assert.equal(calls.filter((call) => call.method === "session/prompt").length, 2);
       assert.equal(calls.filter((call) => call.method === "session/load").length, 0);
       yield* Scope.close(runtimeScope, Exit.void);
-      assert.isFalse(
-        yield* observedRuntime!.ownsProcess!(stamp.pid, stamp.parentPid, stamp.acquiredAt),
-      );
+      if (observedRuntime)
+        assert.isFalse(
+          yield* observedRuntime.ownsProcess!(stamp.pid, stamp.parentPid, stamp.acquiredAt),
+        );
+      else {
+        withdrawnLease = undefined;
+        yield* fs.writeFileString(lease, original);
+        yield* refused();
+      }
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );

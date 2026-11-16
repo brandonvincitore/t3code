@@ -51,16 +51,30 @@ describe("check:changed", () => {
 
   it.each([
     ["packages/provider-acp/src/server/AcpSessionRuntime.ts", true],
+    ["packages/provider-core/src/server/ProviderHost.ts", true],
     ["packages/provider-kiro/src/server/adapter.ts", true],
     ["apps/server/src/orchestration-v2/RunExecutionService.ts", true],
     ["apps/server/src/orchestration-v2/ProviderSessionManager.ts", true],
     ["apps/server/src/orchestration-v2/ProviderTurnStartService.ts", true],
     ["apps/server/src/orchestration-v2/OrchestrationEffectWorker.ts", true],
+    ["native/resource-monitor/src/process_identity.rs", true],
+    ["apps/server/src/process/NativeProcessIdentity.ts", true],
+    ["apps/server/src/provider/ProviderHostLive.ts", true],
     ["apps/web/src/components/usage/UsagePage.tsx", false],
     ["docs/user/install.md", false],
   ] as const)("selects Kiro compatibility tests for %s: %s", (file, expected) => {
     const files = [file];
     const affected = decide(files, readWorkspace(), false).affected;
+    if (file.startsWith("packages/provider-acp/") || file.startsWith("packages/provider-core/")) {
+      assert.include(
+        crossFileTests(files, affected),
+        "apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts",
+      );
+      assert.include(
+        crossFileTests(files, affected),
+        "apps/server/src/provider/acp/AcpSessionRuntime.processTree.test.ts",
+      );
+    }
     assert.equal(
       crossFileTests(files, affected).includes(
         "apps/server/src/orchestration-v2/Adapters/KiroAdapterV2.test.ts",

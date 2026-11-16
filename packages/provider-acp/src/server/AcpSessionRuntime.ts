@@ -31,6 +31,8 @@ import * as EffectAcpProtocol from "effect-acp/protocol";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import { AgentScope, AgentScopeThreadId, RAISE_OOM_SCORE_LINE } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import type { ProviderHost } from "@t3tools/provider-core/server/ProviderHost";
+import { ownsDescendantProcess } from "./processOwnership.ts";
 
 import { signalProcessGroup } from "@t3tools/provider-core/server/processGroup";
 import { sessionConfigOptionSupportsValue } from "./sessionConfig.ts";
@@ -110,6 +112,7 @@ export interface AcpSessionRuntimeOptions {
   readonly ownDetachedProcessGroup?: boolean;
   readonly ownDescendantProcessGroups?: boolean;
   readonly observeProcessIdentity?: boolean;
+  readonly readProcessIdentity?: ProviderHost["Service"]["readProcessIdentity"];
   readonly processGroupPlatform?: NodeJS.Platform;
   readonly processGroupTerminationGrace?: Duration.Input;
   readonly windowsProcessTreeTerminator?: (
@@ -2517,6 +2520,16 @@ export const make = Effect.fn("AcpSessionRuntime.make")(function* (
           return false;
         // The handle's exit signal belongs to this spawn, unlike probing a reusable PID.
         if (pid === Number(child.pid) && parentPid === process.pid) return yield* child.isRunning;
+        if (options.readProcessIdentity !== undefined) {
+          return yield* ownsDescendantProcess({
+            rootPid: Number(child.pid),
+            pid,
+            parentPid,
+            acquiredAtMs: Date.parse(acquiredAt),
+            isRootRunning: child.isRunning.pipe(Effect.orElseSucceed(() => false)),
+            readIdentity: options.readProcessIdentity,
+          });
+        }
         if (!posixController) return false;
         const owned = [...posixOwnershipLedger.values()].find((entry) => entry.pid === pid);
         if (!owned || owned.ppid !== parentPid) return false;

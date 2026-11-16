@@ -254,11 +254,23 @@ export const crossFileTests = (
   files: ReadonlyArray<string>,
   affected: ReadonlyArray<string> = [],
 ) => [
+  ...(affected.includes("@t3tools/provider-acp")
+    ? [
+        "apps/server/src/orchestration-v2/Adapters/AcpAdapterV2.test.ts",
+        "apps/server/src/provider/acp/AcpSessionRuntime.processTree.test.ts",
+      ]
+    : []),
   ...(files.includes("docs/user/t3-connect-troubleshooting.md")
     ? ["apps/server/src/cloud/ConnectReachability.test.ts"]
     : []),
   ...(affected.includes("@t3tools/provider-kiro") ||
-  files.some((file) => file.startsWith("apps/server/src/orchestration-v2/"))
+  files.some(
+    (file) =>
+      file.startsWith("apps/server/src/orchestration-v2/") ||
+      file.startsWith("native/resource-monitor/") ||
+      file === "apps/server/src/process/NativeProcessIdentity.ts" ||
+      file === "apps/server/src/provider/ProviderHostLive.ts",
+  )
     ? [
         "apps/server/src/orchestration-v2/Adapters/KiroAdapterV2.test.ts",
         "apps/server/src/provider/KiroNativeHistory.test.ts",
@@ -517,9 +529,31 @@ const checkChanged = Effect.fn("checkChanged")(function* (input: {
   const typecheckWorkers = Math.min(concurrency, affected.length);
   const command = (name: string, args: ReadonlyArray<string>) => ({ name, run: vp(args) });
   const compilerFiles = compilerApps.reduce((count, app) => count + app.names.length, 0);
+  const nativeMonitorChanged = files.some((file) => file.startsWith("native/resource-monitor/"));
 
   const steps: Array<Step<never>> = [
     ...(runPatchCheck ? [{ name: "unused patches", run: checkPatches }] : []),
+    ...(nativeMonitorChanged
+      ? [
+          command("native process helper format", [
+            "exec",
+            "cargo",
+            "fmt",
+            "--manifest-path",
+            "native/resource-monitor/Cargo.toml",
+            "--",
+            "--check",
+          ]),
+          command("native process helper tests", [
+            "exec",
+            "cargo",
+            "test",
+            "--locked",
+            "--manifest-path",
+            "native/resource-monitor/Cargo.toml",
+          ]),
+        ]
+      : []),
     ...(present.length > 0
       ? [command("format", ["fmt", "--check", "--no-error-on-unmatched-pattern", ...present])]
       : []),

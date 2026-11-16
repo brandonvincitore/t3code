@@ -743,6 +743,7 @@ function makeKiroAcpAdapterFlavor(
     input: AcpAdapterV2RuntimeInput,
   ) => Effect.Effect<AcpSessionRuntime.AcpSessionRuntime["Service"], never, Scope.Scope>,
   beforePrompt: NonNullable<AcpAdapterV2Flavor["beforePrompt"]>,
+  readProcessIdentity: ProviderHost.ProviderHost["Service"]["readProcessIdentity"],
 ): AcpAdapterV2Flavor {
   const makeNativeRuntime =
     options.makeRuntime ??
@@ -753,6 +754,7 @@ function makeKiroAcpAdapterFlavor(
         settings: options.settings,
         nativeAuto: kiroNativeAuto(runtimePolicy),
         environment: { ...options.environment, ...processEnvironment },
+        readProcessIdentity,
       });
     });
   // Not `registerExtensions`: a replacement runtime (rollback, failed resume) wires that after `start()`.
@@ -1015,6 +1017,7 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       yield* makeKiroNativeTitles(options.instanceId),
       rememberRuntime,
       ({ runtime, cwd, sessionId }) => admitRuntimeSession(runtime, cwd, sessionId),
+      host.readProcessIdentity,
     ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),

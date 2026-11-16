@@ -9876,6 +9876,23 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 sessionId: requestedSessionId,
                 cwd: turnInput.runtimePolicy.cwd ?? process.cwd(),
               }) ?? Effect.void
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProviderAdapter.ProviderAdapterTurnPreparationError({
+                    driver,
+                    cause:
+                      flavor.threadInUse?.(cause) === true
+                        ? new ProviderAdapter.ProviderAdapterThreadInUseError({
+                            driver,
+                            providerThreadId: turnInput.providerThread.id,
+                            detail:
+                              "The native session lease must be released in Kiro before continuing.",
+                            cause,
+                          })
+                        : cause,
+                  }),
+              ),
             );
             const startedAt = yield* DateTime.now;
             const nativeTurnId = `${requestedSessionId}:turn:${turnInput.providerTurnOrdinal}`;
