@@ -1,3 +1,5 @@
+mod process_identity;
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, BufRead, BufWriter, Write};
@@ -827,6 +829,14 @@ fn write_history(
 }
 
 fn main() -> io::Result<()> {
+    let mode = process_identity::parse_args(std::env::args_os().skip(1))
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidInput, message))?;
+    if let process_identity::Mode::ProcessIdentity(pid) = mode {
+        return write_event(
+            &mut BufWriter::new(io::stdout().lock()),
+            &process_identity::read(pid),
+        );
+    }
     let mut writer = BufWriter::new(io::stdout().lock());
     write_event(
         &mut writer,
