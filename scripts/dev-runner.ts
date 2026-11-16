@@ -668,17 +668,11 @@ const prepareFirstStart = Effect.fn("dev-runner.prepareFirstStart")(function* (i
   }
 
   const repoRoot = path.dirname(import.meta.dirname);
-  // Dev backends load the monitor from its Cargo output, which a fresh
-  // checkout or worktree does not have yet.
+  // Incremental Cargo builds also refresh existing binaries after native source changes.
   if (input.mode !== "dev:web") {
     const crate = path.join(repoRoot, "native/resource-monitor");
-    const binary =
-      (yield* HostProcess.Platform) === "win32" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
-    if (
-      !(yield* exists(path.join(crate, "target/release", binary))) &&
-      !(yield* exists(path.join(crate, "target/debug", binary)))
-    ) {
-      yield* Effect.logInfo("[dev-runner] building the resource monitor (first start only).");
+    {
+      yield* Effect.logInfo("[dev-runner] building the resource monitor.");
       const exitCode = yield* ChildProcess.make(
         "cargo",
         ["build", "--locked", "--release", "--manifest-path", path.join(crate, "Cargo.toml")],
@@ -697,7 +691,7 @@ const prepareFirstStart = Effect.fn("dev-runner.prepareFirstStart")(function* (i
       );
       if (exitCode !== 0) {
         yield* Effect.logWarning(
-          "[dev-runner] could not build the resource monitor; starting without process telemetry. Install Rust and run `vp run build:resource-monitor`.",
+          "[dev-runner] could not build the resource monitor. Kiro requires a compatible helper; install Rust and run `vp run build:resource-monitor`. Other providers can still start.",
         );
       }
     }

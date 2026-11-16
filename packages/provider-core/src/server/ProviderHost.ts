@@ -12,7 +12,7 @@ import type * as Option from "effect/Option";
 import type * as Scope from "effect/Scope";
 import type * as Stream from "effect/Stream";
 
-import type { ProviderCredentialError } from "./errors.ts";
+import type { ProviderCredentialError, ProviderProcessIdentityUnavailableError } from "./errors.ts";
 
 export interface ProviderHostPaths {
   readonly cwd: string;
@@ -69,6 +69,7 @@ export class ProviderHost extends Context.Service<
     readonly readProcessIdentity: (
       pid: number,
     ) => Effect.Effect<ProviderProcessIdentity | undefined>;
+    readonly ensureProcessIdentity: Effect.Effect<void, ProviderProcessIdentityUnavailableError>;
     readonly resolveExtractedTextPath?: (path: string) => Effect.Effect<string | undefined>;
     readonly credentials: (
       namespace: string,

@@ -1,3 +1,4 @@
+import { PROCESS_IDENTITY_UNAVAILABLE_MESSAGE } from "./errors.ts";
 import type {
   NodeId,
   OrchestrationV2ProviderFailure,
@@ -144,6 +145,8 @@ function curatedCauseMessages(cause: unknown): {
       if (typeof cause !== "object") break;
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
+        case "ProviderProcessIdentityUnavailableError":
+          return { known: PROCESS_IDENTITY_UNAVAILABLE_MESSAGE, category: categoryMessage() };
         case "AcpSessionConfigError": {
           const config = cause as Record<string, unknown>;
           if (

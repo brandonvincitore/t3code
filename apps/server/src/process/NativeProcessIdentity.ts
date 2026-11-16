@@ -1,48 +1,25 @@
+import { ProviderProcessIdentityUnavailableError } from "@t3tools/provider-core/server/errors";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
-import * as Schema from "effect/Schema";
-import * as Stream from "effect/Stream";
-import * as ChildProcess from "effect/process/ChildProcess";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
-
-const Identity = Schema.Struct({
-  pid: Schema.Int.check(Schema.isGreaterThan(1)),
-  ppid: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  birthId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
-  startedAtUpperBoundMs: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  zombie: Schema.Boolean,
-});
-const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.NullOr(Identity)));
-class NativeProcessIdentityReadError extends Schema.TaggedError<NativeProcessIdentityReadError>()(
-  "NativeProcessIdentityReadError",
-  {},
-) {}
+import { probeProcessIdentity } from "./processIdentityProtocol.ts";
 
 export const make = Effect.fn("NativeProcessIdentity.make")(function* () {
   const binary = yield* ResourceMonitorBinary.make();
+  const platform = yield* HostProcess.Platform;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+  const probe = Effect.fn("NativeProcessIdentity.readStrict")(function* (pid: number) {
+    return yield* probeProcessIdentity(yield* binary.resolve, pid).pipe(
+      Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    );
+  });
   let warned = false;
-  return Effect.fn("NativeProcessIdentity.read")(
+  const read = Effect.fn("NativeProcessIdentity.read")(
     function* (pid: number) {
       if (!Number.isSafeInteger(pid) || pid <= 1) return;
-      const path = yield* binary.resolve;
-      const handle = yield* spawner.spawn(
-        ChildProcess.make(path, ["--process-identity", String(pid)], {
-          stdin: "ignore",
-          stderr: "ignore",
-        }),
-      );
-      const [stdout, exitCode] = yield* Effect.all(
-        [handle.stdout.pipe(Stream.decodeText(), Stream.mkString), handle.exitCode],
-        { concurrency: "unbounded" },
-      );
-      if (exitCode !== 0 || stdout.length > 4_096)
-        return yield* new NativeProcessIdentityReadError({});
-      const row = yield* decode(stdout);
-      return row?.pid === pid ? row : undefined;
+      return (yield* probe(pid)) ?? undefined;
     },
-    Effect.scoped,
-    Effect.timeout("2 seconds"),
     Effect.tapError(() =>
       Effect.gen(function* () {
         if (!warned) {
@@ -55,4 +32,11 @@ export const make = Effect.fn("NativeProcessIdentity.make")(function* () {
     ),
     Effect.orElseSucceed(() => undefined),
   );
+  const ensureAvailable = Effect.gen(function* () {
+    const row = yield* probe(process.pid);
+    // Windows preserves direct-spawn proof; the helper's identity protocol returns null there.
+    if (platform !== "win32" && (row === null || row.zombie))
+      return yield* new ProviderProcessIdentityUnavailableError({});
+  }).pipe(Effect.mapError((cause) => new ProviderProcessIdentityUnavailableError({ cause })));
+  return { read, ensureAvailable };
 });

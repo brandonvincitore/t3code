@@ -744,6 +744,7 @@ function makeKiroAcpAdapterFlavor(
   ) => Effect.Effect<AcpSessionRuntime.AcpSessionRuntime["Service"], never, Scope.Scope>,
   beforePrompt: NonNullable<AcpAdapterV2Flavor["beforePrompt"]>,
   readProcessIdentity: ProviderHost.ProviderHost["Service"]["readProcessIdentity"],
+  ensureProcessIdentity: ProviderHost.ProviderHost["Service"]["ensureProcessIdentity"],
 ): AcpAdapterV2Flavor {
   const makeNativeRuntime =
     options.makeRuntime ??
@@ -760,6 +761,13 @@ function makeKiroAcpAdapterFlavor(
   // Not `registerExtensions`: a replacement runtime (rollback, failed resume) wires that after `start()`.
   const makeRuntime = (input: AcpAdapterV2RuntimeInput) =>
     validateKiroRuntimePolicy(input.runtimePolicy).pipe(
+      Effect.andThen(
+        ensureProcessIdentity.pipe(
+          Effect.mapError(
+            (cause) => new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+          ),
+        ),
+      ),
       Effect.andThen(
         makeNativeRuntime({
           ...input,
@@ -932,7 +940,12 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
   ) {
     let activeId = input.resumeSessionId;
     const before = (nativeId: string | undefined) =>
-      admitRuntimeSession(runtime, input.cwd, nativeId);
+      host.ensureProcessIdentity.pipe(
+        Effect.mapError(
+          (cause) => new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+        ),
+        Effect.andThen(admitRuntimeSession(runtime, input.cwd, nativeId)),
+      );
     const ids = new Set<string>();
     const remember = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) => {
       activeId = started.sessionId;
@@ -979,6 +992,16 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
     nativeId: string,
     providerThreadId: ProviderThreadId,
   ) {
+    yield* host.ensureProcessIdentity.pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapter.ProviderAdapterProtocolError({
+            driver: KIRO_PROVIDER,
+            detail: "native process identity helper is unavailable",
+            cause,
+          }),
+      ),
+    );
     yield* history
       .admit({
         cwd,
@@ -1018,6 +1041,7 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       rememberRuntime,
       ({ runtime, cwd, sessionId }) => admitRuntimeSession(runtime, cwd, sessionId),
       host.readProcessIdentity,
+      host.ensureProcessIdentity,
     ),
     selfInvocation: options.selfInvocation,
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
@@ -1029,6 +1053,16 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
     openSession: Effect.fn("KiroHistory.openSession")(function* (
       input: ProviderAdapter.ProviderAdapterV2OpenSessionInput,
     ) {
+      yield* host.ensureProcessIdentity.pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderAdapter.ProviderAdapterOpenSessionError({
+              driver: KIRO_PROVIDER,
+              providerSessionId: input.providerSessionId,
+              cause,
+            }),
+        ),
+      );
       if (input.initialNativeThreadId)
         yield* admit(
           input.runtimePolicy.cwd ?? process.cwd(),

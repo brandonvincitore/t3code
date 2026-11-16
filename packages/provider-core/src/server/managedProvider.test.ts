@@ -106,6 +106,7 @@ function layerProviderHost(input: {
     ProviderHost.ProviderHost,
     ProviderHost.ProviderHost.of({
       readProcessIdentity: () => Effect.undefined,
+      ensureProcessIdentity: Effect.void,
       paths: {
         cwd: process.cwd(),
         baseDir: "/t3",

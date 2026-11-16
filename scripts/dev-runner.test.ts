@@ -439,12 +439,12 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     });
 
     it.effect.each([
-      { built: "release", cargoFails: false, expectBuild: false },
-      { built: "debug", cargoFails: false, expectBuild: false },
+      { built: "release", cargoFails: false, expectBuild: true },
+      { built: "debug", cargoFails: false, expectBuild: true },
       { built: undefined, cargoFails: false, expectBuild: true },
       { built: undefined, cargoFails: true, expectBuild: true },
     ] as const)(
-      "builds the resource monitor only when it is missing: built=$built cargoFails=$cargoFails",
+      "rebuilds the resource monitor incrementally before backend startup: built=$built cargoFails=$cargoFails",
       ({ built, cargoFails, expectBuild }) =>
         Effect.gen(function* () {
           const fs = yield* FileSystem.FileSystem;

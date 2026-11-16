@@ -15,9 +15,12 @@ it.live.each([
   "legacy-helper",
   "bad-birth",
   "failed-helper",
+  "absent-helper",
+  "non-executable",
 ] as const)("reads precise native identity or fails closed: %s", (scenario) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
+    const platform = yield* HostProcess.Platform;
     const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-process-identity-" });
     const identity = {
       pid: 127,
@@ -43,13 +46,31 @@ it.live.each([
     const binary = writeFakeCli({
       directory: root,
       name: "process-identity",
-      source: `if (process.argv[2] !== '--process-identity' || process.argv[3] !== '127' || process.argv.length !== 4) process.exit(64);
-process.stdout.write(${JSON.stringify(output)}); process.exit(${scenario === "failed-helper" ? 1 : 0});`,
+      source: `if (process.argv[2] !== '--process-identity' || process.argv.length !== 4) process.exit(64);
+const output = ${JSON.stringify(output)};
+let row; try { row = JSON.parse(output); } catch {}
+if (row && row.pid === 127) row.pid = Number(process.argv[3]);
+process.stdout.write(row === undefined ? output : JSON.stringify(row)); process.exit(${scenario === "failed-helper" ? 1 : 0});`,
     });
-    const read = yield* NativeProcessIdentity.make().pipe(
+    if (scenario === "absent-helper") yield* fs.remove(binary);
+    if (scenario === "non-executable" && platform !== "win32") yield* fs.chmod(binary, 0o644);
+    const reader = yield* NativeProcessIdentity.make().pipe(
       Effect.provide(ServerConfig.layerTest(process.cwd(), root)),
       Effect.provideService(HostProcess.Environment, { T3CODE_RESOURCE_MONITOR_PATH: binary }),
+      Effect.provideService(FileSystem.FileSystem, {
+        ...fs,
+        exists: (file) => (file === binary ? fs.exists(file) : Effect.succeed(false)),
+      }),
     );
-    assert.deepEqual(yield* read(127), scenario === "identity" ? identity : undefined);
+    const valid =
+      scenario === "identity" || (scenario === "non-executable" && platform === "win32");
+    assert.deepEqual(yield* reader.read(127), valid ? identity : undefined);
+    const ready = yield* reader.ensureAvailable.pipe(Effect.result);
+    assert.equal(
+      ready._tag,
+      valid || (scenario === "missing" && platform === "win32") ? "Success" : "Failure",
+    );
+    if (ready._tag === "Failure")
+      assert.equal(ready.failure._tag, "ProviderProcessIdentityUnavailableError");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
 );

@@ -26,14 +26,15 @@ export const layer = Layer.effect(
     const secrets = yield* ServerSecretStore.ServerSecretStore;
     const digest = yield* Digest.Digest;
     const fileSystem = yield* FileSystem.FileSystem;
-    const readProcessIdentity = yield* NativeProcessIdentity.make();
+    const processIdentity = yield* NativeProcessIdentity.make();
     // Optional so standalone provider layers in tests probe at once.
     const lifecycleEvents = yield* Effect.serviceOption(
       ServerLifecycleEvents.ServerLifecycleEvents,
     );
     return ProviderHost.ProviderHost.of({
       decodeNativeHistoryArchive,
-      readProcessIdentity,
+      readProcessIdentity: processIdentity.read,
+      ensureProcessIdentity: processIdentity.ensureAvailable,
       managedPolicy: serverSettings.managedPolicy,
       paths: {
         cwd: config.cwd,

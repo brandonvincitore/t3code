@@ -269,6 +269,10 @@ export const crossFileTests = (
       file.startsWith("apps/server/src/orchestration-v2/") ||
       file.startsWith("native/resource-monitor/") ||
       file === "apps/server/src/process/NativeProcessIdentity.ts" ||
+      file === "apps/server/src/process/processIdentityProtocol.ts" ||
+      file === "apps/server/scripts/resourceMonitor.ts" ||
+      file === "apps/server/scripts/cli.ts" ||
+      file === "scripts/dev-runner.ts" ||
       file === "apps/server/src/provider/ProviderHostLive.ts",
   )
     ? [

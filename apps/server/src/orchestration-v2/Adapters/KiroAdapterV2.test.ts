@@ -1,3 +1,4 @@
+import { ProviderProcessIdentityUnavailableError } from "@t3tools/provider-core/server/errors";
 import * as Scope from "effect/Scope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
@@ -5640,44 +5641,64 @@ describe("Kiro permission policy", () => {
   });
 });
 
-it.effect("refuses a present native lease before spawning or loading any Kiro runtime", () =>
-  Effect.gen(function* () {
-    const fs = yield* FileSystem.FileSystem;
-    const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-lease-admission-" });
-    const home = `${root}/home`;
-    const native = `${home}/.kiro`;
-    yield* fs.makeDirectory(`${native}/session-leases`, { recursive: true });
-    const lease = `${native}/session-leases/${SESSION_ID}.lease`;
-    yield* fs.writeFileString(lease, "unknown foreign holder");
-    let spawned = 0;
-    const instanceId = ProviderInstanceId.make("kiro-lease-guard");
-    const adapter = yield* makeKiroAdapterV2({
-      instanceId,
-      settings: ENABLED_KIRO_SETTINGS,
-      environment: { HOME: home, KIRO_HOME: native },
-      selfInvocation: yield* resolveSelfInvocation(),
-      makeRuntime: () => {
-        spawned++;
-        return Effect.die("Native runtime must not be created");
-      },
-    });
-    const failure = yield* adapter
-      .openSession({
-        threadId: ThreadId.make("lease-owner"),
-        providerSessionId: ProviderSessionId.make("lease-session"),
-        modelSelection: { instanceId, model: "default" },
-        runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
-          cwd: root,
-          runtimeMode: "approval-required",
-          interactionMode: "default",
+it.effect.each([
+  { missingHelper: false, existing: true },
+  { missingHelper: true, existing: true },
+  { missingHelper: true, existing: false },
+])(
+  "refuses before spawning or loading Kiro; missing helper: $missingHelper existing: $existing",
+  ({ missingHelper, existing }) =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "kiro-lease-admission-" });
+      const home = `${root}/home`;
+      const native = `${home}/.kiro`;
+      yield* fs.makeDirectory(`${native}/session-leases`, { recursive: true });
+      const lease = `${native}/session-leases/${SESSION_ID}.lease`;
+      if (existing) yield* fs.writeFileString(lease, "unknown foreign holder");
+      let spawned = 0;
+      const instanceId = ProviderInstanceId.make("kiro-lease-guard");
+      const host = yield* ProviderHost.ProviderHost;
+      const adapter = yield* makeKiroAdapterV2({
+        instanceId,
+        settings: ENABLED_KIRO_SETTINGS,
+        environment: { HOME: home, KIRO_HOME: native },
+        selfInvocation: yield* resolveSelfInvocation(),
+        makeRuntime: () => {
+          spawned++;
+          return Effect.die("Native runtime must not be created");
+        },
+      }).pipe(
+        Effect.provideService(ProviderHost.ProviderHost, {
+          ...host,
+          ensureProcessIdentity: missingHelper
+            ? Effect.fail(new ProviderProcessIdentityUnavailableError({}))
+            : Effect.void,
         }),
-        initialNativeThreadId: SESSION_ID,
-      })
-      .pipe(Effect.flip);
-    assert.equal(failure._tag, "ProviderAdapterThreadInUseError");
-    assert.equal(spawned, 0);
-    assert.equal(yield* fs.readFileString(lease), "unknown foreign holder");
-  }).pipe(Effect.scoped, Effect.provide(testLayer)),
+      );
+      const failure = yield* adapter
+        .openSession({
+          threadId: ThreadId.make("lease-owner"),
+          providerSessionId: ProviderSessionId.make("lease-session"),
+          modelSelection: { instanceId, model: "default" },
+          runtimePolicy: ProviderAdapterV2RuntimePolicy.make({
+            cwd: root,
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+          }),
+          ...(existing ? { initialNativeThreadId: SESSION_ID } : {}),
+        })
+        .pipe(Effect.flip);
+      assert.equal(
+        failure._tag,
+        missingHelper ? "ProviderAdapterOpenSessionError" : "ProviderAdapterThreadInUseError",
+      );
+      if (missingHelper)
+        assert.include(knownProviderFailureMessage(failure), "native process identity helper");
+      assert.equal(spawned, 0);
+      if (existing) assert.equal(yield* fs.readFileString(lease), "unknown foreign holder");
+      else assert.isFalse(yield* fs.exists(lease));
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );
 
 it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as const)(

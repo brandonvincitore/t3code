@@ -474,7 +474,9 @@ only and synthetic leases over the actual child engine, plus scripted workflow
 checks. It does not establish account-backed prompt success or recovery of the
 reported parent conversation.
 
-Manual source builds must rebuild the helper with `vp run build:resource-monitor`
-alongside the server. Existing release packagers include it; old or unavailable
-helpers fail closed. `check:changed` now selects the cross-package Kiro/ACP suites
+The normal server build compiles, stages and verifies the helper after bundling;
+source build hosts need Rust/Cargo. Packaged runtime hosts do not need Rust.
+Kiro checks helper readiness before starting sessions and reports an actionable
+build/install error for unavailable helpers. Ownership still fails closed.
+`check:changed` selects the cross-package Kiro/ACP suites
 and runs native formatting, tests and a release build when helper sources change.

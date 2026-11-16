@@ -44,6 +44,7 @@ export const layer = (
       const credentials = new Map<string, Uint8Array>();
       const host = ProviderHost.ProviderHost.of({
         readProcessIdentity: () => Effect.undefined,
+        ensureProcessIdentity: Effect.void,
         paths: {
           cwd: options.cwd ?? process.cwd(),
           baseDir,
