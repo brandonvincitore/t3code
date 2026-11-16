@@ -317,7 +317,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI database own
           startedAt: "2026-01-01T00:00:00.000Z",
         });
         yield* fs.writeFileString(serverRuntimeStatePath, contents);
-        yield* migrateTo(Math.max(...migrationManifest.map(([id]) => id)) - 1);
+        const beforeTurnItemOutputMigration = 94;
+        yield* migrateTo(beforeTurnItemOutputMigration);
         const { dbPath } = yield* ServerConfig.ServerConfig;
         yield* Effect.gen(function* () {
           const sql = yield* SqlClient.SqlClient;
@@ -333,7 +334,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI database own
           const rows = yield* sql<{
             readonly id: number;
           }>`SELECT MAX(migration_id) AS id FROM effect_sql_migrations`;
-          assert.equal(rows[0]?.id, Math.max(...migrationManifest.map(([id]) => id)) - 1);
+          assert.equal(rows[0]?.id, beforeTurnItemOutputMigration);
           yield* sql`ALTER TABLE migration_probe_items RENAME TO orchestration_v2_projection_turn_items`;
         }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: dbPath })));
         yield* Effect.void.pipe(Effect.provide(SqlitePersistence.layerCliConfig));
