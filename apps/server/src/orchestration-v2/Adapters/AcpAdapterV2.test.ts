@@ -1294,6 +1294,8 @@ const makeAdvertisedCompactionHarness = Effect.fnUntraced(function* (
     });
   return {
     runtime,
+    modelSelection,
+    runtimePolicy,
     compact: (otherSession = false) =>
       Effect.gen(function* () {
         const compactThread = runtime.compactThread;
@@ -1855,130 +1857,152 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.live("drops a late prompt response that lands after the turn finalized", () =>
-    Effect.gen(function* () {
-      const instanceId = ProviderInstanceId.make("acp-test-prompt-usage-late");
-      const threadId = ThreadId.make("thread-acp-prompt-usage-late");
-      const dispatched = yield* Deferred.make<void>();
-      const gate = yield* Deferred.make<void>();
-      const wireSettled = yield* Deferred.make<void>();
-      const idAllocator = yield* IdAllocator.IdAllocatorV2;
-      const adapter = yield* makeAcpAdapterV2({
-        instanceId,
-        selfInvocation: yield* resolveSelfInvocation(),
-        testHooks: {
-          afterPromptWireSettled: () =>
-            Deferred.succeed(wireSettled, undefined).pipe(Effect.asVoid),
-        },
-        flavor: {
-          driver: ACP_TEST_DRIVER,
-          capabilities: AcpProviderCapabilitiesV2,
-          reportsPerTurnPromptUsage: true,
-          terminateRuntimeProcessGroupOnInterrupt: true,
-          makeRuntime: makeMockRuntime({
-            childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
-            mockAgentPath: yield* bundledMockAgentPath,
-            ownDetachedProcessGroup: true,
-            processGroupTerminationGrace: 0,
-            wrapRuntime: (runtime) => ({
-              ...runtime,
-              // The response only leaves the agent after the turn has been
-              // force stopped and finalized: teardown does not interrupt this fiber.
-              prompt: () =>
-                Deferred.succeed(dispatched, undefined).pipe(
-                  Effect.andThen(Deferred.await(gate)),
-                  Effect.andThen(
-                    Effect.succeed({
-                      stopReason: "cancelled" as const,
-                      usage: { inputTokens: 60, outputTokens: 15, totalTokens: 75 },
-                    }),
-                  ),
-                ),
-            }),
-          }),
-        },
-      });
-      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: process.cwd(),
-      });
-      const modelSelection = { instanceId, model: "default" } as const;
-      const runtime = yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("provider-session-acp-prompt-usage-late"),
-        modelSelection,
-        runtimePolicy,
-      });
-      const providerThread = yield* runtime.ensureThread({
-        threadId,
-        modelSelection,
-        runtimePolicy,
-      });
-      let stopCollector = false;
-      const events: Array<Record<string, unknown>> = [];
-      const usageRecorded = yield* Deferred.make<void>();
-      const collector = yield* Stream.runForEach(
-        runtime.events.pipe(Stream.takeUntil(() => stopCollector)),
-        (event) =>
-          Effect.suspend(() => {
-            const record = event as Record<string, unknown>;
-            events.push(record);
-            return record.type === "provider_turn.updated" &&
-              (record.providerTurn as Record<string, unknown>).turnTokenUsage !== undefined
-              ? Deferred.succeed(usageRecorded, undefined)
-              : Effect.void;
-          }),
-      ).pipe(Effect.forkScoped);
-      yield* runtime.startTurn(
-        makeTurnInput({
-          threadId,
-          providerThread,
+  it.live.each(["prompt", "compact"] as const)(
+    "drops a late %s response that lands after the turn finalized",
+    (operation) =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("acp-test-prompt-usage-late");
+        const threadId = ThreadId.make("thread-acp-prompt-usage-late");
+        const dispatched = yield* Deferred.make<void>();
+        const gate = yield* Deferred.make<void>();
+        const wireSettled = yield* Deferred.make<void>();
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const adapter = yield* makeAcpAdapterV2({
           instanceId,
+          selfInvocation: yield* resolveSelfInvocation(),
+          testHooks: {
+            afterPromptWireSettled: () =>
+              Deferred.succeed(wireSettled, undefined).pipe(Effect.asVoid),
+          },
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            reportsPerTurnPromptUsage: true,
+            ...(operation === "compact"
+              ? {
+                  compactSession: {
+                    supported: () => true,
+                    compact: () =>
+                      Deferred.succeed(dispatched, undefined).pipe(
+                        Effect.andThen(Deferred.await(gate)),
+                      ),
+                  },
+                }
+              : {}),
+            terminateRuntimeProcessGroupOnInterrupt: true,
+            makeRuntime: makeMockRuntime({
+              childProcessSpawner: yield* ChildProcessSpawner.ChildProcessSpawner,
+              mockAgentPath: yield* bundledMockAgentPath,
+              ownDetachedProcessGroup: true,
+              processGroupTerminationGrace: 0,
+              wrapRuntime: (runtime) => ({
+                ...runtime,
+                // The response only leaves the agent after the turn has been
+                // force stopped and finalized: teardown does not interrupt this fiber.
+                prompt: () =>
+                  Deferred.succeed(dispatched, undefined).pipe(
+                    Effect.andThen(Deferred.await(gate)),
+                    Effect.andThen(
+                      Effect.succeed({
+                        stopReason: "cancelled" as const,
+                        usage: { inputTokens: 60, outputTokens: 15, totalTokens: 75 },
+                      }),
+                    ),
+                  ),
+              }),
+            }),
+          },
+        });
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("provider-session-acp-prompt-usage-late"),
+          modelSelection,
           runtimePolicy,
-          now: yield* DateTime.now,
-          messageText: "Say hi.",
-        }),
-      );
-      yield* Deferred.await(dispatched);
-      const providerTurnId = idAllocator.derive.providerTurn({
-        driver: ACP_TEST_DRIVER,
-        nativeTurnId: acpScopedNativeId(instanceId, "mock-session-1:turn:1"),
-      });
-      // Force stop finalizes the turn without waiting for the gated prompt response.
-      yield* runtime.interruptTurn({
-        providerThread,
-        providerTurnId,
-        requestRuntimeRestart: true,
-      });
-      yield* Deferred.await(usageRecorded);
-      const usageAt = () => {
-        const turns = events.filter(
+        });
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
+        let stopCollector = false;
+        const events: Array<Record<string, unknown>> = [];
+        const usageRecorded = yield* Deferred.make<void>();
+        const collector = yield* Stream.runForEach(
+          runtime.events.pipe(Stream.takeUntil(() => stopCollector)),
           (event) =>
-            event.type === "provider_turn.updated" &&
-            (event.providerTurn as Record<string, unknown>).turnTokenUsage !== undefined,
+            Effect.suspend(() => {
+              const record = event as Record<string, unknown>;
+              events.push(record);
+              return record.type === "provider_turn.updated" &&
+                (record.providerTurn as Record<string, unknown>).turnTokenUsage !== undefined
+                ? Deferred.succeed(usageRecorded, undefined)
+                : Effect.void;
+            }),
+        ).pipe(Effect.forkScoped);
+        const start = operation === "compact" ? runtime.compactThread! : runtime.startTurn;
+        yield* start(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            messageText: "Say hi.",
+          }),
         );
-        const last = turns[turns.length - 1] as
-          | { providerTurn: Record<string, unknown> }
-          | undefined;
-        return last?.providerTurn.turnTokenUsage as Record<string, unknown>;
-      };
-      assert.deepEqual(usageAt(), {
-        usageScope: "main_agent",
-        usageStatus: "unavailable",
-        hasSubagents: false,
-      });
-      // The response lands now; the finalized turn must not adopt its counters.
-      yield* Deferred.succeed(gate, undefined);
-      yield* Deferred.await(wireSettled);
-      assert.deepEqual(usageAt(), {
-        usageScope: "main_agent",
-        usageStatus: "unavailable",
-        hasSubagents: false,
-      });
-      stopCollector = true;
-      yield* Fiber.interrupt(collector);
-    }).pipe(Effect.provide(layerTest)),
+        yield* Deferred.await(dispatched);
+        const providerTurnId = idAllocator.derive.providerTurn({
+          driver: ACP_TEST_DRIVER,
+          nativeTurnId: acpScopedNativeId(instanceId, "mock-session-1:turn:1"),
+        });
+        // Force stop finalizes the turn without waiting for the gated prompt response.
+        yield* runtime.interruptTurn({
+          providerThread,
+          providerTurnId,
+          requestRuntimeRestart: true,
+        });
+        yield* Deferred.await(usageRecorded);
+        const usageAt = () => {
+          const turns = events.filter(
+            (event) =>
+              event.type === "provider_turn.updated" &&
+              (event.providerTurn as Record<string, unknown>).turnTokenUsage !== undefined,
+          );
+          const last = turns[turns.length - 1] as
+            | { providerTurn: Record<string, unknown> }
+            | undefined;
+          return last?.providerTurn.turnTokenUsage as Record<string, unknown>;
+        };
+        assert.deepEqual(usageAt(), {
+          usageScope: "main_agent",
+          usageStatus: "unavailable",
+          hasSubagents: false,
+        });
+        // The response lands now; the finalized turn must not adopt its counters.
+        yield* Deferred.succeed(gate, undefined);
+        yield* Deferred.await(wireSettled);
+        assert.deepEqual(usageAt(), {
+          usageScope: "main_agent",
+          usageStatus: "unavailable",
+          hasSubagents: false,
+        });
+        if (operation === "compact") {
+          const resumed = yield* runtime.resumeThread({
+            providerThread,
+            modelSelection,
+            runtimePolicy,
+          });
+          assert.isNotTrue(resumed.nativeMetadata?.contextCompaction?.awaitingUsage);
+        }
+        stopCollector = true;
+        yield* Fiber.interrupt(collector);
+      }).pipe(Effect.provide(layerTest)),
   );
 
   it.live("keeps usage unavailable for undeclared agents even when they report usage", () =>
@@ -3104,6 +3128,16 @@ describe("AcpAdapterV2", () => {
           ),
           1,
         );
+        const thread = events.filter((event) => event.type === "provider_thread.updated").at(-1);
+        if (thread?.type === "provider_thread.updated") {
+          assert.isTrue(thread.providerThread.nativeMetadata?.contextCompaction?.awaitingUsage);
+          const changed = yield* harness.runtime.resumeThread({
+            providerThread: thread.providerThread,
+            modelSelection: { ...harness.modelSelection, model: "other-model" },
+            runtimePolicy: harness.runtimePolicy,
+          });
+          assert.isNull(changed.nativeMetadata?.contextCompaction);
+        }
       }).pipe(Effect.provide(layerTest)),
   );
 

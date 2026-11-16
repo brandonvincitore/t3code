@@ -15,6 +15,7 @@ import {
 import { makeThreadProjectionFixture } from "../test-fixtures";
 import {
   deriveLatestContextWindowSnapshot,
+  deriveContextWindowDisplay,
   latestProviderTurnTokenUsage,
   shouldOfferResumeCompaction,
 } from "@t3tools/client-runtime/state/context-window";
@@ -46,6 +47,59 @@ const compactionEntry = (providerThreadId: string | null) =>
   }) satisfies { item: ThreadStructureTurnItem };
 
 describe("V2 context window presentation", () => {
+  it.each([true, false])(
+    "keeps compacted usage explicitly pending until a fresh report: %s",
+    (awaitingUsage) => {
+      const providerThread = {
+        id: ProviderThreadId.make("kiro-thread"),
+        nativeThreadRef: {
+          driver: ProviderDriverKind.make("kiro"),
+          nativeId: "native-kiro",
+          strength: "strong" as const,
+        },
+        nativeMetadata: {
+          modelSelection: { instanceId: ProviderInstanceId.make("kiro"), model: "claude-opus-5.5" },
+          contextCompaction: {
+            nativeSessionId: "native-kiro",
+            model: "claude-opus-5.5",
+            completedAt: "2026-06-20T12:01:00.000Z",
+            awaitingUsage,
+            maxTokens: 1_000_000,
+            autoCompactThreshold: 800_000,
+          },
+        },
+        contextUsage: awaitingUsage ? null : { usedTokens: 90_000, maxTokens: 1_000_000 },
+        updatedAt: DateTime.makeUnsafe("2026-06-20T12:02:00.000Z"),
+      };
+      const old = decodeTokenUsage({
+        usedTokens: 450_000,
+        maxTokens: 1_000_000,
+        updatedAt: "2026-06-20T12:00:00.000Z",
+      });
+      const display = deriveContextWindowDisplay([], old, providerThread);
+      if (awaitingUsage) {
+        expect(display).toMatchObject({ state: "compacted", maxTokens: 1_000_000 });
+        expect(display).not.toHaveProperty("usedTokens");
+        expect(deriveLatestContextWindowSnapshot([], old, providerThread)).toBeNull();
+      } else expect(display).toMatchObject({ usedTokens: 90_000 });
+      expect(
+        deriveContextWindowDisplay([], null, {
+          ...providerThread,
+          nativeThreadRef: { ...providerThread.nativeThreadRef, nativeId: "replacement" },
+        }),
+      ).toEqual(awaitingUsage ? null : expect.objectContaining({ usedTokens: 90_000 }));
+      expect(
+        deriveContextWindowDisplay([], null, {
+          ...providerThread,
+          nativeMetadata: {
+            ...providerThread.nativeMetadata,
+            modelSelection: { instanceId: ProviderInstanceId.make("kiro"), model: "other-model" },
+          },
+          contextUsage: null,
+        }),
+      ).toBeNull();
+    },
+  );
   it("uses retained compaction token data when available", () => {
     const snapshot = deriveLatestContextWindowSnapshot([compactionEntry(null)]);
     expect(snapshot?.usedTokens).toBe(2_000);

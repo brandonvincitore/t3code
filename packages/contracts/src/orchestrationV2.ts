@@ -1103,6 +1103,18 @@ export const OrchestrationV2PendingBackgroundTask = kindUnionWithFallback(
 export type OrchestrationV2PendingBackgroundTask = typeof OrchestrationV2PendingBackgroundTask.Type;
 
 export const OrchestrationV2ProviderThreadNativeMetadata = Schema.Struct({
+  contextCompaction: Schema.optional(
+    Schema.NullOr(
+      Schema.Struct({
+        nativeSessionId: TrimmedNonEmptyString,
+        model: TrimmedNonEmptyString,
+        completedAt: IsoDateTime,
+        awaitingUsage: Schema.Boolean,
+        maxTokens: Schema.optional(PositiveInt),
+        autoCompactThreshold: Schema.optional(PositiveInt),
+      }),
+    ),
+  ),
   nativeHistory: Schema.optional(NativeHistoryReceipt),
   importedHistory: Schema.optional(
     Schema.Struct({

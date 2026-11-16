@@ -42,6 +42,49 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly updatedAt: string;
 };
 
+export type ContextWindowDisplay =
+  | ContextWindowSnapshot
+  | {
+      readonly state: "compacted";
+      readonly maxTokens: number | null;
+      readonly autoCompactThreshold: number | null;
+      readonly updatedAt: string;
+    };
+
+type ContextProviderThread = Pick<
+  OrchestrationV2ProviderThread,
+  "id" | "contextUsage" | "updatedAt"
+> &
+  Partial<Pick<OrchestrationV2ProviderThread, "nativeMetadata" | "nativeThreadRef">>;
+
+function contextCompaction(providerThread?: ContextProviderThread | null) {
+  const compaction = providerThread?.nativeMetadata?.contextCompaction;
+  if (
+    !compaction ||
+    compaction.nativeSessionId !== providerThread?.nativeThreadRef?.nativeId ||
+    (providerThread.nativeMetadata?.modelSelection !== undefined &&
+      providerThread.nativeMetadata.modelSelection.model !== compaction.model)
+  )
+    return null;
+  return compaction;
+}
+
+export function deriveContextWindowDisplay(
+  entries: ReadonlyArray<{ readonly item: ThreadStructureTurnItem }>,
+  liveUsage?: OrchestrationV2ProviderTurnTokenUsage | null,
+  providerThread?: ContextProviderThread | null,
+): ContextWindowDisplay | null {
+  const compaction = contextCompaction(providerThread);
+  if (compaction?.awaitingUsage && providerThread?.contextUsage == null)
+    return {
+      state: "compacted",
+      maxTokens: compaction.maxTokens ?? null,
+      autoCompactThreshold: compaction.autoCompactThreshold ?? null,
+      updatedAt: compaction.completedAt,
+    };
+  return deriveLatestContextWindowSnapshot(entries, liveUsage, providerThread);
+}
+
 /**
  * Newest report by timestamp among the active provider thread's turns, since a provider switch leaves
  * the previous provider's report behind. Without an active provider thread, every turn is a candidate.
@@ -81,8 +124,16 @@ export function deriveLatestContextWindowSnapshot(
     readonly item: ThreadStructureTurnItem;
   }>,
   liveUsage?: OrchestrationV2ProviderTurnTokenUsage | null,
-  providerThread?: Pick<OrchestrationV2ProviderThread, "id" | "contextUsage" | "updatedAt"> | null,
+  providerThread?: ContextProviderThread | null,
 ): ContextWindowSnapshot | null {
+  const compaction = contextCompaction(providerThread);
+  if (compaction?.awaitingUsage && providerThread?.contextUsage == null) return null;
+  if (
+    compaction &&
+    liveUsage != null &&
+    Date.parse(liveUsage.updatedAt) <= Date.parse(compaction.completedAt)
+  )
+    liveUsage = null;
   if (liveUsage != null) {
     const usedTokens = Math.max(0, liveUsage.usedTokens);
     const maxTokens = liveUsage.maxTokens ?? null;

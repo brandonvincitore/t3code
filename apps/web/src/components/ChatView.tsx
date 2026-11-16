@@ -342,7 +342,7 @@ import { ComposerSurface } from "./chat/ComposerSurface";
 import { resolveThreadSyncPhase } from "../threadSync";
 import { hasAvailableCompactionProvider } from "./chat/compaction.logic";
 import {
-  deriveLatestContextWindowSnapshot,
+  deriveContextWindowDisplay,
   hasDismissedResumeCompaction,
   latestProviderTurnTokenUsage,
   shouldOfferResumeCompaction,
@@ -1504,11 +1504,15 @@ export default function ChatView(props: ChatViewProps) {
     isCompacting,
     runlessWorkStartedAt,
   });
-  const activeContextWindow = deriveLatestContextWindowSnapshot(
+  const activeContextWindowDisplay = deriveContextWindowDisplay(
     serverVisibleTurnItems ?? [],
     activeThreadLiveTokenUsage,
     activeProviderThread,
   );
+  const activeContextWindow =
+    activeContextWindowDisplay !== null && !("state" in activeContextWindowDisplay)
+      ? activeContextWindowDisplay
+      : null;
   const pendingBackgroundTasks = deriveThreadPendingBackgroundTasks(serverProjection);
   const activeWorkStartedAt =
     deriveActiveWorkStartedAt(activeActivityRun, activeRuntime, localDispatchStartedAt) ??
@@ -3955,7 +3959,7 @@ export default function ChatView(props: ChatViewProps) {
                     providerInstanceId: activeProviderInstanceId,
                     providers: providerStatuses,
                     sources: serverConfig?.usageLimitSources ?? EMPTY_USAGE_LIMIT_SOURCES,
-                    contextWindow: activeContextWindow,
+                    contextWindow: activeContextWindowDisplay,
                   }}
                 />
 

@@ -4298,6 +4298,202 @@ describe("KiroAdapterV2", () => {
     },
   );
 
+  it.effect.each([
+    "missing",
+    "fresh-before-response",
+    "fresh-after-response",
+    "duplicate-completion",
+    "late-before-completion",
+    "child-before-completion",
+    "failed",
+  ] as const)("keeps Kiro compaction usage truthful across completion: %s", (usage) =>
+    Effect.gen(function* () {
+      const freshSeen = yield* Deferred.make<void>();
+      const gate = makeProviderReplayGate(["post-response-usage"]);
+      let compactStarted = false;
+      const freshExpected =
+        usage === "fresh-before-response" ||
+        usage === "fresh-after-response" ||
+        usage === "duplicate-completion";
+      yield* runKiroScript({
+        scenario: `compact-usage-${usage}`,
+        model: "claude-opus-5.5",
+        replayGate: gate,
+        testHooks: {
+          afterPromptWireSettled: () =>
+            !compactStarted || usage !== "fresh-after-response"
+              ? Effect.void
+              : Effect.sync(() => gate.release("post-response-usage")).pipe(
+                  Effect.andThen(Deferred.await(freshSeen)),
+                ),
+        },
+        onSessionUpdate: (notification) =>
+          notification.update.sessionUpdate === "session_info_update" &&
+          notification.update._meta?.kiro &&
+          typeof notification.update._meta.kiro === "object" &&
+          "contextUsage" in notification.update._meta.kiro &&
+          compactStarted
+            ? Deferred.succeed(freshSeen, undefined).pipe(Effect.asVoid)
+            : Effect.void,
+        frames: [
+          ...openSessionFrames({
+            initialize: KIRO_V3_INITIALIZE,
+            configOptions: [modeOption, modelOption("claude-opus-5.5"), autopilotOption("on")],
+            sessionMeta: {
+              source: "local",
+              contextUsage: { usagePercentage: 45, summarizationThreshold: 80 },
+            },
+          }),
+          turnPrompt,
+          update({
+            sessionUpdate: "session_info_update",
+            _meta: { kiro: { kind: "context_usage", contextUsage: { usagePercentage: 45 } } },
+          }),
+          answer("session/prompt", { stopReason: "end_turn" }),
+          outbound("_kiro/session/compact", { sessionId: SESSION_ID }),
+          ...(usage === "late-before-completion"
+            ? [
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: { kiro: { kind: "context_usage", contextUsage: { usagePercentage: 88 } } },
+                }),
+              ]
+            : []),
+          ...(usage === "child-before-completion"
+            ? [
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: {
+                    kiro: {
+                      kind: "summarization_completed",
+                      agentSubtaskId: "synthetic-child",
+                      conversationSummary: "Child summary",
+                    },
+                  },
+                }),
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: { kiro: { kind: "context_usage", contextUsage: { usagePercentage: 8 } } },
+                }),
+              ]
+            : []),
+          ...(usage !== "failed" && usage !== "child-before-completion"
+            ? [
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: {
+                    kiro: {
+                      kind: "summarization_completed",
+                      conversationSummary: "Synthetic summary",
+                      truncated: false,
+                    },
+                  },
+                }),
+              ]
+            : []),
+          ...(usage === "fresh-before-response" || usage === "duplicate-completion"
+            ? [
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: { kiro: { kind: "context_usage", contextUsage: { usagePercentage: 8 } } },
+                }),
+              ]
+            : []),
+          ...(usage === "duplicate-completion"
+            ? [
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: {
+                    kiro: {
+                      kind: "summarization_completed",
+                      conversationSummary: "Repeated receipt",
+                    },
+                  },
+                }),
+              ]
+            : []),
+          answer("_kiro/session/compact", { success: usage !== "failed" }),
+          ...(usage === "fresh-after-response"
+            ? [
+                {
+                  ...update({
+                    sessionUpdate: "session_info_update",
+                    _meta: {
+                      kiro: { kind: "context_usage", contextUsage: { usagePercentage: 8 } },
+                    },
+                  }),
+                  label: "post-response-usage",
+                },
+              ]
+            : []),
+          ...(usage === "missing"
+            ? [
+                turnPrompt,
+                update({
+                  sessionUpdate: "session_info_update",
+                  _meta: { kiro: { kind: "context_usage", contextUsage: { usagePercentage: 8 } } },
+                }),
+                answer("session/prompt", { stopReason: "end_turn" }),
+              ]
+            : []),
+          ...closeSession,
+        ],
+        drive: ({ events, compact, startTurn, startTurnOn }) =>
+          Effect.gen(function* () {
+            yield* startTurn;
+            assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+            compactStarted = true;
+            yield* compact(2);
+            const completed = yield* collectTurn(events);
+            assert.equal(terminalStatus(completed), usage === "failed" ? "failed" : "completed");
+            const thread = completed
+              .filter((event) => event.type === "provider_thread.updated")
+              .at(-1);
+            assert.equal(thread?.type, "provider_thread.updated");
+            if (thread?.type !== "provider_thread.updated") return;
+            if (usage === "failed") {
+              assert.equal(thread.providerThread.contextUsage?.usedTokens, 450_000);
+              assert.isUndefined(thread.providerThread.nativeMetadata?.contextCompaction);
+            } else {
+              assert.equal(
+                thread.providerThread.contextUsage?.usedTokens ?? null,
+                freshExpected ? 80_000 : null,
+              );
+              assert.equal(
+                thread.providerThread.nativeMetadata?.contextCompaction?.awaitingUsage,
+                !freshExpected,
+              );
+              assert.equal(
+                thread.providerThread.nativeMetadata?.contextCompaction?.maxTokens,
+                1_000_000,
+              );
+              const item = completed.find(
+                (event) =>
+                  event.type === "turn_item.updated" &&
+                  event.turnItem.type === "compaction" &&
+                  event.turnItem.status === "completed",
+              );
+              if (item?.type === "turn_item.updated" && item.turnItem.type === "compaction") {
+                assert.equal(item.turnItem.beforeTokenCount, 450_000);
+                if (freshExpected) assert.equal(item.turnItem.afterTokenCount, 80_000);
+              }
+            }
+            if (usage === "missing") {
+              yield* startTurnOn(3, "claude-opus-5.5");
+              const next = yield* collectTurn(events);
+              const latest = next
+                .filter((event) => event.type === "provider_thread.updated")
+                .at(-1);
+              assert.equal(latest?.providerThread.contextUsage?.usedTokens, 80_000);
+              assert.isFalse(
+                latest?.providerThread.nativeMetadata?.contextCompaction?.awaitingUsage,
+              );
+            }
+          }),
+      });
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("opens a session and refuses compaction on a deployment with no Kiro extensions", () =>
     runKiroScript({
       scenario: "no-extensions",

@@ -808,6 +808,12 @@ function makeKiroAcpAdapterFlavor(
     getModelContextWindow: kiroModelContextWindow,
     contextUsageFromSession: kiroContextUsageFromSession,
     contextUsageFromSessionUpdate: kiroContextUsageFromSessionUpdate,
+    isCompactionComplete: (notification) =>
+      notification.update.sessionUpdate === "session_info_update" &&
+      typeof notification.update._meta?.kiro === "object" &&
+      notification.update._meta.kiro !== null &&
+      "kind" in notification.update._meta.kiro &&
+      notification.update._meta.kiro.kind === "summarization_completed",
 
     supportsNativeWorkflows: true,
     registerExtensions: (context) =>

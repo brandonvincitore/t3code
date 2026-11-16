@@ -514,6 +514,7 @@ export interface AcpAdapterV2Flavor {
     readonly session: AcpSessionRuntime.AcpSessionRuntimeStartResult;
     readonly notification: EffectAcpSchema.SessionNotification;
   }) => ThreadTokenUsageSnapshot | null | undefined;
+  readonly isCompactionComplete?: (notification: EffectAcpSchema.SessionNotification) => boolean;
   readonly applyModelSelection?: (input: {
     readonly runtime: AcpSessionRuntime.AcpSessionRuntime["Service"];
     readonly startResult: AcpSessionRuntime.AcpSessionRuntimeStartResult;
@@ -1579,6 +1580,8 @@ interface ActiveAcpTurn {
       }
     | undefined;
   contextUsage: ThreadTokenUsageSnapshot | null;
+  compactionBeforeUsage?: ThreadTokenUsageSnapshot | null;
+  compactionUsageBoundary?: boolean;
   nativeMetadata: OrchestrationV2ProviderThreadNativeMetadata | null;
   readonly tools: Map<string, AcpToolCallState & { readonly backgroundCommandTaskId?: string }>;
   readonly toolUpdatesSkipped: Map<string, number>;
@@ -2309,6 +2312,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           selection: ModelSelection,
           fallbackUsage: ThreadTokenUsageSnapshot | null | undefined,
         ) {
+          const metadata = (yield* Ref.get(nativeMetadataBySessionId)).get(sessionId);
+          if (metadata?.contextCompaction && metadata.contextCompaction.model !== selection.model) {
+            const cleared = { ...metadata, contextCompaction: null };
+            yield* Ref.update(nativeMetadataBySessionId, (current) =>
+              new Map(current).set(sessionId, cleared),
+            );
+            yield* Ref.update(providerThreadByNativeSessionId, (current) => {
+              const known = current.get(sessionId);
+              return known === undefined
+                ? current
+                : new Map(current).set(sessionId, { ...known, nativeMetadata: cleared });
+            });
+          }
           if (flavor.contextUsageFromSession === undefined) return undefined;
           const pending = yield* Ref.modify(pendingLoadedSession, (current) =>
             current?.setup.sessionId === sessionId
@@ -2342,6 +2358,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               ? cached
               : loaded;
           if (usage === undefined) return undefined;
+          if (
+            usage !== null &&
+            metadata?.contextCompaction?.model === selection.model &&
+            pending !== null
+          ) {
+            yield* Ref.update(nativeMetadataBySessionId, (current) => {
+              const known = current.get(sessionId);
+              return known?.contextCompaction == null
+                ? current
+                : new Map(current).set(sessionId, {
+                    ...known,
+                    contextCompaction: { ...known.contextCompaction, awaitingUsage: false },
+                  });
+            });
+          }
           yield* Ref.update(contextUsageBySessionId, (current) => {
             const updated = new Map(current);
             if (usage === null) updated.delete(sessionId);
@@ -2798,6 +2829,85 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         const emitProviderEvent = (event: ProviderAdapter.ProviderAdapterV2Event) =>
           Queue.offer(events, event).pipe(Effect.asVoid);
+        const contextCompactionReadings = new Map<string, ThreadTokenUsageSnapshot | null>();
+        const markContextCompacted = Effect.fn("AcpAdapterV2.markContextCompacted")(function* (
+          context: ActiveAcpTurn,
+          compactionId = context.nativeTurnId,
+        ) {
+          if ((yield* Ref.get(activeTurn)) !== context) return;
+          const key = `${context.nativeThreadId}\u0000${compactionId}`;
+          if (
+            contextCompactionReadings.has(key) ||
+            (isCompactionMessage(context.input.message) && context.compactionUsageBoundary === true)
+          )
+            return;
+          context.compactionUsageBoundary = true;
+          const before = context.compactionBeforeUsage ?? context.contextUsage;
+          contextCompactionReadings.set(key, before);
+          const setup = yield* Ref.get(activeSessionSetup);
+          const maxTokens =
+            before?.maxTokens ??
+            (setup?.sessionId === context.nativeThreadId
+              ? flavor.getModelContextWindow?.(context.input.modelSelection, setup)
+              : undefined);
+          const metadata: OrchestrationV2ProviderThreadNativeMetadata = {
+            ...context.nativeMetadata,
+            contextCompaction: {
+              nativeSessionId: context.nativeThreadId,
+              model: context.input.modelSelection.model,
+              completedAt: DateTime.formatIso(yield* DateTime.now),
+              awaitingUsage: true,
+              ...(maxTokens === undefined ? {} : { maxTokens }),
+              ...(before?.autoCompactThreshold === undefined
+                ? {}
+                : { autoCompactThreshold: before.autoCompactThreshold }),
+            },
+          };
+          context.contextUsage = null;
+          context.nativeMetadata = metadata;
+          yield* Ref.update(contextUsageBySessionId, (current) => {
+            const next = new Map(current);
+            next.delete(context.nativeThreadId);
+            return next;
+          });
+          yield* Ref.update(nativeMetadataBySessionId, (current) =>
+            new Map(current).set(context.nativeThreadId, metadata),
+          );
+          yield* Ref.update(providerThreadByNativeSessionId, (current) => {
+            const known = current.get(context.nativeThreadId);
+            return known === undefined
+              ? current
+              : new Map(current).set(context.nativeThreadId, {
+                  ...known,
+                  contextUsage: null,
+                  nativeMetadata: metadata,
+                });
+          });
+        });
+        const noteContextUsage = Effect.fn("AcpAdapterV2.noteContextUsage")(function* (
+          sessionId: string,
+        ) {
+          const current = (yield* Ref.get(nativeMetadataBySessionId)).get(sessionId);
+          const compaction = current?.contextCompaction;
+          if (!compaction?.awaitingUsage) return;
+          const selection = yield* Ref.get(activeSelection);
+          const setup = yield* Ref.get(activeSessionSetup);
+          if (
+            selection === null ||
+            setup?.sessionId !== sessionId ||
+            selection.model !== compaction.model
+          )
+            return;
+          const metadata = {
+            ...current,
+            contextCompaction: { ...compaction, awaitingUsage: false },
+          };
+          yield* Ref.update(nativeMetadataBySessionId, (map) =>
+            new Map(map).set(sessionId, metadata),
+          );
+          const context = yield* Ref.get(activeTurn);
+          if (context?.nativeThreadId === sessionId) context.nativeMetadata = metadata;
+        });
         const invalidateInstructions = Effect.fn("AcpAdapterV2.invalidateInstructions")(function* (
           context: Pick<ActiveAcpTurn, "nativeThreadId" | "nativeMetadata">,
         ) {
@@ -5076,22 +5186,21 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           let turnItem: OrchestrationV2TurnItem;
           if (toolCall.toolCallId.startsWith("acp-compaction:")) {
             const summary = textFromUnknown(toolCall.data.error ?? rawOutput);
+            const compactionKey = `${context.nativeThreadId}\u0000${toolCall.toolCallId}`;
+            const beforeUsage = contextCompactionReadings.has(compactionKey)
+              ? contextCompactionReadings.get(compactionKey)
+              : (context.compactionBeforeUsage ?? context.contextUsage);
             turnItem = {
               ...base,
               type: "compaction",
               driver,
               ...(summary === undefined ? {} : { summary }),
-              ...(context.contextUsage?.usedTokens === undefined
+              ...(beforeUsage?.usedTokens === undefined
                 ? {}
-                : { beforeTokenCount: context.contextUsage.usedTokens }),
+                : { beforeTokenCount: beforeUsage.usedTokens }),
             };
             if (status === "completed") {
-              context.contextUsage = null;
-              yield* Ref.update(contextUsageBySessionId, (current) => {
-                const updated = new Map(current);
-                updated.delete(context.nativeThreadId);
-                return updated;
-              });
+              yield* markContextCompacted(context, toolCall.toolCallId);
               // A completion projected at turn end must not swallow the agent's later real one.
               yield* markSessionCompacted(
                 context.nativeThreadId,
@@ -6061,6 +6170,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 });
                 if (contextUsageOverride !== undefined) {
                   const nextContextUsage = contextUsageOverride;
+                  if (nextContextUsage !== null) yield* noteContextUsage(notification.sessionId);
                   yield* Ref.update(contextUsageBySessionId, (current) => {
                     const updated = new Map(current);
                     if (nextContextUsage === null) updated.delete(notification.sessionId);
@@ -6075,6 +6185,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }
             }
             if (stateEvent._tag === "UsageUpdated") {
+              yield* noteContextUsage(notification.sessionId);
               yield* Ref.update(contextUsageBySessionId, (current) =>
                 new Map(current).set(notification.sessionId, stateEvent.usage),
               );
@@ -7587,6 +7698,18 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               for (const normalized of flavor.normalizeSessionUpdate?.(notification) ?? [
                 notification,
               ]) {
+                if (
+                  targetRuntime === runtime &&
+                  flavor.isCompactionComplete?.(normalized) === true
+                ) {
+                  const context = yield* Ref.get(activeTurn);
+                  if (
+                    context?.nativeThreadId === normalized.sessionId &&
+                    isCompactionMessage(context.input.message) &&
+                    !context.finalized
+                  )
+                    yield* markContextCompacted(context);
+                }
                 // Turn projection misses compactions that finish while idle or after settlement.
                 if (
                   normalized.update.sessionUpdate === "compaction_update" &&
@@ -9212,6 +9335,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           ) {
             yield* markSessionCompacted(context.nativeThreadId);
           }
+          if (
+            compactsContext &&
+            isCompactionMessage(context.input.message) &&
+            settledStatus === "completed"
+          )
+            yield* markContextCompacted(context);
           const now = yield* DateTime.now;
           if (
             compactsContext &&
@@ -9219,12 +9348,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             settledStatus === "completed" &&
             !context.tools.keys().some((id) => id.startsWith("acp-compaction:"))
           ) {
-            context.contextUsage = null;
-            yield* Ref.update(contextUsageBySessionId, (current) => {
-              const updated = new Map(current);
-              updated.delete(context.nativeThreadId);
-              return updated;
-            });
             const nativeItemId = `${context.nativeTurnId}:compaction`;
             yield* emitProviderEvent({
               type: "turn_item.updated",
@@ -9241,6 +9364,14 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 ordinal: yield* resolveItemOrdinal(context, nativeItemId),
                 type: "compaction",
                 driver,
+                ...(context.compactionBeforeUsage === undefined ||
+                context.compactionBeforeUsage === null
+                  ? {}
+                  : { beforeTokenCount: context.compactionBeforeUsage.usedTokens }),
+                ...(context.nativeMetadata?.contextCompaction?.awaitingUsage === false &&
+                context.contextUsage !== null
+                  ? { afterTokenCount: context.contextUsage.usedTokens }
+                  : {}),
                 status: "completed",
                 title: "Context compacted",
                 startedAt: context.startedAt,
@@ -10183,6 +10314,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 promptInactivityTimeoutMillis,
               ).pipe(Effect.forkIn(sessionScope));
             }
+            if (isCompactionMessage(turnInput.message))
+              context.compactionBeforeUsage = context.contextUsage;
             const compactSession = isCompactionMessage(turnInput.message)
               ? flavor.compactSession
               : undefined;
@@ -10193,6 +10326,15 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   )
                 : Deferred.succeed(context.promptDispatched, undefined).pipe(
                     Effect.andThen(compactSession.compact(runtime, requestedSessionId)),
+                    Effect.tap(() =>
+                      runRuntimeCallbackAtGeneration(
+                        promptGeneration,
+                        Effect.gen(function* () {
+                          if (!context.finalized && (yield* Ref.get(activeTurn)) === context)
+                            yield* markContextCompacted(context);
+                        }),
+                      ),
+                    ),
                     Effect.as({ stopReason: "end_turn" } satisfies EffectAcpSchema.PromptResponse),
                   )
             ).pipe(

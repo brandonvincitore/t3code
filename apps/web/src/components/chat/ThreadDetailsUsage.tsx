@@ -16,7 +16,7 @@ import type { ReactNode } from "react";
 
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { useNowMinute } from "../../hooks/useNowMinute";
-import type { ContextWindowSnapshot } from "@t3tools/client-runtime/state/context-window";
+import type { ContextWindowDisplay } from "@t3tools/client-runtime/state/context-window";
 import { formatContextWindowTokens } from "../../lib/contextWindow";
 import { cn } from "../../lib/utils";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
@@ -34,7 +34,7 @@ export interface ThreadDetailsUsageInput {
   readonly providerInstanceId: ProviderInstanceId | null;
   readonly providers: readonly ServerProvider[];
   readonly sources: UsageLimitSourceSnapshots;
-  readonly contextWindow: ContextWindowSnapshot | null;
+  readonly contextWindow: ContextWindowDisplay | null;
 }
 
 type UsageTone = "error" | "warning" | null;
@@ -83,7 +83,40 @@ export function ThreadDetailsUsage({
 }
 
 /** The thread's context window. The bar fills as context is used; the tick marks auto-compaction. */
-export function ThreadDetailsContext({ usage }: { readonly usage: ContextWindowSnapshot }) {
+export function ThreadDetailsContext({ usage }: { readonly usage: ContextWindowDisplay }) {
+  if ("state" in usage)
+    return (
+      <ThreadDetailsSection
+        headingId="thread-details-context-heading"
+        title="Context window"
+        showHeading={false}
+      >
+        <div className="grid grid-cols-[auto_minmax(3rem,1fr)_auto] gap-x-3 text-xs">
+          <UsageRow
+            label="Context"
+            fill={null}
+            tone={null}
+            value={
+              usage.maxTokens === null
+                ? "Compacted"
+                : `${formatContextWindowTokens(usage.maxTokens)} capacity`
+            }
+            ariaValue="Compacted. Usage updates next turn."
+            tooltip={
+              <>
+                <span>Compacted. Usage updates next turn.</span>
+                {usage.maxTokens === null ? null : (
+                  <span>{usage.maxTokens.toLocaleString("en-US")} token capacity</span>
+                )}
+              </>
+            }
+          />
+        </div>
+        <p className="px-2.5 pb-1 text-xs text-muted-foreground">
+          Compacted. Usage updates next turn.
+        </p>
+      </ThreadDetailsSection>
+    );
   const maxTokens = usage.maxTokens != null && usage.maxTokens > 0 ? usage.maxTokens : null;
   const used =
     maxTokens !== null && usage.usedPercentage !== null
