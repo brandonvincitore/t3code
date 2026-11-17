@@ -1,4 +1,8 @@
-import { PROCESS_IDENTITY_UNAVAILABLE_MESSAGE } from "./errors.ts";
+import {
+  ProviderSessionAccessError,
+  ProviderSessionAccessReason,
+  PROCESS_IDENTITY_UNAVAILABLE_MESSAGE,
+} from "./errors.ts";
 import type {
   NodeId,
   OrchestrationV2ProviderFailure,
@@ -117,6 +121,47 @@ const NATIVE_APPROVAL_GUIDANCE = {
     "Native Approve for Me cannot enforce this thread's approval, sandbox, Plan, or managed restrictions. Choose Supervised to continue.",
 } as const;
 
+function sessionAccessReason(
+  error: Record<string, unknown>,
+): ProviderSessionAccessReason | undefined {
+  const marker =
+    error._tag === "AcpRequestError" && Predicate.isObject(error.data)
+      ? error.data.t3SessionAccess
+      : undefined;
+  const reason =
+    error._tag === "ProviderSessionAccessError"
+      ? error.reason
+      : Predicate.isObject(marker)
+        ? marker.reason
+        : undefined;
+  return Schema.is(ProviderSessionAccessReason)(reason) ? reason : undefined;
+}
+
+export function isProviderSessionAccessRefusal(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  for (let depth = 0; depth < 16 && error != null && !seen.has(error); depth++) {
+    seen.add(error);
+    try {
+      if (Cause.isCause(error)) {
+        error = Cause.squash(error);
+        continue;
+      }
+      if (!Predicate.isObject(error)) return false;
+      if (
+        error._tag === "ProviderAdapterThreadInUseError" ||
+        error._tag === "ProviderProcessIdentityUnavailableError"
+      )
+        return true;
+      const reason = sessionAccessReason(error);
+      if (reason !== undefined) return reason !== "locked" && reason !== "changed";
+      error = error.cause;
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
 /**
  * Walks a cause chain for curated text without reading arbitrary provider
  * defect text. `known` is the message of a domain error T3 raised itself;
@@ -143,6 +188,13 @@ function curatedCauseMessages(cause: unknown): {
         continue;
       }
       if (typeof cause !== "object") break;
+      const accessReason = sessionAccessReason(cause as Record<string, unknown>);
+      if (accessReason !== undefined) {
+        return {
+          known: new ProviderSessionAccessError({ reason: accessReason }).message,
+          category: categoryMessage(),
+        };
+      }
       const tag = (cause as Record<string, unknown>)._tag;
       switch (tag) {
         case "ProviderProcessIdentityUnavailableError":

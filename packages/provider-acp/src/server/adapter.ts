@@ -130,6 +130,7 @@ import {
   backgroundWorkNotification,
 } from "@t3tools/provider-core/server/notification";
 import {
+  isProviderSessionAccessRefusal,
   makeProviderFailure,
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
@@ -11752,7 +11753,34 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     latestRuntimePolicy,
                     (candidate) =>
                       commitReplacementSession(rollbackInput.providerThread.appThreadId, candidate),
-                  ).pipe(Effect.retry({ times: 1 }));
+                  ).pipe(
+                    Effect.retry({
+                      times: 1,
+                      while: (error) => {
+                        if (isProviderSessionAccessRefusal(error)) return false;
+                        if (
+                          error._tag === "AcpTransportError" ||
+                          error._tag === "AcpInputStreamEndedError" ||
+                          error._tag === "AcpProcessExitedError"
+                        )
+                          return true;
+                        if (
+                          error._tag !== "AcpRequestError" ||
+                          typeof error.data !== "object" ||
+                          error.data === null ||
+                          !("t3SessionAccess" in error.data)
+                        )
+                          return false;
+                        const marker = error.data.t3SessionAccess;
+                        return (
+                          typeof marker === "object" &&
+                          marker !== null &&
+                          "reason" in marker &&
+                          (marker.reason === "locked" || marker.reason === "changed")
+                        );
+                      },
+                    }),
+                  );
                   const now = yield* DateTime.now;
                   return {
                     providerThread: {

@@ -16,6 +16,7 @@ import * as Effect from "effect/Effect";
 
 import {
   knownProviderFailureMessage,
+  isProviderSessionAccessRefusal,
   refusedBeforePrompt,
   makeProviderFailure,
   makeProviderFailureTurnItem,
@@ -23,6 +24,7 @@ import {
   ContextHandoffBudgetError,
   ContextHandoffBackgroundWorkError,
 } from "./failure.ts";
+import { ProviderSessionAccessError, ProviderProcessIdentityUnavailableError } from "./errors.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -335,6 +337,7 @@ it("explains a native thread another client is writing to", () => {
     cause: inUse,
   });
   assert.equal(makeProviderFailure({ cause: Cause.fail(cause) }).message, inUse.message);
+  assert.isTrue(isProviderSessionAccessRefusal({ cause: Cause.fail(cause) }));
 });
 
 it("does not expose defect text nested inside a known error category", () => {
@@ -466,3 +469,64 @@ it.each([
     );
   },
 );
+
+it("keeps session access markers actionable without exposing native data text", () => {
+  const cause = {
+    _tag: "AcpRequestError",
+    code: -32000,
+    errorMessage: "private provider text",
+    data: { t3SessionAccess: { reason: "held", message: "private native data" } },
+  };
+  assert.equal(
+    knownProviderFailureMessage({ cause: Cause.fail(cause) }),
+    "This native conversation is held by another client. Close it there before retrying.",
+  );
+});
+
+it.each(["held", "unknown", "locked", "changed", "invalid", "unavailable", "active"] as const)(
+  "classifies typed and marker session access failures through bounded wrappers: %s",
+  (reason) => {
+    const typed = new ProviderSessionAccessError({
+      reason,
+      cause: new Error("private native text"),
+    });
+    const marker = {
+      _tag: "AcpRequestError",
+      code: -32603,
+      data: { t3SessionAccess: { reason, message: "private native text" } },
+    };
+    for (const refusal of [typed, marker]) {
+      for (const cause of [refusal, { cause: Cause.fail({ cause: refusal }) }]) {
+        assert.equal(
+          isProviderSessionAccessRefusal(cause),
+          reason !== "locked" && reason !== "changed",
+        );
+        assert.equal(knownProviderFailureMessage(cause), typed.message);
+        assert.notInclude(typed.message, "private");
+      }
+    }
+  },
+);
+
+it("bounds refusal traversal and ignores invalid session access markers", () => {
+  const identity = new ProviderProcessIdentityUnavailableError();
+  assert.isTrue(isProviderSessionAccessRefusal({ cause: Cause.fail(identity) }));
+  for (const marker of [null, "held", {}, { reason: "constructor" }, { reason: "future" }]) {
+    const error = { _tag: "AcpRequestError", code: -32603, data: { t3SessionAccess: marker } };
+    assert.isFalse(isProviderSessionAccessRefusal(error));
+    assert.isUndefined(knownProviderFailureMessage(error));
+  }
+  const cyclic: { cause?: unknown } = {};
+  cyclic.cause = cyclic;
+  assert.isFalse(isProviderSessionAccessRefusal(cyclic));
+  assert.isFalse(
+    isProviderSessionAccessRefusal({
+      get cause() {
+        throw new Error("private");
+      },
+    }),
+  );
+  let deep: unknown = identity;
+  for (let depth = 0; depth < 20; depth++) deep = { cause: deep };
+  assert.isFalse(isProviderSessionAccessRefusal(deep));
+});

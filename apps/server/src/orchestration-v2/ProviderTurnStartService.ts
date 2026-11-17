@@ -60,6 +60,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import {
   ContextHandoffBackgroundWorkError,
   knownProviderFailureMessage,
+  isProviderSessionAccessRefusal,
   makeProviderFailure,
   refusedBeforePrompt,
 } from "@t3tools/provider-core/server/failure";
@@ -850,7 +851,8 @@ export const layer: Layer.Layer<
           "cause" in failure &&
           isProviderAdapterOpenSessionError(failure.cause) &&
           failure.cause.requiresSignIn === true;
-        if (input.willRetry === true && !requiresSignIn) return yield* failure;
+        if (input.willRetry === true && !requiresSignIn && !isProviderSessionAccessRefusal(failure))
+          return yield* failure;
         yield* settleStartFailure({
           signal: "provider-session-open-failure",
           title: "Provider session failed to open",
@@ -865,7 +867,7 @@ export const layer: Layer.Layer<
       ) {
         const loaded = yield* Effect.result(load);
         if (loaded._tag === "Success") return loaded.success;
-        if (input.willRetry === true && loaded.failure._tag !== "ProviderAdapterThreadInUseError")
+        if (input.willRetry === true && !isProviderSessionAccessRefusal(loaded.failure))
           return yield* loaded.failure;
         yield* settleStartFailure({
           signal: "provider-thread-load-failure",
@@ -1225,7 +1227,8 @@ export const layer: Layer.Layer<
               }),
             );
             if (forked._tag === "Success") return forked.success;
-            if (input.willRetry === true) return yield* forked.failure;
+            if (input.willRetry === true && !isProviderSessionAccessRefusal(forked.failure))
+              return yield* forked.failure;
             if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
             // Retries are spent (e.g. the source's native session is gone): start fresh with portable history.
             yield* Effect.logWarning("Starting a native fork in a fresh native session", {
@@ -1515,10 +1518,7 @@ export const layer: Layer.Layer<
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
         // Another client is still writing to the native thread. A fresh
         // session here would silently split the conversation from it.
-        if (
-          resumed._tag === "Failure" &&
-          resumed.failure._tag === "ProviderAdapterThreadInUseError"
-        ) {
+        if (resumed._tag === "Failure" && isProviderSessionAccessRefusal(resumed.failure)) {
           return yield* loadFromProvider(Effect.fail(resumed.failure));
         }
 

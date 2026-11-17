@@ -8245,153 +8245,181 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("quarantines callbacks from a failed rollback replacement before retrying", () =>
-    Effect.gen(function* () {
-      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const selfInvocation = yield* resolveSelfInvocation();
-      const mockAgentPath = yield* bundledMockAgentPath;
-      type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
-      const sessionUpdateHandlers: Array<
-        Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined
-      > = [];
-      const backgroundMutationHandlers: Array<
-        AcpAdapterV2ExtensionContext["applyBackgroundTaskMutation"] | undefined
-      > = [];
-      const availableCommandUpdates: Array<ReadonlyArray<EffectAcpSchema.AvailableCommand>> = [];
-      let registeredExtensionOrdinal = 0;
-      let runtimeOrdinalSeen = 0;
-      const makeRuntime = makeMockRuntime({
-        childProcessSpawner,
-        mockAgentPath,
-        wrapRuntime: (runtime, runtimeOrdinal) => {
-          runtimeOrdinalSeen = runtimeOrdinal;
-          return {
-            ...runtime,
-            handleSessionUpdate: (handler) =>
-              Effect.sync(() => {
-                sessionUpdateHandlers[runtimeOrdinal - 1] = handler;
-              }).pipe(Effect.andThen(runtime.handleSessionUpdate(handler))),
-            ...(runtimeOrdinal === 2
-              ? {
-                  start: () =>
-                    Effect.fail(
-                      new EffectAcpErrors.AcpTransportError({
-                        detail: "Forced first rollback replacement failure",
-                        cause: "test",
-                      }),
-                    ),
-                }
-              : runtimeOrdinal === 3
+  it.effect.each(["transport", "auth", "session", "config", "locked", "changed"] as const)(
+    "quarantines callbacks from a failed rollback replacement before retrying: %s",
+    (failureKind) =>
+      Effect.gen(function* () {
+        const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+        const selfInvocation = yield* resolveSelfInvocation();
+        const mockAgentPath = yield* bundledMockAgentPath;
+        type RuntimeService = AcpSessionRuntime.AcpSessionRuntime["Service"];
+        const sessionUpdateHandlers: Array<
+          Parameters<RuntimeService["handleSessionUpdate"]>[0] | undefined
+        > = [];
+        const backgroundMutationHandlers: Array<
+          AcpAdapterV2ExtensionContext["applyBackgroundTaskMutation"] | undefined
+        > = [];
+        const availableCommandUpdates: Array<ReadonlyArray<EffectAcpSchema.AvailableCommand>> = [];
+        let registeredExtensionOrdinal = 0;
+        let runtimeOrdinalSeen = 0;
+        const makeRuntime = makeMockRuntime({
+          childProcessSpawner,
+          mockAgentPath,
+          wrapRuntime: (runtime, runtimeOrdinal) => {
+            runtimeOrdinalSeen = runtimeOrdinal;
+            return {
+              ...runtime,
+              handleSessionUpdate: (handler) =>
+                Effect.sync(() => {
+                  sessionUpdateHandlers[runtimeOrdinal - 1] = handler;
+                }).pipe(Effect.andThen(runtime.handleSessionUpdate(handler))),
+              ...(runtimeOrdinal === 2
                 ? {
                     start: () =>
-                      Effect.suspend(() => {
-                        const stagedSessionUpdate = sessionUpdateHandlers[2];
-                        if (stagedSessionUpdate === undefined) {
-                          return Effect.die("replacement startup must buffer session updates");
-                        }
-                        return stagedSessionUpdate({
-                          sessionId: "mock-session-3",
-                          update: {
-                            sessionUpdate: "available_commands_update",
-                            availableCommands: [
-                              {
-                                name: "staged-command",
-                                description: "published while the replacement starts",
-                              },
-                            ],
-                          },
-                        }).pipe(Effect.andThen(runtime.start()));
-                      }),
+                      Effect.fail(
+                        failureKind === "transport"
+                          ? new EffectAcpErrors.AcpTransportError({
+                              detail: "Forced first rollback replacement failure",
+                              cause: "test",
+                            })
+                          : new EffectAcpErrors.AcpRequestError({
+                              code: failureKind === "auth" ? -32000 : -32602,
+                              errorMessage: "Refused startup",
+                              ...(failureKind === "session" ||
+                              failureKind === "locked" ||
+                              failureKind === "changed"
+                                ? {
+                                    data: {
+                                      t3SessionAccess: {
+                                        reason: failureKind === "session" ? "held" : failureKind,
+                                      },
+                                    },
+                                  }
+                                : {}),
+                            }),
+                      ),
                   }
-                : {}),
-          };
-        },
-      });
-      const instanceId = ProviderInstanceId.make("acp-test-rollback-retry-generation");
-      const adapter = yield* makeAcpAdapterV2({
-        instanceId,
-        flavor: {
-          driver: ACP_TEST_DRIVER,
-          capabilities: AcpProviderCapabilitiesV2,
-          enablePostSettleContinuation: true,
-          onAvailableCommandsUpdate: (commands) =>
-            Effect.sync(() => {
-              availableCommandUpdates.push(commands);
-            }),
-          registerExtensions: (context) =>
-            Effect.sync(() => {
-              backgroundMutationHandlers[registeredExtensionOrdinal] =
-                context.applyBackgroundTaskMutation;
-              registeredExtensionOrdinal += 1;
-            }),
-          makeRuntime,
-        },
-        selfInvocation,
-        continuationRequests: { offer: () => Effect.void },
-      });
-      const threadId = ThreadId.make("thread-acp-rollback-retry-generation");
-      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
-        runtimeMode: "full-access",
-        interactionMode: "default",
-        cwd: process.cwd(),
-      });
-      const modelSelection = { instanceId, model: "default" } as const;
-      const runtime = yield* adapter.openSession({
-        threadId,
-        providerSessionId: ProviderSessionId.make("provider-session-acp-rollback-retry-generation"),
-        modelSelection,
-        runtimePolicy,
-      });
-      if (runtime.hasPendingBackgroundWork === undefined) {
-        return yield* Effect.die("ACP runtime must expose background work state");
-      }
-      const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
-      const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
-      yield* runtime.events.pipe(
-        Stream.runForEach((event) => Queue.offer(events, event)),
-        Effect.forkScoped,
-      );
-      const providerThread = yield* runtime.ensureThread({
-        threadId,
-        modelSelection,
-        runtimePolicy,
-      });
+                : runtimeOrdinal === 3
+                  ? {
+                      start: () =>
+                        Effect.suspend(() => {
+                          const stagedSessionUpdate = sessionUpdateHandlers[2];
+                          if (stagedSessionUpdate === undefined) {
+                            return Effect.die("replacement startup must buffer session updates");
+                          }
+                          return stagedSessionUpdate({
+                            sessionId: "mock-session-3",
+                            update: {
+                              sessionUpdate: "available_commands_update",
+                              availableCommands: [
+                                {
+                                  name: "staged-command",
+                                  description: "published while the replacement starts",
+                                },
+                              ],
+                            },
+                          }).pipe(Effect.andThen(runtime.start()));
+                        }),
+                    }
+                  : {}),
+            };
+          },
+        });
+        const instanceId = ProviderInstanceId.make("acp-test-rollback-retry-generation");
+        const adapter = yield* makeAcpAdapterV2({
+          instanceId,
+          flavor: {
+            driver: ACP_TEST_DRIVER,
+            capabilities: AcpProviderCapabilitiesV2,
+            enablePostSettleContinuation: true,
+            onAvailableCommandsUpdate: (commands) =>
+              Effect.sync(() => {
+                availableCommandUpdates.push(commands);
+              }),
+            registerExtensions: (context) =>
+              Effect.sync(() => {
+                backgroundMutationHandlers[registeredExtensionOrdinal] =
+                  context.applyBackgroundTaskMutation;
+                registeredExtensionOrdinal += 1;
+              }),
+            makeRuntime,
+          },
+          selfInvocation,
+          continuationRequests: { offer: () => Effect.void },
+        });
+        const threadId = ThreadId.make("thread-acp-rollback-retry-generation");
+        const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          cwd: process.cwd(),
+        });
+        const modelSelection = { instanceId, model: "default" } as const;
+        const runtime = yield* adapter.openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make(
+            "provider-session-acp-rollback-retry-generation",
+          ),
+          modelSelection,
+          runtimePolicy,
+        });
+        if (runtime.hasPendingBackgroundWork === undefined) {
+          return yield* Effect.die("ACP runtime must expose background work state");
+        }
+        const hasPendingBackgroundWork = runtime.hasPendingBackgroundWork;
+        const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+        yield* runtime.events.pipe(
+          Stream.runForEach((event) => Queue.offer(events, event)),
+          Effect.forkScoped,
+        );
+        const providerThread = yield* runtime.ensureThread({
+          threadId,
+          modelSelection,
+          runtimePolicy,
+        });
 
-      yield* runtime.rollbackThread({
-        providerThread,
-        providerThreadTurns: [],
-        target: {
-          type: "thread_start",
-          checkpointId: CheckpointId.make("checkpoint-acp-rollback-retry-generation"),
-          appRunOrdinal: 0,
-        },
-      });
+        const rollback = yield* Effect.result(
+          runtime.rollbackThread({
+            providerThread,
+            providerThreadTurns: [],
+            target: {
+              type: "thread_start",
+              checkpointId: CheckpointId.make("checkpoint-acp-rollback-retry-generation"),
+              appRunOrdinal: 0,
+            },
+          }),
+        );
+        if (failureKind !== "transport" && failureKind !== "locked" && failureKind !== "changed") {
+          assert.equal(rollback._tag, "Failure");
+          assert.equal(runtimeOrdinalSeen, 2);
+          return;
+        }
+        assert.equal(rollback._tag, "Success");
 
-      assert.equal(runtimeOrdinalSeen, 3);
-      assert.deepEqual(
-        availableCommandUpdates.map((commands) => commands.map((command) => command.name)),
-        [["staged-command"]],
-      );
-      const failedReplacementHandler = sessionUpdateHandlers[1];
-      const failedBackgroundMutationHandler = backgroundMutationHandlers[1];
-      assert.isDefined(failedReplacementHandler);
-      assert.isDefined(failedBackgroundMutationHandler);
-      while (Option.isSome(yield* Queue.poll(events))) {}
-      yield* failedReplacementHandler!({
-        sessionId: "failed-replacement-session",
-        update: {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "stale failed replacement callback" },
-        },
-      });
-      assert.isTrue(Option.isNone(yield* Queue.poll(events)));
-      yield* failedBackgroundMutationHandler!({
-        sessionId: "mock-session-3",
-        taskId: "stale-failed-replacement-task",
-        status: "running",
-      });
-      assert.isFalse(yield* hasPendingBackgroundWork);
-    }).pipe(Effect.provide(layerTest)),
+        assert.equal(runtimeOrdinalSeen, 3);
+        assert.deepEqual(
+          availableCommandUpdates.map((commands) => commands.map((command) => command.name)),
+          [["staged-command"]],
+        );
+        const failedReplacementHandler = sessionUpdateHandlers[1];
+        const failedBackgroundMutationHandler = backgroundMutationHandlers[1];
+        assert.isDefined(failedReplacementHandler);
+        assert.isDefined(failedBackgroundMutationHandler);
+        while (Option.isSome(yield* Queue.poll(events))) {}
+        yield* failedReplacementHandler!({
+          sessionId: "failed-replacement-session",
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "stale failed replacement callback" },
+          },
+        });
+        assert.isTrue(Option.isNone(yield* Queue.poll(events)));
+        yield* failedBackgroundMutationHandler!({
+          sessionId: "mock-session-3",
+          taskId: "stale-failed-replacement-task",
+          status: "running",
+        });
+        assert.isFalse(yield* hasPendingBackgroundWork);
+      }).pipe(Effect.provide(layerTest)),
   );
 
   it.live("settles a Grok background command that completed before an ACP v2 idle error", () =>
