@@ -27,13 +27,13 @@ export type ProviderSessionAccessReason = typeof ProviderSessionAccessReason.Typ
 const SESSION_ACCESS_MESSAGES: Record<ProviderSessionAccessReason, string> = {
   held: "This native conversation is held by another client. Close it there before retrying.",
   unknown:
-    "This native conversation could not be found. Select an existing conversation or start a new thread.",
+    "T3 could not verify ownership of this native conversation. Check the provider setup and any other clients using it before retrying.",
   locked:
     "This native conversation is temporarily locked. Wait for the other operation to finish, then retry.",
   changed:
     "This native conversation changed while it was being opened. Retry to load its current state.",
   invalid:
-    "This native conversation cannot be opened with the current configuration. Check the provider settings or start a new thread.",
+    "The native conversation lease or data directory is invalid. Check the provider data directory and its access permissions.",
   unavailable:
     "Native conversation access is unavailable. Check the provider setup and restart T3 before retrying.",
   active:

@@ -133,9 +133,10 @@ it.effect("observes the current process with signal zero", () =>
     const reader = yield* NativeProcessIdentity.make().pipe(
       Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-process-presence-" })),
     );
+    const platform = yield* HostProcess.Platform;
     assert.equal(
       yield* reader.readPresence(process.pid),
-      process.platform === "linux" || process.platform === "darwin" ? "present" : "unknown",
+      platform === "linux" || platform === "darwin" ? "present" : "unknown",
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

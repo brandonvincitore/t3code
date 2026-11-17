@@ -356,7 +356,7 @@ it.effect.each(["live", "stale", "unknown", "lock", "symlink"] as const)(
       assert.deepEqual(yield* h.fs.stat(lease), before);
       assert.equal(
         (yield* h.reader.admit({ cwd: h.cwd, nativeId: h.nativeId }).pipe(Effect.flip)).reason,
-        "lease_present",
+        kind === "symlink" || kind === "unknown" ? "invalid_source" : "lease_present",
       );
     }).pipe(
       Effect.scoped,
@@ -396,7 +396,7 @@ it.effect(
         (yield* h.reader
           .admit({ cwd: h.cwd, nativeId: h.nativeId, ownsProcess: () => Effect.succeed(true) })
           .pipe(Effect.flip)).status,
-        "busy",
+        "unsafe",
       );
       yield* h.fs.writeFileString(lease, JSON.stringify(stamp));
       yield* h.fs.writeFileString(`${lease}.lock`, "coordination");
@@ -406,6 +406,152 @@ it.effect(
           .pipe(Effect.flip)).status,
         "busy",
       );
+      assert.equal((yield* h.capture.pipe(Effect.flip)).status, "busy");
+      yield* h.fs.remove(`${lease}.lock`);
+      const beforeRecovery = yield* h.fs.readFileString(lease);
+      for (const operation of ["activate", "fork-source"] as const) {
+        let probes = 0;
+        yield* h.reader.admit({
+          cwd: h.cwd,
+          nativeId: h.nativeId,
+          operation,
+          readProcessPresence: (pid) =>
+            Effect.sync(() => {
+              assert.equal(pid, stamp.pid);
+              probes++;
+              return "missing" as const;
+            }),
+        });
+        assert.equal(probes, 2);
+        assert.equal(yield* h.fs.readFileString(lease), beforeRecovery);
+      }
+      for (const presence of ["present", "unknown"] as const) {
+        assert.equal(
+          (yield* h.reader
+            .admit({
+              cwd: h.cwd,
+              nativeId: h.nativeId,
+              operation: "activate",
+              readProcessPresence: () => Effect.succeed(presence),
+            })
+            .pipe(Effect.flip)).status,
+          "busy",
+        );
+      }
+      let observations = 0;
+      assert.equal(
+        (yield* h.reader
+          .admit({
+            cwd: h.cwd,
+            nativeId: h.nativeId,
+            operation: "activate",
+            readProcessPresence: () =>
+              Effect.sync(() =>
+                ++observations === 1 ? ("missing" as const) : ("present" as const),
+              ),
+          })
+          .pipe(Effect.flip)).reason,
+        "source_changed",
+      );
+      assert.equal(observations, 2);
+      assert.equal(
+        (yield* h.reader
+          .admit({
+            cwd: h.cwd,
+            nativeId: h.nativeId,
+            operation: "activate",
+            readProcessPresence: () =>
+              h.fs
+                .writeFileString(lease, JSON.stringify({ ...stamp, token: "changed" }))
+                .pipe(Effect.as("missing" as const), Effect.orDie),
+          })
+          .pipe(Effect.flip)).reason,
+        "source_changed",
+      );
+      yield* h.fs.writeFileString(lease, beforeRecovery);
+      observations = 0;
+      assert.equal(
+        (yield* h.reader
+          .admit({
+            cwd: h.cwd,
+            nativeId: h.nativeId,
+            operation: "activate",
+            readProcessPresence: () =>
+              Effect.gen(function* () {
+                if (++observations === 2)
+                  yield* h.fs.writeFileString(`${lease}.lock`, "coordination");
+                return "missing" as const;
+              }).pipe(Effect.orDie),
+          })
+          .pipe(Effect.flip)).status,
+        "busy",
+      );
+      yield* h.fs.remove(`${lease}.lock`);
+      yield* h.fs.writeFileString(lease, JSON.stringify({ ...stamp, parentPid: 0 }));
+      yield* h.reader.admit({
+        cwd: h.cwd,
+        nativeId: h.nativeId,
+        operation: "activate",
+        readProcessPresence: () => Effect.succeed("missing" as const),
+      });
+      yield* h.fs.writeFileString(lease, JSON.stringify({ ...stamp, hostId: "foreign-host" }));
+      observations = 0;
+      assert.equal(
+        (yield* h.reader
+          .admit({
+            cwd: h.cwd,
+            nativeId: h.nativeId,
+            operation: "activate",
+            readProcessPresence: () =>
+              Effect.sync(() => {
+                observations++;
+                return "missing" as const;
+              }),
+          })
+          .pipe(Effect.flip)).status,
+        "busy",
+      );
+      assert.equal(observations, 0);
+      yield* h.fs.writeFileString(lease, beforeRecovery);
+      const rootProof = yield* h.reader.checkAccess({
+        cwd: h.cwd,
+        nativeId: h.nativeId,
+        operation: "activate",
+        ownsProcess: () => Effect.succeed(true),
+      });
+      yield* h.fs.remove(lease);
+      assert.equal(
+        (yield* h.reader
+          .admit({
+            cwd: h.cwd,
+            nativeId: h.nativeId,
+            operation: "write",
+            ownsProcess: () => Effect.succeed(true),
+          })
+          .pipe(Effect.flip)).status,
+        "busy",
+      );
+      assert.isAbove((yield* h.capture).rows.length, 0);
+      yield* h.fs.rename(h.native, `${h.native}-previous`);
+      yield* h.fs.makeDirectory(h.leases, { recursive: true });
+      yield* h.fs.writeFileString(lease, beforeRecovery);
+      assert.equal(
+        (yield* h.reader
+          .checkAccess({
+            cwd: h.cwd,
+            nativeId: h.nativeId,
+            operation: "activate",
+            ...(rootProof.rootIdentity === undefined
+              ? {}
+              : { expectedRoot: rootProof.rootIdentity }),
+            ownsProcess: () => Effect.succeed(true),
+          })
+          .pipe(Effect.flip)).reason,
+        "changed",
+      );
+      yield* h.fs.remove(h.native, { recursive: true });
+      yield* h.fs.rename(`${h.native}-previous`, h.native);
+      yield* h.fs.writeFileString(lease, beforeRecovery);
       assert.equal((yield* h.capture.pipe(Effect.flip)).status, "busy");
     }).pipe(
       Effect.scoped,
@@ -608,7 +754,7 @@ it.live.each(["live", "stale", "unknown", "own"] as const)(
         (yield* reader
           .capture({ cwd: peer.source.cwd, nativeId: peer.source.id })
           .pipe(Effect.flip)).reason,
-      ).toBe("lease_present");
+      ).toBe(kind === "unknown" ? "invalid_source" : "lease_present");
       expect(yield* peer.calls).toBe("");
       expect(yield* peer.fs.readFileString(file)).toBe(contents);
       expect(yield* peer.fs.stat(file)).toEqual(before);

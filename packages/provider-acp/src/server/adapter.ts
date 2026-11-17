@@ -131,6 +131,7 @@ import {
 } from "@t3tools/provider-core/server/notification";
 import {
   isProviderSessionAccessRefusal,
+  knownProviderFailureMessage,
   makeProviderFailure,
   makeProviderRetryTurnItem,
 } from "@t3tools/provider-core/server/failure";
@@ -10292,7 +10293,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                             driver,
                             providerThreadId: turnInput.providerThread.id,
                             detail:
-                              "The native session lease must be released in Kiro before continuing.",
+                              knownProviderFailureMessage(cause) ??
+                              "The native conversation is in use or its ownership could not be verified.",
                             cause,
                           })
                         : cause,
@@ -11209,7 +11211,8 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                         driver,
                         providerThreadId: threadInput.providerThread.id,
                         detail:
-                          "The native session lease must be released in Kiro before continuing.",
+                          knownProviderFailureMessage(cause) ??
+                          "The native conversation is in use or its ownership could not be verified.",
                         cause,
                       })
                     : new ProviderAdapter.ProviderAdapterResumeThreadError({

@@ -77,7 +77,10 @@ chooses Kiro default, off, recall only, or learn and recall for conversations.
 ## Native sessions and saved history
 
 Select a project in the provider's Sessions section to import and continue a native CLI session.
-Sessions already owned by T3 open their existing conversation. See the
+Sessions already owned by T3 open their existing conversation. T3 can transfer an idle session
+between its runtimes; active turns and background workflows must finish first. After a crash, T3
+can let Kiro recover a valid local lease when its recorded process is confirmed gone. An uncertain
+or foreign owner remains blocked. See the
 [refinement guide](kiro-refinement.md#keep-conversations-across-updates) for a stable data directory
 and access from multiple clients.
 

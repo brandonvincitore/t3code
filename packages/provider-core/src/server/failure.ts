@@ -121,6 +121,7 @@ const NATIVE_APPROVAL_GUIDANCE = {
     "Native Approve for Me cannot enforce this thread's approval, sandbox, Plan, or managed restrictions. Choose Supervised to continue.",
 } as const;
 
+const isSessionAccessReason = Schema.is(ProviderSessionAccessReason);
 function sessionAccessReason(
   error: Record<string, unknown>,
 ): ProviderSessionAccessReason | undefined {
@@ -134,7 +135,7 @@ function sessionAccessReason(
       : Predicate.isObject(marker)
         ? marker.reason
         : undefined;
-  return Schema.is(ProviderSessionAccessReason)(reason) ? reason : undefined;
+  return isSessionAccessReason(reason) ? reason : undefined;
 }
 
 export function isProviderSessionAccessRefusal(error: unknown): boolean {

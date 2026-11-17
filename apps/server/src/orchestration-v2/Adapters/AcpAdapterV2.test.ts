@@ -1531,7 +1531,7 @@ describe("AcpAdapterV2", () => {
       });
       assert.isDefined(runtimeInput?.relinquishSession);
       const relinquish = runtimeInput!.relinquishSession!;
-      const nativeId = providerThread.nativeThreadRef!.nativeId;
+      const nativeId = providerThread.nativeThreadRef!.nativeId!;
       const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
       yield* runtime.events.pipe(
         Stream.runForEach((event) => Queue.offer(events, event)),
@@ -1544,7 +1544,8 @@ describe("AcpAdapterV2", () => {
           ),
         ),
       );
-      if (scenario === "pending request") yield* runtimeInput!.onIncomingRequest!("pending");
+      if (scenario === "pending request")
+        yield* runtimeInput!.onIncomingRequest!("pending", "session/request_permission", {});
       if (scenario === "background")
         yield* extensions!.applyBackgroundTaskMutation({
           sessionId: nativeId,

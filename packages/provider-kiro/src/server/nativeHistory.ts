@@ -5,6 +5,8 @@ import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import { NativeHistoryReadError } from "@t3tools/contracts";
+import { ProviderSessionAccessError } from "@t3tools/provider-core/server/errors";
+import * as Clock from "effect/Clock";
 import type {
   NativeHistoryCapture,
   NativeHistoryReader,
@@ -170,7 +172,7 @@ const LeaseIdentifier = Schema.String.check(
 const Lease = Schema.Struct({
   v: Schema.Literal(1),
   pid: Schema.Int.check(Schema.isGreaterThan(0)),
-  parentPid: Schema.Int.check(Schema.isGreaterThan(0)),
+  parentPid: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
   instanceId: LeaseIdentifier,
   hostId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(255)),
   acquiredAt: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(40)),
@@ -244,6 +246,7 @@ async function bounded(file: string, limit: number) {
     return {
       text: new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)),
       stamp: statKey(current),
+      identity: `${inode(current)}:${current.birthtimeMs}`,
     };
   } finally {
     await handle.close();
@@ -303,7 +306,10 @@ async function leaseAt(root: string, id: string) {
       throw error;
     }
     if (candidate.endsWith(".lock")) fail("busy", "lease_present");
-    return await bounded(file, 8_192);
+    const rootIdentity = inode(await NodeFSP.lstat(root));
+    const lease = await bounded(file, 8_192);
+    if (inode(await NodeFSP.lstat(root)) !== rootIdentity) fail("busy", "source_changed");
+    return { ...lease, rootIdentity };
   }
 }
 
@@ -369,6 +375,7 @@ async function anchoredRoot(root: string) {
         return {
           text: new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)),
           stamp: statKey(current),
+          identity: `${inode(current)}:${current.birthtimeMs}`,
         };
       } finally {
         await handle.close();
@@ -412,19 +419,31 @@ async function anchoredRoot(root: string) {
   }
 }
 
-async function admissionLease(root: string, id: string, platform: NodeJS.Platform) {
-  if (platform !== "linux") return leaseAt(root, id);
+async function admissionLease(root: string, id: string | undefined, platform: NodeJS.Platform) {
+  if (platform !== "linux") {
+    try {
+      await directory(root);
+    } catch (error) {
+      if (missing(error)) return { lease: undefined, rootIdentity: undefined };
+      throw error;
+    }
+    const identity = inode(await NodeFSP.lstat(root));
+    const lease = id === undefined ? undefined : await leaseAt(root, id);
+    if (inode(await NodeFSP.lstat(root)) !== identity) fail("busy", "source_changed");
+    return { lease, rootIdentity: identity };
+  }
   let anchored: Awaited<ReturnType<typeof anchoredRoot>>;
   try {
     anchored = await anchoredRoot(root);
   } catch (error) {
-    if (missing(error)) return;
+    if (missing(error)) return { lease: undefined, rootIdentity: undefined };
     throw error;
   }
   try {
-    const lease = await anchored.lease(id);
+    const rootIdentity = await anchored.verify();
+    const lease = id === undefined ? undefined : await anchored.lease(id);
     await anchored.verify();
-    return lease;
+    return { lease, rootIdentity };
   } finally {
     await anchored.close();
   }
@@ -674,49 +693,133 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
               }),
       }),
   );
-  const admit = Effect.fn("KiroNativeHistory.admit")(
-    (input: {
-      cwd: string;
-      nativeId: string;
-      ownsProcess?: (pid: number, parentPid: number, acquiredAt: string) => Effect.Effect<boolean>;
-    }) =>
-      Effect.gen(function* () {
-        const lease = yield* Effect.tryPromise({
-          try: async () => {
-            if (!NodePath.isAbsolute(input.cwd) || !/^[A-Za-z0-9_-]{1,128}$/.test(input.nativeId))
-              fail("unsafe", "invalid_source");
-            return admissionLease(
-              await nativeRoot(environment, fallbackHome, platform, true),
-              input.nativeId,
-              platform,
-            );
-          },
-          catch: () => new NativeHistoryReadError({ status: "busy", reason: "lease_present" }),
-        });
-        if (lease === undefined) return;
-        const stamp = yield* Effect.try({
-          try: () => parseLease(lease.text),
-          catch: () => new NativeHistoryReadError({ status: "busy", reason: "lease_present" }),
-        });
+  type AccessInput = {
+    cwd: string;
+    nativeId?: string;
+    operation?: "activate" | "write" | "fork-source";
+    expectedRoot?: string;
+    requireOwned?: boolean;
+    ownsProcess?: (pid: number, parentPid: number, acquiredAt: string) => Effect.Effect<boolean>;
+    readProcessPresence?: (pid: number) => Effect.Effect<"present" | "missing" | "unknown">;
+  };
+  const readAccessLease = Effect.fn("KiroSessionAccess.observe")((input: AccessInput) =>
+    Effect.tryPromise({
+      try: async () => {
         if (
-          Number.isFinite(Date.parse(stamp.acquiredAt)) &&
-          stamp.hostId === host &&
-          input.ownsProcess &&
-          (yield* input.ownsProcess(stamp.pid, stamp.parentPid, stamp.acquiredAt))
-        ) {
-          const current = yield* Effect.tryPromise({
-            try: async () =>
-              admissionLease(
-                await nativeRoot(environment, fallbackHome, platform),
-                input.nativeId,
-                platform,
-              ),
-            catch: () => new NativeHistoryReadError({ status: "busy", reason: "lease_present" }),
-          });
-          if (current?.text === lease.text) return;
-        }
-        return yield* new NativeHistoryReadError({ status: "busy", reason: "lease_present" });
-      }),
+          !NodePath.isAbsolute(input.cwd) ||
+          (input.nativeId === undefined
+            ? input.operation !== "activate"
+            : !/^[A-Za-z0-9_-]{1,128}$/.test(input.nativeId))
+        )
+          fail("unsafe", "invalid_source");
+        return admissionLease(
+          await nativeRoot(environment, fallbackHome, platform, true),
+          input.nativeId,
+          platform,
+        );
+      },
+      catch: (cause) =>
+        new ProviderSessionAccessError({
+          reason: isHistoryReadError(cause)
+            ? cause.reason === "lease_present"
+              ? "locked"
+              : cause.reason === "source_changed"
+                ? "changed"
+                : cause.status === "unsafe"
+                  ? "invalid"
+                  : "unavailable"
+            : typeof cause === "object" &&
+                cause !== null &&
+                "code" in cause &&
+                (cause.code === "ELOOP" || cause.code === "ENOTDIR" || cause.code === "EISDIR")
+              ? "invalid"
+              : "unavailable",
+        }),
+    }),
+  );
+  const wallClock = Clock.Clock.defaultValue();
+  const leaseRequired = new Set<string>();
+  const rootBindings = new Map<string, string>();
+  const checkAccess = Effect.fn("KiroSessionAccess.check")(function* (input: AccessInput) {
+    const observation = yield* readAccessLease(input);
+    const expectedRoot =
+      input.expectedRoot ??
+      (input.nativeId === undefined ? undefined : rootBindings.get(input.nativeId));
+    if (expectedRoot !== undefined && observation.rootIdentity !== expectedRoot)
+      return yield* new ProviderSessionAccessError({ reason: "changed" });
+    if (input.nativeId !== undefined && observation.rootIdentity !== undefined)
+      rootBindings.set(input.nativeId, observation.rootIdentity);
+    const lease = observation.lease;
+    const requiresLease = input.nativeId !== undefined && leaseRequired.has(input.nativeId);
+    if (lease === undefined) {
+      if (input.requireOwned || (input.operation === "write" && requiresLease))
+        return yield* new ProviderSessionAccessError({ reason: "unknown" });
+      return { state: "absent" as const, rootIdentity: observation.rootIdentity, requiresLease };
+    }
+    const stamp = yield* Effect.try({
+      try: () => parseLease(lease.text),
+      catch: () => new ProviderSessionAccessError({ reason: "invalid" }),
+    });
+    leaseRequired.add(input.nativeId!);
+    const acquiredAt = Date.parse(stamp.acquiredAt);
+    const now = yield* Clock.currentTimeMillis.pipe(Effect.provideService(Clock.Clock, wallClock));
+    if (!Number.isFinite(acquiredAt) || acquiredAt > now)
+      return yield* new ProviderSessionAccessError({ reason: "invalid" });
+    if (stamp.hostId !== host) return yield* new ProviderSessionAccessError({ reason: "held" });
+    const owned =
+      input.ownsProcess !== undefined &&
+      (yield* input.ownsProcess(stamp.pid, stamp.parentPid, stamp.acquiredAt));
+    const mayRecover =
+      !input.requireOwned && (input.operation === "activate" || input.operation === "fork-source");
+    const presence =
+      !owned && mayRecover && stamp.pid > 1 && input.readProcessPresence
+        ? yield* input.readProcessPresence(stamp.pid)
+        : "unknown";
+    if (!owned && presence !== "missing")
+      return yield* new ProviderSessionAccessError({
+        reason: presence === "present" ? "held" : "unknown",
+      });
+    const sameLease = (current: Awaited<ReturnType<typeof admissionLease>>) =>
+      current.lease?.text === lease.text &&
+      current.lease.identity === lease.identity &&
+      current.rootIdentity === observation.rootIdentity;
+    const current = yield* readAccessLease(input);
+    if (!sameLease(current)) return yield* new ProviderSessionAccessError({ reason: "changed" });
+    if (!owned) {
+      if ((yield* input.readProcessPresence!(stamp.pid)) !== "missing")
+        return yield* new ProviderSessionAccessError({ reason: "changed" });
+      if (!sameLease(yield* readAccessLease(input)))
+        return yield* new ProviderSessionAccessError({ reason: "changed" });
+    }
+    return {
+      state: owned ? ("owned" as const) : ("recoverable" as const),
+      rootIdentity: observation.rootIdentity,
+      requiresLease: true,
+    };
+  });
+  const admit = Effect.fn("KiroNativeHistory.admit")((input: AccessInput) =>
+    checkAccess(input).pipe(
+      Effect.asVoid,
+      Effect.mapError(
+        (cause) =>
+          new NativeHistoryReadError({
+            status:
+              cause.reason === "invalid"
+                ? "unsafe"
+                : cause.reason === "unavailable"
+                  ? "unavailable"
+                  : "busy",
+            reason:
+              cause.reason === "invalid"
+                ? "invalid_source"
+                : cause.reason === "unavailable"
+                  ? "unavailable"
+                  : cause.reason === "changed"
+                    ? "source_changed"
+                    : "lease_present",
+          }),
+      ),
+    ),
   );
   const exported =
     exportOptions === undefined
@@ -771,5 +874,5 @@ export const makeKiroNativeHistory = Effect.fn("KiroNativeHistory.make")(functio
                   : new NativeHistoryReadError({ status: "unsafe", reason: "invalid_source" }),
             }),
         });
-  return { capture: exported ?? capture, admit };
+  return { checkAccess, capture: exported ?? capture, admit };
 });

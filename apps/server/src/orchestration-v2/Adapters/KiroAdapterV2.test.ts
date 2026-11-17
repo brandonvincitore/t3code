@@ -54,6 +54,7 @@ import type { AcpAdapterV2RuntimeInput } from "@t3tools/provider-acp/server/adap
 import {
   knownProviderFailureMessage,
   refusedBeforePrompt,
+  isProviderSessionAccessRefusal,
 } from "@t3tools/provider-core/server/failure";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
@@ -6281,7 +6282,7 @@ it.effect.each([
         .pipe(Effect.flip);
       assert.equal(
         failure._tag,
-        missingHelper ? "ProviderAdapterOpenSessionError" : "ProviderAdapterThreadInUseError",
+        missingHelper ? "ProviderAdapterOpenSessionError" : "ProviderAdapterProtocolError",
       );
       if (missingHelper)
         assert.include(knownProviderFailureMessage(failure), "native process identity helper");
@@ -6291,7 +6292,17 @@ it.effect.each([
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );
 
-it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as const)(
+it.live.each([
+  "linux",
+  "darwin",
+  "win32",
+  "missing identity",
+  "launcher",
+  "recovery",
+  "unheld recovery",
+  "rebound recovery",
+  "unheld fork",
+] as const)(
   "continues only under the current Kiro runtime's exact own lease and isolates sibling instances on %s",
   (platform) =>
     Effect.gen(function* () {
@@ -6299,16 +6310,23 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       const root = yield* fs
         .makeTempDirectoryScoped({ prefix: "kiro-own-lease-" })
         .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
+      const recovery =
+        platform === "recovery" ||
+        platform === "unheld recovery" ||
+        platform === "rebound recovery";
+      const recoverFork = platform === "unheld fork";
+      const oldNativeId = "recover-native";
+      const oldPid = 123456789;
       const home = `${root}/home`;
       const native = `${home}/.kiro`;
-      let lease: string;
+      let lease = "";
       const wire = `${root}/wire.jsonl`;
       const script = `${root}/peer.mjs`;
       yield* fs.makeDirectory(`${native}/session-leases`, { recursive: true });
       yield* fs.writeFileString(
         script,
         String.raw`
-      import { writeFileSync, appendFileSync } from 'node:fs';
+      import { writeFileSync, appendFileSync, unlinkSync, renameSync, mkdirSync } from 'node:fs';
       import { hostname } from 'node:os';
       import { createInterface } from 'node:readline';
       import { spawn } from 'node:child_process';
@@ -6324,13 +6342,15 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         const { id, method, params } = JSON.parse(line); if (id === undefined) return;
         appendFileSync(process.env.WIRE, JSON.stringify({ method, pid:process.pid, sessionId:params?.sessionId })+'\n');
         let result = {};
-        if (method === 'initialize') result = { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { fork: {} } } };
-        if (method === 'session/new' || method === 'session/fork') {
-          const nativeId = method === 'session/fork' ? params.sessionId + '-fork' : sessionId;
-          writeFileSync(process.env.LEASE_DIR + '/' + nativeId + '.lease', JSON.stringify({ v:1, pid:process.pid, parentPid:process.ppid,
+        if (method === 'initialize') result = { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { fork: {}, close: {} } } };
+        if (method === 'session/load' && process.env.REBOUND === '1') { renameSync(process.env.KIRO_HOME, process.env.KIRO_HOME + '-previous'); mkdirSync(process.env.LEASE_DIR, {recursive:true}); }
+        if (method === 'session/new' || method === 'session/fork' || method === 'session/load') {
+          const nativeId = method === 'session/fork' ? params.sessionId + '-fork' : method === 'session/load' ? params.sessionId : sessionId;
+          if (process.env.UNHELD !== '1' && !(process.env.UNHELD_FORK === '1' && method !== 'session/new')) writeFileSync(process.env.LEASE_DIR + '/' + nativeId + '.lease', JSON.stringify({ v:1, pid:process.pid, parentPid:process.ppid,
             instanceId:'synthetic-native',hostId:hostname(), acquiredAt:new Date().toISOString(),token:'synthetic-token' }));
           result = { sessionId: nativeId, _meta: { source:'local', title:'Owned synthetic session' }, configOptions:[] };
         }
+        if (method === 'session/close') { try { unlinkSync(process.env.LEASE_DIR + '/' + params.sessionId + '.lease'); } catch {} }
         if (method === 'session/prompt') result = { stopReason:'end_turn' };
         process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id, result })+'\n');
       });
@@ -6352,12 +6372,16 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         WIRE: wire,
         LEASE_DIR: `${native}/session-leases`,
         LAUNCHER: platform === "launcher" ? "1" : "0",
+        UNHELD: platform === "unheld recovery" ? "1" : "0",
+        REBOUND: platform === "rebound recovery" ? "1" : "0",
+        UNHELD_FORK: recoverFork ? "1" : "0",
       };
       const runtimeScope = yield* Scope.make();
       yield* Effect.addFinalizer(() => Scope.close(runtimeScope, Exit.void));
       let observedRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
       const identities = new Map<number, ProviderHost.ProviderProcessIdentity>();
       let withdrawnLease: string | undefined;
+      let helperLost = false;
       const mcp = yield* McpProviderSessions.McpProviderSessions;
       const host = yield* ProviderHost.ProviderHost;
       const binaryPath =
@@ -6392,7 +6416,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
                 }).pipe(
                   Effect.provideService(
                     HostProcess.Platform,
-                    platform === "missing identity" ? "linux" : platform,
+                    platform === "missing identity" || recovery ? "linux" : platform,
                   ),
                   Effect.provideService(Scope.Scope, runtimeScope),
                   Effect.tap((runtime) =>
@@ -6403,14 +6427,48 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
                 ),
             }),
       };
+      const identityHost: ProviderHost.ProviderHost["Service"] = {
+        ...host,
+        ensureProcessIdentity: Effect.suspend(() =>
+          helperLost
+            ? Effect.fail(new ProviderProcessIdentityUnavailableError({}))
+            : host.ensureProcessIdentity,
+        ),
+        readProcessIdentity: (pid) =>
+          Effect.gen(function* () {
+            if (!identities.has(pid)) {
+              for (const name of yield* fs.readDirectory(`${native}/session-leases`)) {
+                const match = /^owned-native-(\d+)\.lease$/.exec(name);
+                if (!match) continue;
+                const stamp = yield* decodeOwnedLease(
+                  yield* fs.readFileString(`${native}/session-leases/${name}`),
+                );
+                if (Number(match[1]) !== stamp.pid) continue;
+                for (const candidate of [stamp.pid, stamp.parentPid])
+                  if (!identities.has(candidate))
+                    identities.set(candidate, {
+                      pid: candidate,
+                      ppid: candidate === stamp.pid ? stamp.parentPid : process.pid,
+                      birthId: `scripted-birth:${candidate}`,
+                      startedAtUpperBoundMs: Date.parse(stamp.acquiredAt),
+                      zombie: false,
+                    });
+              }
+            }
+            return identities.get(pid);
+          }).pipe(Effect.orDie),
+        readProcessPresence: (pid) =>
+          Effect.succeed(
+            (recovery || recoverFork) && pid === oldPid
+              ? ("missing" as const)
+              : ("unknown" as const),
+          ),
+      };
       const adapter = yield* makeKiroAdapterV2({
         ...runtimeOptions,
         instanceId,
       }).pipe(
-        Effect.provideService(ProviderHost.ProviderHost, {
-          ...host,
-          readProcessIdentity: (pid) => Effect.sync(() => identities.get(pid)),
-        }),
+        Effect.provideService(ProviderHost.ProviderHost, identityHost),
         Effect.provideService(McpProviderSessions.McpProviderSessions, {
           ...mcp,
           read: (threadId) =>
@@ -6420,14 +6478,53 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
             }),
         }),
       );
-      const session = yield* adapter
+      if (recovery) {
+        lease = `${native}/session-leases/${oldNativeId}.lease`;
+        yield* fs.writeFileString(
+          lease,
+          JSON.stringify({
+            v: 1,
+            pid: oldPid,
+            parentPid: 0,
+            instanceId: "previous-native",
+            hostId: yield* HostProcess.Hostname,
+            acquiredAt: "2026-11-13T00:00:00.000Z",
+            token: "synthetic",
+          }),
+        );
+      }
+      const opening = adapter
         .openSession({
           threadId,
           providerSessionId: ProviderSessionId.make("owned-runtime"),
           modelSelection,
           runtimePolicy,
+          ...(recovery ? { initialNativeThreadId: oldNativeId } : {}),
         })
         .pipe(Effect.provideService(Scope.Scope, runtimeScope));
+      if (
+        platform === "unheld recovery" ||
+        platform === "missing identity" ||
+        platform === "rebound recovery"
+      ) {
+        const previous = recovery ? yield* fs.readFileString(lease) : undefined;
+        const failure = yield* opening.pipe(Effect.flip);
+        assert.equal(isProviderSessionAccessRefusal(failure), platform !== "rebound recovery");
+        if (previous !== undefined)
+          assert.equal(
+            yield* fs.readFileString(
+              platform === "rebound recovery"
+                ? `${native}-previous/session-leases/${oldNativeId}.lease`
+                : lease,
+            ),
+            previous,
+          );
+        const calls = yield* fs.readFileString(wire);
+        assert.include(calls, recovery ? "session/load" : "session/new");
+        assert.notInclude(calls, "session/prompt");
+        return;
+      }
+      const session = yield* opening;
       const providerThread = yield* session.ensureThread({
         threadId,
         modelSelection,
@@ -6464,13 +6561,9 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         const before = yield* fs.readFileString(wire);
         const error = yield* session.startTurn(turn(2)).pipe(Effect.flip);
         assert.isTrue(refusedBeforePrompt(error));
-        assert.include(knownProviderFailureMessage(error), "native session lease");
+        assert.isTrue(isProviderSessionAccessRefusal(error));
         assert.equal(yield* fs.readFileString(wire), before);
       });
-      if (platform === "missing identity") {
-        yield* refused();
-        return;
-      }
       yield* send(1);
       assert.equal(yield* fs.readFileString(lease), original);
       assert.equal(
@@ -6481,7 +6574,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       const sibling = yield* makeKiroAdapterV2({
         ...runtimeOptions,
         instanceId: siblingId,
-      });
+      }).pipe(Effect.provideService(ProviderHost.ProviderHost, identityHost));
       assert.equal(
         (yield* sibling
           .openSession({
@@ -6502,12 +6595,12 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         runtimePolicy,
       });
       const forkInput = { sourceProviderThread: providerThread, targetThreadId };
-      const forkRefused = Effect.fn("test.ownedLease.forkRefused")(function* () {
+      const forkRefused = Effect.fn("test.ownedLease.forkRefused")(function* (permanent = true) {
         const beforeFork = yield* fs.readFileString(wire);
         const sourceLease = yield* fs.readFileString(lease);
         const error = yield* destination.forkThread(forkInput).pipe(Effect.flip);
         assert.equal(error._tag, "ProviderAdapterForkThreadError");
-        assert.include(String(error.cause), "session lease");
+        assert.equal(isProviderSessionAccessRefusal(error), permanent);
         assert.equal(yield* fs.readFileString(wire), beforeFork);
         assert.equal(yield* fs.readFileString(lease), sourceLease);
       });
@@ -6523,6 +6616,21 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         "ProviderAdapterForkThreadError",
       );
       assert.equal(yield* fs.readFileString(wire), siblingWire);
+      if (recoverFork) {
+        const dead = JSON.stringify({ ...stamp, pid: oldPid, parentPid: 0 });
+        yield* fs.writeFileString(lease, dead);
+        const failure = yield* destination.forkThread(forkInput).pipe(Effect.flip);
+        assert.isTrue(isProviderSessionAccessRefusal(failure));
+        assert.equal(yield* fs.readFileString(lease), dead);
+        const calls = (yield* fs.readFileString(wire))
+          .trim()
+          .split("\n")
+          .map((line) => JSON.parse(line) as { method: string });
+        assert.equal(calls.filter((call) => call.method === "session/prompt").length, 1);
+        assert.equal(calls.filter((call) => call.method === "session/fork").length, 1);
+        assert.equal(calls.filter((call) => call.method === "session/load").length, 1);
+        return;
+      }
       const forked = yield* destination.forkThread(forkInput);
       assert.equal(forked.nativeThreadRef?.nativeId, `${nativeId}-fork`);
       assert.equal(forked.forkedFrom?.providerThreadId, providerThread.id);
@@ -6551,6 +6659,12 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         }),
       );
       assert.equal(terminalStatus(yield* Fiber.join(forkEvents)), "completed");
+      yield* fs.remove(lease);
+      yield* refused();
+      yield* fs.writeFileString(lease, original);
+      helperLost = true;
+      yield* refused();
+      helperLost = false;
       for (const changed of [
         {
           ...stamp,
@@ -6576,7 +6690,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       yield* forkRefused();
       yield* fs.writeFileString(lease, original);
       yield* fs.makeDirectory(`${lease}.lock`);
-      yield* forkRefused();
+      yield* forkRefused(false);
       yield* fs.remove(`${lease}.lock`, { recursive: true });
       yield* send(2);
       withdrawnLease = JSON.stringify({ ...stamp, hostId: "foreign-host" });
@@ -6597,7 +6711,34 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       );
       assert.equal(calls.filter((call) => call.method === "session/prompt").length, 3);
       assert.equal(calls.filter((call) => call.method === "session/fork").length, 1);
-      assert.equal(calls.filter((call) => call.method === "session/load").length, 0);
+      assert.equal(calls.filter((call) => call.method === "session/load").length, recovery ? 1 : 0);
+      withdrawnLease = undefined;
+      yield* fs.writeFileString(lease, original);
+      yield* destination.resumeThread({
+        providerThread,
+        threadId: targetThreadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      assert.equal((yield* decodeOwnedLease(yield* fs.readFileString(lease))).pid, forkStamp.pid);
+      yield* send(3);
+      assert.equal((yield* decodeOwnedLease(yield* fs.readFileString(lease))).pid, stamp.pid);
+      const transitions = (yield* fs.readFileString(wire))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method: string; pid: number; sessionId?: string })
+        .slice(calls.length);
+      assert.deepEqual(
+        transitions
+          .filter((call) => call.method === "session/close" || call.method === "session/load")
+          .map((call) => [call.method, call.pid, call.sessionId]),
+        [
+          ["session/close", stamp.pid, nativeId],
+          ["session/load", forkStamp.pid, nativeId],
+          ["session/close", forkStamp.pid, nativeId],
+          ["session/load", stamp.pid, nativeId],
+        ],
+      );
       yield* Scope.close(runtimeScope, Exit.void);
       withdrawnLease = undefined;
       yield* fs.writeFileString(lease, original);

@@ -1,4 +1,5 @@
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { ProviderSessionAccessError } from "@t3tools/provider-core/server/errors";
 import { ProviderThreadId, type OrchestrationV2ProviderThread } from "@t3tools/contracts";
 import { makeKiroNativeHistory } from "./nativeHistory.ts";
 import type * as Digest from "effect/crypto/Digest";
@@ -967,95 +968,247 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       : { decodeArchive: host.decodeNativeHistoryArchive }),
   });
   type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
-  const runtimes = new Map<string, Set<Runtime>>();
-  const ownsLeaseProcess = (nativeId: string) =>
+  type RuntimeOwner = { runtime: Runtime; input: AcpAdapterV2RuntimeInput };
+  const runtimes = new Map<string, Set<RuntimeOwner>>();
+  const transitions = new Set<string>();
+  const requestError = (cause: ProviderSessionAccessError) =>
+    new EffectAcpErrors.AcpRequestError({
+      code: -32001,
+      errorMessage: cause.message,
+      data: {
+        t3SessionAccess: { reason: cause.reason },
+        ...(["held", "unknown", "active"].includes(cause.reason)
+          ? { t3NativeLeasePresent: true }
+          : {}),
+      },
+    });
+  const ownsLeaseProcess = (
+    nativeId: string,
+    except?: Runtime,
+    found?: (owner: RuntimeOwner) => void,
+  ) =>
     Effect.fn("KiroHistory.ownsLeaseProcess")(function* (
       pid: number,
       parentPid: number,
       acquiredAt: string,
     ) {
-      for (const runtime of runtimes.get(nativeId) ?? []) {
-        if (runtime.ownsProcess && (yield* runtime.ownsProcess(pid, parentPid, acquiredAt)))
+      for (const owner of runtimes.get(nativeId) ?? []) {
+        if (
+          owner.runtime !== except &&
+          owner.runtime.ownsProcess &&
+          (yield* owner.runtime.ownsProcess(pid, parentPid, acquiredAt))
+        ) {
+          found?.(owner);
           return true;
+        }
       }
       return false;
     });
-  const admitRuntimeSession = Effect.fn("KiroHistory.admitRuntimeSession")(function (
+  const checkAccess = Effect.fn("KiroSessionAccess.admit")(function* (
+    operation: "preflight" | "activate" | "write" | "fork-source",
     cwd: string,
     nativeId: string | undefined,
-    ownsProcess: Runtime["ownsProcess"],
+    runtime?: Runtime,
+    requireOwned = false,
+    expectedRoot?: string,
   ) {
-    return nativeId === undefined
-      ? Effect.void
-      : history
-          .admit({
-            cwd,
-            nativeId,
-            ...(ownsProcess === undefined ? {} : { ownsProcess }),
-          })
-          .pipe(
-            Effect.asVoid,
-            Effect.mapError(
-              () =>
-                new EffectAcpErrors.AcpRequestError({
-                  code: -32001,
-                  errorMessage: "Kiro session lease requires release in Kiro.",
-                  data: { t3NativeLeasePresent: true },
-                }),
-            ),
-          );
+    yield* host.ensureProcessIdentity;
+    if (nativeId === undefined) return yield* history.checkAccess({ cwd, operation: "activate" });
+    const access = {
+      cwd,
+      nativeId,
+      operation: operation === "preflight" ? ("activate" as const) : operation,
+      requireOwned,
+      ...(expectedRoot === undefined ? {} : { expectedRoot }),
+      ...(host.readProcessPresence === undefined
+        ? {}
+        : { readProcessPresence: host.readProcessPresence }),
+      ...(operation === "preflight" || operation === "fork-source"
+        ? { ownsProcess: ownsLeaseProcess(nativeId) }
+        : runtime?.ownsProcess === undefined
+          ? {}
+          : { ownsProcess: runtime.ownsProcess }),
+    };
+    return yield* history.checkAccess(access).pipe(
+      Effect.catchTags({
+        ProviderSessionAccessError: Effect.fn("KiroSessionAccess.handoff")(function* (cause) {
+          if (
+            operation !== "activate" ||
+            runtime === undefined ||
+            (cause.reason !== "held" && cause.reason !== "unknown")
+          )
+            return yield* cause;
+          let owner: RuntimeOwner | undefined;
+          const ownerProof = yield* history.checkAccess({
+            ...access,
+            requireOwned: true,
+            ownsProcess: ownsLeaseProcess(nativeId, runtime, (current) => {
+              owner = current;
+            }),
+          });
+          if (
+            owner?.input.relinquishSession === undefined ||
+            !(yield* owner.input.relinquishSession(nativeId))
+          )
+            return yield* new ProviderSessionAccessError({ reason: "active" });
+          const released = yield* history.checkAccess({
+            ...access,
+            ...(ownerProof.rootIdentity === undefined
+              ? {}
+              : { expectedRoot: ownerProof.rootIdentity }),
+          });
+          return { ...released, state: "released" as const, requiresLease: true };
+        }),
+      }),
+    );
   });
   const rememberRuntime = Effect.fn("KiroHistory.rememberRuntime")(function* (
     runtime: Runtime,
     input: AcpAdapterV2RuntimeInput,
   ) {
     let activeId = input.resumeSessionId;
-    const before = (nativeId: string | undefined, ownsProcess = runtime.ownsProcess) =>
-      host.ensureProcessIdentity.pipe(
-        Effect.mapError(
-          (cause) => new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
-        ),
-        Effect.andThen(admitRuntimeSession(input.cwd, nativeId, ownsProcess)),
-      );
+    const owner = { runtime, input };
     const ids = new Set<string>();
+    const forget = (nativeId: string) => {
+      ids.delete(nativeId);
+      const bound = runtimes.get(nativeId);
+      bound?.delete(owner);
+      if (bound?.size === 0) runtimes.delete(nativeId);
+    };
     const remember = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) => {
       activeId = started.sessionId;
       ids.add(started.sessionId);
-      const bound = runtimes.get(started.sessionId) ?? new Set<Runtime>();
-      bound.add(runtime);
+      const bound = runtimes.get(started.sessionId) ?? new Set<RuntimeOwner>();
+      bound.add(owner);
       runtimes.set(started.sessionId, bound);
     };
     yield* Effect.addFinalizer(() =>
       Effect.sync(() => {
-        for (const id of ids) {
-          const bound = runtimes.get(id);
-          bound?.delete(runtime);
-          if (bound?.size === 0) runtimes.delete(id);
-        }
+        for (const id of ids) forget(id);
       }),
     );
+    const activate = Effect.fn("KiroSessionAccess.activate")(function* (
+      operation: "activate" | "fork-source",
+      nativeId: string | undefined,
+      inputForFork: Parameters<Runtime["forkSession"]>[1],
+      effect: Effect.Effect<
+        AcpSessionRuntime.AcpSessionRuntimeStartResult,
+        EffectAcpErrors.AcpError
+      >,
+    ) {
+      const run = Effect.gen(function* () {
+        const access = yield* checkAccess(operation, input.cwd, nativeId, runtime).pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "ProviderSessionAccessError"
+              ? requestError(cause)
+              : new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+          ),
+        );
+        let started = yield* effect;
+        let verified = yield* checkAccess(
+          "write",
+          input.cwd,
+          started.sessionId,
+          runtime,
+          operation === "activate" && access.requiresLease,
+          access.rootIdentity,
+        ).pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "ProviderSessionAccessError"
+              ? requestError(cause)
+              : new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+          ),
+        );
+        if (operation === "fork-source" && access.requiresLease && verified.state === "absent") {
+          if (started.initializeResult.agentCapabilities?.loadSession !== true)
+            return yield* requestError(new ProviderSessionAccessError({ reason: "unknown" }));
+          started = yield* runtime.loadSession(started.sessionId, inputForFork);
+          verified = yield* checkAccess(
+            "write",
+            input.cwd,
+            started.sessionId,
+            runtime,
+            true,
+            access.rootIdentity,
+          ).pipe(
+            Effect.mapError((cause) =>
+              cause._tag === "ProviderSessionAccessError"
+                ? requestError(cause)
+                : new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+            ),
+          );
+        }
+        remember(started);
+        return started;
+      });
+      if (nativeId === undefined) return yield* run;
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => {
+          if (transitions.has(nativeId)) return false;
+          transitions.add(nativeId);
+          return true;
+        }),
+        (acquired) =>
+          acquired
+            ? run
+            : Effect.fail(requestError(new ProviderSessionAccessError({ reason: "locked" }))),
+        (acquired) =>
+          Effect.sync(() => {
+            if (acquired) transitions.delete(nativeId);
+          }),
+      );
+    });
+    const beforeWrite = (nativeId = activeId) =>
+      nativeId === undefined
+        ? Effect.fail(requestError(new ProviderSessionAccessError({ reason: "unknown" })))
+        : checkAccess("write", input.cwd, nativeId, runtime).pipe(
+            Effect.asVoid,
+            Effect.mapError((cause) =>
+              cause._tag === "ProviderSessionAccessError"
+                ? requestError(cause)
+                : new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+            ),
+          );
     return {
       ...runtime,
-      start: () =>
-        before(activeId).pipe(
-          Effect.andThen(runtime.start()),
-          Effect.tap((started) => Effect.sync(() => remember(started))),
-        ),
-      loadSession: (id, input) =>
-        before(id).pipe(
-          Effect.andThen(runtime.loadSession(id, input)),
-          Effect.tap((started) => Effect.sync(() => remember(started))),
-        ),
-      resumeSession: (id, input) =>
-        before(id).pipe(
-          Effect.andThen(runtime.resumeSession(id, input)),
-          Effect.tap((started) => Effect.sync(() => remember(started))),
-        ),
-      forkSession: (id, input, meta) =>
-        // Fork reads the source without adopting or releasing its lease.
-        before(id, ownsLeaseProcess(id)).pipe(
-          Effect.andThen(runtime.forkSession(id, input, meta)),
-          Effect.tap((started) => Effect.sync(() => remember(started))),
+      start: () => activate("activate", activeId, undefined, runtime.start()),
+      loadSession: (id, options) =>
+        activate("activate", id, options, runtime.loadSession(id, options)),
+      resumeSession: (id, options) =>
+        activate("activate", id, options, runtime.resumeSession(id, options)),
+      forkSession: (id, options, meta) =>
+        activate("fork-source", id, options, runtime.forkSession(id, options, meta)),
+      setMode: (modeId) => beforeWrite().pipe(Effect.andThen(runtime.setMode(modeId))),
+      setSessionModel: (modelId, meta) =>
+        beforeWrite().pipe(Effect.andThen(runtime.setSessionModel(modelId, meta))),
+      setModel: (modelId) => beforeWrite().pipe(Effect.andThen(runtime.setModel(modelId))),
+      setConfigOption: (id, value, options) =>
+        beforeWrite().pipe(Effect.andThen(runtime.setConfigOption(id, value, options))),
+      request: (method, payload) => {
+        if (
+          method !== KIRO_STEER_METHOD &&
+          method !== KIRO_COMPACT_METHOD &&
+          method !== "_kiro/session/rename"
+        )
+          return runtime.request(method, payload);
+        const nativeId =
+          typeof payload === "object" &&
+          payload !== null &&
+          "sessionId" in payload &&
+          typeof payload.sessionId === "string"
+            ? payload.sessionId
+            : activeId;
+        return beforeWrite(nativeId).pipe(Effect.andThen(runtime.request(method, payload)));
+      },
+      closeSession: (id) =>
+        runtime.closeSession(id).pipe(
+          Effect.tap(() =>
+            Effect.sync(() => {
+              const closedId = id ?? activeId;
+              if (closedId !== undefined) forget(closedId);
+              if (activeId === closedId) activeId = undefined;
+            }),
+          ),
         ),
     } satisfies Runtime;
   });
@@ -1064,34 +1217,23 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
     nativeId: string,
     providerThreadId: ProviderThreadId,
   ) {
-    yield* host.ensureProcessIdentity.pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderAdapter.ProviderAdapterProtocolError({
-            driver: KIRO_PROVIDER,
-            detail: "native process identity helper is unavailable",
-            cause,
-          }),
-      ),
-    );
-    yield* history
-      .admit({
-        cwd,
-        nativeId,
-        ownsProcess: ownsLeaseProcess(nativeId),
-      })
-      .pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderAdapter.ProviderAdapterThreadInUseError({
+    yield* checkAccess("preflight", cwd, nativeId).pipe(
+      Effect.mapError((cause) =>
+        cause._tag === "ProviderSessionAccessError" &&
+        ["held", "unknown", "active"].includes(cause.reason)
+          ? new ProviderAdapter.ProviderAdapterThreadInUseError({
               driver: KIRO_PROVIDER,
               providerThreadId,
-              detail:
-                "Kiro's native session lease is present or uncertain. Release or clear it in Kiro, then try again.",
+              detail: cause.message,
+              cause,
+            })
+          : new ProviderAdapter.ProviderAdapterProtocolError({
+              driver: KIRO_PROVIDER,
+              detail: "Native conversation access could not be established",
               cause,
             }),
-        ),
-      );
+      ),
+    );
   });
   const adapter = yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
@@ -1101,7 +1243,15 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       options.skills ?? (yield* makeKiroSkills()),
       yield* makeKiroNativeTitles(options.instanceId),
       rememberRuntime,
-      ({ runtime, cwd, sessionId }) => admitRuntimeSession(cwd, sessionId, runtime.ownsProcess),
+      ({ runtime, cwd, sessionId }) =>
+        checkAccess("write", cwd, sessionId, runtime).pipe(
+          Effect.asVoid,
+          Effect.mapError((cause) =>
+            cause._tag === "ProviderSessionAccessError"
+              ? requestError(cause)
+              : new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
+          ),
+        ),
       host.readProcessIdentity,
       host.ensureProcessIdentity,
     ),
@@ -1128,6 +1278,17 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
             }),
         ),
       );
+      if (input.initialNativeThreadId === undefined)
+        yield* checkAccess("preflight", input.runtimePolicy.cwd ?? process.cwd(), undefined).pipe(
+          Effect.mapError(
+            (cause) =>
+              new ProviderAdapter.ProviderAdapterOpenSessionError({
+                driver: KIRO_PROVIDER,
+                providerSessionId: input.providerSessionId,
+                cause,
+              }),
+          ),
+        );
       if (input.initialNativeThreadId)
         yield* admit(
           input.runtimePolicy.cwd ?? process.cwd(),
