@@ -218,6 +218,9 @@ export interface AcpAdapterV2RuntimeInput {
   readonly httpMcpServers?: ReadonlyArray<EffectAcpSchema.McpServer>;
   readonly processEnvironment?: NodeJS.ProcessEnv;
   readonly resumeSessionId?: string;
+  readonly relinquishSession?: (
+    nativeSessionId: string,
+  ) => Effect.Effect<boolean, EffectAcpErrors.AcpError>;
   readonly interruptPromptOnCancel?: boolean;
   readonly sessionMeta?: NonNullable<AcpSessionRuntime.AcpSessionRuntimeOptions["sessionMeta"]>;
   readonly clientCapabilities: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -3038,6 +3041,57 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               }
             }),
           ).pipe(Effect.asVoid);
+        const hasPendingBackgroundWork = Effect.gen(function* () {
+          if ((yield* Ref.get(extensionBackgroundWork)) > 0) return true;
+          if (nativeWakeTurns.length > 0) return true;
+          if (
+            [...workflows.values()].some(({ coordinator }) =>
+              isOrchestrationV2WorkActive(coordinator.task.status),
+            )
+          )
+            return true;
+          if (workflowSessions.size > 0) {
+            const memberThreads = new Set(
+              [...workflowSessions.values()].map(({ owner }) => owner.input.threadId),
+            );
+            if (
+              [...(yield* Ref.get(pendingRuntimeRequests)).values()].some((request) =>
+                memberThreads.has(request.node.threadId),
+              )
+            )
+              return true;
+          }
+          const rootSessionId = yield* Ref.get(activeSessionId);
+          if (
+            followsAgentWorkState &&
+            rootSessionId !== null &&
+            hasWorkingDescendant(rootSessionId)
+          )
+            return true;
+          if (
+            followsAgentWorkState &&
+            (agentWork?.state === "running" ||
+              agentWork?.state === "requires_action" ||
+              agentRequests.size > 0)
+          )
+            return true;
+          if ((yield* Ref.get(wakeBuffer)).length > 0) return true;
+          if ((yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size > 0) return true;
+          if (yield* Ref.get(continuationRequested)) return true;
+          if ((yield* Ref.get(runningBackgroundTaskIds)).size > 0) return true;
+          const active = yield* Ref.get(activeTurn);
+          if (
+            active !== null &&
+            [...active.subagents.values()].some(acpSubagentHasPendingBackgroundWork)
+          ) {
+            return true;
+          }
+          const carryover = yield* Ref.get(carryoverSubagents);
+          if (carryover !== null && carryover.subagents.some(acpSubagentHasPendingBackgroundWork)) {
+            return true;
+          }
+          return false;
+        });
         const makeRuntimeInput = (
           runtimeGeneration: number,
           agentRequests: Set<string>,
@@ -3057,6 +3111,69 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               ? {}
               : { processEnvironment: mcpContext.processEnvironment }),
             ...(resumeSessionId === undefined ? {} : { resumeSessionId }),
+            relinquishSession: Effect.fn("AcpAdapterV2.relinquishSession")(function* (
+              nativeSessionId: string,
+            ) {
+              const canRelinquish = Effect.gen(function* () {
+                const context = yield* Ref.get(activeTurn);
+                const setup = yield* Ref.get(activeSessionSetup);
+                return (
+                  (yield* Ref.get(runtimeCallbackGeneration)) === runtimeGeneration &&
+                  (yield* Ref.get(runtimeTeardownState))._tag === "Idle" &&
+                  !(yield* Ref.get(runtimeRestartRequired)) &&
+                  !(yield* Ref.get(stoppedRunQuarantine)) &&
+                  (yield* Ref.get(initialSessionActivationFailure)) === null &&
+                  (yield* Ref.get(loadingSessionId)) === null &&
+                  pendingStopCloseTurn === null &&
+                  (context === null || (context.finalized && context.promptSettled)) &&
+                  (lastWorkflowAnchor === null ||
+                    (lastWorkflowAnchor.finalized &&
+                      (lastWorkflowAnchor.promptSettled ||
+                        (yield* Deferred.isDone(lastWorkflowAnchor.promptWireSettled))))) &&
+                  agentRequests.size === 0 &&
+                  (yield* Ref.get(pendingRuntimeRequests)).size === 0 &&
+                  (yield* Ref.get(nativeResponseAcknowledgements)).size === 0 &&
+                  workflows.size === 0 &&
+                  workflowSessions.size === 0 &&
+                  workflowSessionDiscoveries.size === 0 &&
+                  pendingWorkflowNotifications.size === 0 &&
+                  rootForegroundWork !== "running" &&
+                  !(yield* hasPendingBackgroundWork) &&
+                  setup?.initializeResult.agentCapabilities?.sessionCapabilities?.close != null
+                );
+              });
+              const result = yield* runtimeTransitionPermit.withPermitsIfAvailable(1)(
+                Effect.gen(function* () {
+                  const allowed = yield* runtimeCallbackPermit.withPermit(canRelinquish);
+                  if (!allowed) return false;
+                  const closingRuntime = runtime;
+                  // Close responses must drain callbacks without waiting for this permit.
+                  const closed = yield* closingRuntime
+                    .closeSession(nativeSessionId)
+                    .pipe(Effect.result);
+                  if (closed._tag === "Failure") return false;
+                  return yield* runtimeCallbackPermit.withPermit(
+                    Effect.gen(function* () {
+                      const stillIdle = yield* canRelinquish;
+                      if (
+                        (yield* Ref.get(runtimeCallbackGeneration)) === runtimeGeneration &&
+                        closingRuntime === runtime &&
+                        (yield* Ref.get(activeSessionId)) === nativeSessionId
+                      ) {
+                        yield* Ref.set(activeSessionId, null);
+                        yield* Ref.set(activeSessionSetup, null);
+                        yield* Ref.set(activeSelection, null);
+                        yield* Ref.set(activeInteractionMode, null);
+                        yield* Ref.set(configuredRuntimeMode, null);
+                        yield* Ref.set(pendingLoadedSession, null);
+                      }
+                      return stillIdle;
+                    }),
+                  );
+                }),
+              );
+              return Option.getOrElse(result, () => false);
+            }),
             interruptPromptOnCancel: flavor.interruptPromptOnCancel ?? false,
             clientCapabilities: {
               fs: {
@@ -3070,14 +3187,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             clientInfo: { name: "t3-code", version: "0.0.0" },
             onTermination: (error) =>
               Effect.sync(() => agentRequests.clear()).pipe(Effect.andThen(onTermination(error))),
-            ...(promptInactivityTimeoutMillis === undefined
-              ? {}
-              : {
-                  onIncomingRequest: (requestId: string) =>
-                    Effect.sync(() => {
-                      agentRequests.add(requestId);
-                    }),
-                }),
+            onIncomingRequest: (requestId) =>
+              Effect.sync(() => {
+                agentRequests.add(requestId);
+              }),
             onOutgoingResponseFailure: (requestId, error) =>
               Ref.modify(nativeResponseAcknowledgements, (current) => {
                 const entry = current.get(requestId);
@@ -10900,60 +11013,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           followsAgentWorkState ||
           flavor.supportsNativeWorkflows === true
             ? {
-                hasPendingBackgroundWork: Effect.gen(function* () {
-                  if ((yield* Ref.get(extensionBackgroundWork)) > 0) return true;
-                  if (nativeWakeTurns.length > 0) return true;
-                  if (
-                    [...workflows.values()].some(({ coordinator }) =>
-                      isOrchestrationV2WorkActive(coordinator.task.status),
-                    )
-                  )
-                    return true;
-                  if (workflowSessions.size > 0) {
-                    const memberThreads = new Set(
-                      [...workflowSessions.values()].map(({ owner }) => owner.input.threadId),
-                    );
-                    if (
-                      [...(yield* Ref.get(pendingRuntimeRequests)).values()].some((request) =>
-                        memberThreads.has(request.node.threadId),
-                      )
-                    )
-                      return true;
-                  }
-                  const rootSessionId = yield* Ref.get(activeSessionId);
-                  if (
-                    followsAgentWorkState &&
-                    rootSessionId !== null &&
-                    hasWorkingDescendant(rootSessionId)
-                  )
-                    return true;
-                  if (
-                    followsAgentWorkState &&
-                    (agentWork?.state === "running" ||
-                      agentWork?.state === "requires_action" ||
-                      agentRequests.size > 0)
-                  )
-                    return true;
-                  if ((yield* Ref.get(wakeBuffer)).length > 0) return true;
-                  if ((yield* Ref.get(midTurnUnreportedCompletedTaskIds)).size > 0) return true;
-                  if (yield* Ref.get(continuationRequested)) return true;
-                  if ((yield* Ref.get(runningBackgroundTaskIds)).size > 0) return true;
-                  const active = yield* Ref.get(activeTurn);
-                  if (
-                    active !== null &&
-                    [...active.subagents.values()].some(acpSubagentHasPendingBackgroundWork)
-                  ) {
-                    return true;
-                  }
-                  const carryover = yield* Ref.get(carryoverSubagents);
-                  if (
-                    carryover !== null &&
-                    carryover.subagents.some(acpSubagentHasPendingBackgroundWork)
-                  ) {
-                    return true;
-                  }
-                  return false;
-                }),
+                hasPendingBackgroundWork,
               }
             : {}),
           ensureThread: Effect.fn("AcpAdapterV2.ensureThread")(

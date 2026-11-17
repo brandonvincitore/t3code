@@ -1420,6 +1420,202 @@ const optionValues = (question: OrchestrationV2UserInputQuestion | undefined) =>
   question?.options.map((option) => option.value ?? option.label);
 
 describe("AcpAdapterV2", () => {
+  it.effect.each([
+    "idle",
+    "other session",
+    "native workflow",
+    "extension background",
+    "failed close",
+    "unsupported",
+    "pending request",
+    "background",
+    "busy",
+    "contended",
+    "terminated",
+  ] as const)("relinquishes only an idle native session: %s", (scenario) =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const closeEntered = yield* Deferred.make<void>();
+      const closeAllowed = yield* Deferred.make<void>();
+      const promptEntered = yield* Deferred.make<void>();
+      const promptAllowed = yield* Deferred.make<void>();
+      let runtimeInput: AcpAdapterV2RuntimeInput | undefined;
+      let extensions: AcpAdapterV2ExtensionContext | undefined;
+      const closed: string[] = [];
+      const loaded: string[] = [];
+      const withCloseCapability = (session: AcpSessionRuntime.AcpSessionRuntimeStartResult) => ({
+        ...session,
+        initializeResult: {
+          ...session.initializeResult,
+          agentCapabilities: {
+            ...session.initializeResult.agentCapabilities,
+            sessionCapabilities: scenario === "unsupported" ? {} : { close: {} },
+          },
+        },
+      });
+      const makeRuntime = makeMockRuntime({
+        childProcessSpawner,
+        mockAgentPath: yield* bundledMockAgentPath,
+        wrapRuntime: (native) => ({
+          ...native,
+          start: () => native.start().pipe(Effect.map(withCloseCapability)),
+          loadSession: (id) =>
+            Effect.sync(() => {
+              loaded.push(id);
+            }).pipe(Effect.andThen(native.loadSession(id)), Effect.map(withCloseCapability)),
+          prompt: (request, options) =>
+            scenario === "busy"
+              ? (options?.dispatched === undefined
+                  ? Effect.void
+                  : Deferred.succeed(options.dispatched, undefined)
+                ).pipe(
+                  Effect.andThen(Deferred.succeed(promptEntered, undefined)),
+                  Effect.andThen(Deferred.await(promptAllowed)),
+                  Effect.andThen(native.prompt(request, options)),
+                )
+              : native.prompt(request, options),
+          closeSession: (id) =>
+            Effect.gen(function* () {
+              if (id === undefined) return {};
+              closed.push(id);
+              yield* Deferred.succeed(closeEntered, undefined);
+              if (scenario === "contended") yield* Deferred.await(closeAllowed);
+              // A close response may need the callback drain to finish first.
+              yield* extensions!.markSessionCompacted(id);
+              if (scenario === "failed close")
+                return yield* new EffectAcpErrors.AcpTransportError({
+                  detail: "close failed",
+                  cause: "test",
+                });
+              return {};
+            }),
+        }),
+      });
+      const instanceId = ProviderInstanceId.make("acp-relinquish");
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          enablePostSettleContinuation: true,
+          supportsNativeWorkflows: true,
+          promptInactivityTimeout: "15 minutes",
+          registerExtensions: (context) =>
+            Effect.sync(() => {
+              extensions = context;
+            }),
+          makeRuntime: (input) => {
+            runtimeInput = input;
+            return makeRuntime(input);
+          },
+        },
+      });
+      const threadId = ThreadId.make("thread-acp-relinquish");
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("session-acp-relinquish"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      assert.isDefined(runtimeInput?.relinquishSession);
+      const relinquish = runtimeInput!.relinquishSession!;
+      const nativeId = providerThread.nativeThreadRef!.nativeId;
+      const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) => Queue.offer(events, event)),
+        Effect.forkScoped,
+      );
+      const startTurn = DateTime.now.pipe(
+        Effect.flatMap((now) =>
+          runtime.startTurn(
+            makeTurnInput({ threadId, providerThread, instanceId, runtimePolicy, now }),
+          ),
+        ),
+      );
+      if (scenario === "pending request") yield* runtimeInput!.onIncomingRequest!("pending");
+      if (scenario === "background")
+        yield* extensions!.applyBackgroundTaskMutation({
+          sessionId: nativeId,
+          taskId: "background",
+          status: "running",
+        });
+      if (scenario === "extension background") {
+        yield* extensions!.forkBackground(
+          Deferred.succeed(promptEntered, undefined).pipe(
+            Effect.andThen(Deferred.await(promptAllowed)),
+          ),
+        );
+        yield* Deferred.await(promptEntered);
+      }
+      if (scenario === "native workflow") {
+        yield* startTurn;
+        while ((yield* Queue.take(events)).type !== "turn.terminal") {}
+        assert.isTrue(
+          yield* extensions!.upsertWorkflow({
+            sessionId: nativeId,
+            workflowId: "workflow",
+            title: "Workflow",
+            prompt: "Work",
+            status: "completed",
+            workflow: { phases: [], agents: [] },
+            members: [],
+          }),
+        );
+        assert.isFalse(yield* runtime.hasPendingBackgroundWork!);
+      }
+      if (scenario === "terminated")
+        yield* runtimeInput!.onTermination(
+          new EffectAcpErrors.AcpTransportError({ detail: "terminated", cause: "test" }),
+        );
+      if (scenario === "busy") {
+        const starting = yield* startTurn.pipe(Effect.forkScoped);
+        yield* Deferred.await(promptEntered);
+        yield* Fiber.join(starting);
+      }
+      if (scenario === "contended") {
+        const closing = yield* relinquish(nativeId).pipe(Effect.forkScoped);
+        yield* Deferred.await(closeEntered);
+        assert.isFalse(yield* relinquish(nativeId));
+        yield* Deferred.succeed(closeAllowed, undefined);
+        assert.isTrue(yield* Fiber.join(closing));
+      } else {
+        assert.equal(
+          yield* relinquish(scenario === "other session" ? "other-session" : nativeId),
+          scenario === "idle" || scenario === "other session",
+        );
+      }
+      assert.deepEqual(
+        closed,
+        scenario === "other session"
+          ? ["other-session"]
+          : ["idle", "failed close", "contended"].includes(scenario)
+            ? [nativeId]
+            : [],
+      );
+      if (scenario === "idle" || scenario === "failed close" || scenario === "other session") {
+        yield* startTurn;
+        while ((yield* Queue.take(events)).type !== "turn.terminal") {}
+        assert.deepEqual(loaded, scenario === "idle" ? [nativeId] : []);
+      }
+      if (scenario === "busy") {
+        yield* Deferred.succeed(promptAllowed, undefined);
+        while ((yield* Queue.take(events)).type !== "turn.terminal") {}
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.live("retains delivered instructions across a resumed session info update", () =>
     Effect.gen(function* () {
       const { runTurn } = yield* makeInstructionCompactionHarness({});
@@ -8259,6 +8455,7 @@ describe("AcpAdapterV2", () => {
         const backgroundMutationHandlers: Array<
           AcpAdapterV2ExtensionContext["applyBackgroundTaskMutation"] | undefined
         > = [];
+        const runtimeInputs: AcpAdapterV2RuntimeInput[] = [];
         const availableCommandUpdates: Array<ReadonlyArray<EffectAcpSchema.AvailableCommand>> = [];
         let registeredExtensionOrdinal = 0;
         let runtimeOrdinalSeen = 0;
@@ -8342,7 +8539,10 @@ describe("AcpAdapterV2", () => {
                   context.applyBackgroundTaskMutation;
                 registeredExtensionOrdinal += 1;
               }),
-            makeRuntime,
+            makeRuntime: (input) => {
+              runtimeInputs.push(input);
+              return makeRuntime(input);
+            },
           },
           selfInvocation,
           continuationRequests: { offer: () => Effect.void },
@@ -8396,6 +8596,8 @@ describe("AcpAdapterV2", () => {
         assert.equal(rollback._tag, "Success");
 
         assert.equal(runtimeOrdinalSeen, 3);
+        assert.isFalse(yield* runtimeInputs[0]!.relinquishSession!("mock-session-1"));
+        assert.isFalse(yield* runtimeInputs[1]!.relinquishSession!("mock-session-3"));
         assert.deepEqual(
           availableCommandUpdates.map((commands) => commands.map((command) => command.name)),
           [["staged-command"]],
