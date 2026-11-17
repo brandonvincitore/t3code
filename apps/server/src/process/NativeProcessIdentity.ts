@@ -1,6 +1,7 @@
 import { ProviderProcessIdentityUnavailableError } from "@t3tools/provider-core/server/errors";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
+import * as Predicate from "effect/Predicate";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as ResourceMonitorBinary from "../resourceTelemetry/ResourceMonitorBinary.ts";
 import { probeProcessIdentity } from "./processIdentityProtocol.ts";
@@ -13,6 +14,25 @@ export const make = Effect.fn("NativeProcessIdentity.make")(function* () {
     return yield* probeProcessIdentity(yield* binary.resolve, pid).pipe(
       Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
     );
+  });
+  const readPresence = Effect.fn("NativeProcessIdentity.readPresence")(function (pid: number) {
+    return Effect.sync(() => {
+      if (
+        (platform !== "linux" && platform !== "darwin") ||
+        !Number.isSafeInteger(pid) ||
+        pid <= 1 ||
+        pid > 0x7fffffff
+      )
+        return "unknown" as const;
+      try {
+        process.kill(pid, 0);
+        return "present" as const;
+      } catch (cause) {
+        return Predicate.hasProperty(cause, "code") && cause.code === "ESRCH"
+          ? ("missing" as const)
+          : ("unknown" as const);
+      }
+    });
   });
   let warned = false;
   const read = Effect.fn("NativeProcessIdentity.read")(
@@ -38,5 +58,5 @@ export const make = Effect.fn("NativeProcessIdentity.make")(function* () {
     if (platform !== "win32" && (row === null || row.zombie))
       return yield* new ProviderProcessIdentityUnavailableError({});
   }).pipe(Effect.mapError((cause) => new ProviderProcessIdentityUnavailableError({ cause })));
-  return { read, ensureAvailable };
+  return { read, readPresence, ensureAvailable };
 });

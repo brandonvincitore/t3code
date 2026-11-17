@@ -1,5 +1,5 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, it, vi } from "@effect/vitest";
 import { writeFakeCli } from "@t3tools/provider-testing/fakeCli";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
@@ -80,4 +80,62 @@ process.stdout.write(row === undefined ? output : JSON.stringify(row)); process.
     if (ready._tag === "Failure")
       assert.equal(ready.failure._tag, "ProviderProcessIdentityUnavailableError");
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+);
+
+it.effect.each([
+  { platform: "linux", outcome: "success", expected: "present" },
+  { platform: "darwin", outcome: "success", expected: "present" },
+  { platform: "linux", outcome: "ESRCH", expected: "missing" },
+  { platform: "darwin", outcome: "ESRCH", expected: "missing" },
+  { platform: "linux", outcome: "EPERM", expected: "unknown" },
+  { platform: "linux", outcome: "EINVAL", expected: "unknown" },
+  { platform: "linux", outcome: "unexpected", expected: "unknown" },
+  { platform: "win32", outcome: "ESRCH", expected: "unknown" },
+  { platform: "freebsd", outcome: "success", expected: "unknown" },
+] as const)("reads process presence: $platform / $outcome", ({ platform, outcome, expected }) =>
+  Effect.gen(function* () {
+    const reader = yield* NativeProcessIdentity.make().pipe(
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-process-presence-" })),
+      Effect.provideService(HostProcess.Platform, platform),
+    );
+    using probe = vi.spyOn(process, "kill").mockImplementation(() => {
+      if (outcome === "success") return true;
+      if (outcome === "unexpected") throw new Error("unexpected probe failure");
+      throw Object.assign(new Error("probe failed"), { code: outcome });
+    });
+    assert.equal(yield* reader.readPresence(127), expected);
+    if (platform === "linux" || platform === "darwin") {
+      assert.deepEqual(probe.mock.calls, [[127, 0]]);
+    } else {
+      assert.equal(probe.mock.calls.length, 0);
+    }
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("does not probe invalid process IDs", () =>
+  Effect.gen(function* () {
+    const reader = yield* NativeProcessIdentity.make().pipe(
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-process-presence-" })),
+      Effect.provideService(HostProcess.Platform, "linux"),
+    );
+    using probe = vi.spyOn(process, "kill").mockReturnValue(true);
+    for (const pid of [-1, 0, 1, 1.5, NaN, Infinity, 2 ** 31, Number.MAX_SAFE_INTEGER]) {
+      assert.equal(yield* reader.readPresence(pid), "unknown");
+    }
+    assert.equal(probe.mock.calls.length, 0);
+    assert.equal(yield* reader.readPresence(2 ** 31 - 1), "present");
+    assert.deepEqual(probe.mock.calls, [[2 ** 31 - 1, 0]]);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.effect("observes the current process with signal zero", () =>
+  Effect.gen(function* () {
+    const reader = yield* NativeProcessIdentity.make().pipe(
+      Effect.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-process-presence-" })),
+    );
+    assert.equal(
+      yield* reader.readPresence(process.pid),
+      process.platform === "linux" || process.platform === "darwin" ? "present" : "unknown",
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
 );

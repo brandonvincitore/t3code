@@ -33,6 +33,7 @@ export const layer = Layer.effect(
     );
     return ProviderHost.ProviderHost.of({
       decodeNativeHistoryArchive,
+      readProcessPresence: processIdentity.readPresence,
       readProcessIdentity: processIdentity.read,
       ensureProcessIdentity: processIdentity.ensureAvailable,
       managedPolicy: serverSettings.managedPolicy,

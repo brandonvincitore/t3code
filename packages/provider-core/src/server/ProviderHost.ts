@@ -66,6 +66,9 @@ export class ProviderHost extends Context.Service<
       { readonly metadata: string; readonly transcript: string },
       NativeHistoryReadError
     >;
+    readonly readProcessPresence?: (
+      pid: number,
+    ) => Effect.Effect<"present" | "missing" | "unknown">;
     readonly readProcessIdentity: (
       pid: number,
     ) => Effect.Effect<ProviderProcessIdentity | undefined>;

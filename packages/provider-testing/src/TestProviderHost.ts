@@ -43,6 +43,7 @@ export const layer = (
       const settings = yield* Ref.make(options.settings ?? DEFAULT_SERVER_SETTINGS);
       const credentials = new Map<string, Uint8Array>();
       const host = ProviderHost.ProviderHost.of({
+        readProcessPresence: () => Effect.succeed("unknown" as const),
         readProcessIdentity: () => Effect.undefined,
         ensureProcessIdentity: Effect.void,
         paths: {
