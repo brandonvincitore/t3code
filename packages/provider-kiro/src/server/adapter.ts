@@ -968,10 +968,22 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
   });
   type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
   const runtimes = new Map<string, Set<Runtime>>();
+  const ownsLeaseProcess = (nativeId: string) =>
+    Effect.fn("KiroHistory.ownsLeaseProcess")(function* (
+      pid: number,
+      parentPid: number,
+      acquiredAt: string,
+    ) {
+      for (const runtime of runtimes.get(nativeId) ?? []) {
+        if (runtime.ownsProcess && (yield* runtime.ownsProcess(pid, parentPid, acquiredAt)))
+          return true;
+      }
+      return false;
+    });
   const admitRuntimeSession = Effect.fn("KiroHistory.admitRuntimeSession")(function (
-    runtime: Runtime,
     cwd: string,
     nativeId: string | undefined,
+    ownsProcess: Runtime["ownsProcess"],
   ) {
     return nativeId === undefined
       ? Effect.void
@@ -979,7 +991,7 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
           .admit({
             cwd,
             nativeId,
-            ...(runtime.ownsProcess === undefined ? {} : { ownsProcess: runtime.ownsProcess }),
+            ...(ownsProcess === undefined ? {} : { ownsProcess }),
           })
           .pipe(
             Effect.asVoid,
@@ -998,12 +1010,12 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
     input: AcpAdapterV2RuntimeInput,
   ) {
     let activeId = input.resumeSessionId;
-    const before = (nativeId: string | undefined) =>
+    const before = (nativeId: string | undefined, ownsProcess = runtime.ownsProcess) =>
       host.ensureProcessIdentity.pipe(
         Effect.mapError(
           (cause) => new EffectAcpErrors.AcpSpawnError({ command: "kiro-cli", cause }),
         ),
-        Effect.andThen(admitRuntimeSession(runtime, input.cwd, nativeId)),
+        Effect.andThen(admitRuntimeSession(input.cwd, nativeId, ownsProcess)),
       );
     const ids = new Set<string>();
     const remember = (started: AcpSessionRuntime.AcpSessionRuntimeStartResult) => {
@@ -1040,7 +1052,8 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
           Effect.tap((started) => Effect.sync(() => remember(started))),
         ),
       forkSession: (id, input, meta) =>
-        before(id).pipe(
+        // Fork reads the source without adopting or releasing its lease.
+        before(id, ownsLeaseProcess(id)).pipe(
           Effect.andThen(runtime.forkSession(id, input, meta)),
           Effect.tap((started) => Effect.sync(() => remember(started))),
         ),
@@ -1065,17 +1078,7 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       .admit({
         cwd,
         nativeId,
-        ownsProcess: Effect.fn("KiroHistory.ownsLeaseProcess")(function* (
-          pid: number,
-          parentPid: number,
-          acquiredAt: string,
-        ) {
-          for (const runtime of runtimes.get(nativeId) ?? []) {
-            if (runtime.ownsProcess && (yield* runtime.ownsProcess(pid, parentPid, acquiredAt)))
-              return true;
-          }
-          return false;
-        }),
+        ownsProcess: ownsLeaseProcess(nativeId),
       })
       .pipe(
         Effect.mapError(
@@ -1098,7 +1101,7 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       options.skills ?? (yield* makeKiroSkills()),
       yield* makeKiroNativeTitles(options.instanceId),
       rememberRuntime,
-      ({ runtime, cwd, sessionId }) => admitRuntimeSession(runtime, cwd, sessionId),
+      ({ runtime, cwd, sessionId }) => admitRuntimeSession(cwd, sessionId, runtime.ownsProcess),
       host.readProcessIdentity,
       host.ensureProcessIdentity,
     ),

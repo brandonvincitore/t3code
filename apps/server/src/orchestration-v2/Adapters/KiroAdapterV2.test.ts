@@ -6301,7 +6301,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
       const home = `${root}/home`;
       const native = `${home}/.kiro`;
-      const lease = `${native}/session-leases/owned-native.lease`;
+      let lease: string;
       const wire = `${root}/wire.jsonl`;
       const script = `${root}/peer.mjs`;
       yield* fs.makeDirectory(`${native}/session-leases`, { recursive: true });
@@ -6312,7 +6312,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       import { hostname } from 'node:os';
       import { createInterface } from 'node:readline';
       import { spawn } from 'node:child_process';
-      const sessionId = 'owned-native';
+      const sessionId = 'owned-native-' + process.pid;
       if (process.env.LAUNCHER === '1') {
         const child = spawn(process.execPath, [process.argv[1]], {
           stdio: 'inherit', env: { ...process.env, LAUNCHER: '0' },
@@ -6321,14 +6321,15 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         child.on('exit', code => process.exit(code ?? 1));
       } else {
       createInterface({ input: process.stdin }).on('line', line => {
-        const { id, method } = JSON.parse(line); if (id === undefined) return;
-        appendFileSync(process.env.WIRE, JSON.stringify({ method })+'\n');
+        const { id, method, params } = JSON.parse(line); if (id === undefined) return;
+        appendFileSync(process.env.WIRE, JSON.stringify({ method, pid:process.pid, sessionId:params?.sessionId })+'\n');
         let result = {};
-        if (method === 'initialize') result = { protocolVersion: 1, agentCapabilities: { loadSession: true } };
-        if (method === 'session/new') {
-          writeFileSync(process.env.LEASE, JSON.stringify({ v:1, pid:process.pid, parentPid:process.ppid,
+        if (method === 'initialize') result = { protocolVersion: 1, agentCapabilities: { loadSession: true, sessionCapabilities: { fork: {} } } };
+        if (method === 'session/new' || method === 'session/fork') {
+          const nativeId = method === 'session/fork' ? params.sessionId + '-fork' : sessionId;
+          writeFileSync(process.env.LEASE_DIR + '/' + nativeId + '.lease', JSON.stringify({ v:1, pid:process.pid, parentPid:process.ppid,
             instanceId:'synthetic-native',hostId:hostname(), acquiredAt:new Date().toISOString(),token:'synthetic-token' }));
-          result = { sessionId, _meta: { source:'local', title:'Owned synthetic session' }, configOptions:[] };
+          result = { sessionId: nativeId, _meta: { source:'local', title:'Owned synthetic session' }, configOptions:[] };
         }
         if (method === 'session/prompt') result = { stopReason:'end_turn' };
         process.stdout.write(JSON.stringify({ jsonrpc:'2.0', id, result })+'\n');
@@ -6349,7 +6350,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         KIRO_HOME: native,
         XDG_CONFIG_HOME: `${home}/xdg`,
         WIRE: wire,
-        LEASE: lease,
+        LEASE_DIR: `${native}/session-leases`,
         LAUNCHER: platform === "launcher" ? "1" : "0",
       };
       const runtimeScope = yield* Scope.make();
@@ -6367,8 +6368,7 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
               source: yield* fs.readFileString(script),
             })
           : undefined;
-      const adapter = yield* makeKiroAdapterV2({
-        instanceId,
+      const runtimeOptions = {
         settings:
           binaryPath === undefined
             ? ENABLED_KIRO_SETTINGS
@@ -6402,6 +6402,10 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
                   ),
                 ),
             }),
+      };
+      const adapter = yield* makeKiroAdapterV2({
+        ...runtimeOptions,
+        instanceId,
       }).pipe(
         Effect.provideService(ProviderHost.ProviderHost, {
           ...host,
@@ -6429,6 +6433,8 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
         modelSelection,
         runtimePolicy,
       });
+      const nativeId = providerThread.nativeThreadRef!.nativeId!;
+      lease = `${native}/session-leases/${nativeId}.lease`;
       const original = yield* fs.readFileString(lease);
       const stamp = yield* decodeOwnedLease(original);
       for (const pid of [stamp.pid, stamp.parentPid]) {
@@ -6468,18 +6474,13 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       yield* send(1);
       assert.equal(yield* fs.readFileString(lease), original);
       assert.equal(
-        (yield* adapter.nativeHistory
-          .capture({ cwd: root, nativeId: "owned-native" })
-          .pipe(Effect.flip)).status,
+        (yield* adapter.nativeHistory.capture({ cwd: root, nativeId }).pipe(Effect.flip)).status,
         "busy",
       );
       const siblingId = ProviderInstanceId.make("sibling-kiro");
       const sibling = yield* makeKiroAdapterV2({
+        ...runtimeOptions,
         instanceId: siblingId,
-        settings: ENABLED_KIRO_SETTINGS,
-        environment,
-        selfInvocation: yield* resolveSelfInvocation(),
-        makeRuntime: () => Effect.die("A sibling cannot spawn under the owner's lease"),
       });
       assert.equal(
         (yield* sibling
@@ -6488,12 +6489,75 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
             providerSessionId: ProviderSessionId.make("sibling-runtime"),
             modelSelection: { ...modelSelection, instanceId: siblingId },
             runtimePolicy,
-            initialNativeThreadId: "owned-native",
+            initialNativeThreadId: nativeId,
           })
           .pipe(Effect.flip))._tag,
         "ProviderAdapterThreadInUseError",
       );
+      const targetThreadId = ThreadId.make("kiro-owned-fork");
+      const destination = yield* adapter.openSession({
+        threadId: targetThreadId,
+        providerSessionId: ProviderSessionId.make("owned-fork-runtime"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const forkInput = { sourceProviderThread: providerThread, targetThreadId };
+      const forkRefused = Effect.fn("test.ownedLease.forkRefused")(function* () {
+        const beforeFork = yield* fs.readFileString(wire);
+        const sourceLease = yield* fs.readFileString(lease);
+        const error = yield* destination.forkThread(forkInput).pipe(Effect.flip);
+        assert.equal(error._tag, "ProviderAdapterForkThreadError");
+        assert.include(String(error.cause), "session lease");
+        assert.equal(yield* fs.readFileString(wire), beforeFork);
+        assert.equal(yield* fs.readFileString(lease), sourceLease);
+      });
+      const siblingDestination = yield* sibling.openSession({
+        threadId: ThreadId.make("sibling-fork-thread"),
+        providerSessionId: ProviderSessionId.make("sibling-fork-runtime"),
+        modelSelection: { ...modelSelection, instanceId: siblingId },
+        runtimePolicy,
+      });
+      const siblingWire = yield* fs.readFileString(wire);
+      assert.equal(
+        (yield* siblingDestination.forkThread(forkInput).pipe(Effect.flip))._tag,
+        "ProviderAdapterForkThreadError",
+      );
+      assert.equal(yield* fs.readFileString(wire), siblingWire);
+      const forked = yield* destination.forkThread(forkInput);
+      assert.equal(forked.nativeThreadRef?.nativeId, `${nativeId}-fork`);
+      assert.equal(forked.forkedFrom?.providerThreadId, providerThread.id);
+      assert.equal(yield* fs.readFileString(lease), original);
+      const forkStamp = yield* decodeOwnedLease(
+        yield* fs.readFileString(`${native}/session-leases/${nativeId}-fork.lease`),
+      );
+      for (const pid of [forkStamp.pid, forkStamp.parentPid]) {
+        identities.set(pid, {
+          pid,
+          ppid: pid === forkStamp.pid ? forkStamp.parentPid : process.pid,
+          birthId: `scripted-birth:${pid}`,
+          startedAtUpperBoundMs: Date.parse(forkStamp.acquiredAt),
+          zombie: false,
+        });
+      }
+      const forkEvents = yield* collectTurn(destination.events).pipe(Effect.forkScoped);
+      yield* destination.startTurn(
+        makeTurnInput({
+          threadId: targetThreadId,
+          providerThread: forked,
+          instanceId,
+          runtimePolicy,
+          now: DateTime.makeUnsafe("2026-11-13T00:00:00.000Z"),
+          ordinal: 1,
+        }),
+      );
+      assert.equal(terminalStatus(yield* Fiber.join(forkEvents)), "completed");
       for (const changed of [
+        {
+          ...stamp,
+          pid: forkStamp.pid,
+          parentPid: forkStamp.parentPid,
+          acquiredAt: forkStamp.acquiredAt,
+        },
         { ...stamp, pid: stamp.pid + 1 },
         { ...stamp, parentPid: stamp.parentPid + 1 },
         { ...stamp, hostId: "foreign-host" },
@@ -6502,23 +6566,42 @@ it.live.each(["linux", "darwin", "win32", "missing identity", "launcher"] as con
       ]) {
         yield* fs.writeFileString(lease, JSON.stringify(changed));
         yield* refused();
+        yield* forkRefused();
       }
       yield* fs.writeFileString(
         lease,
         JSON.stringify({ ...stamp, acquiredAt: "2020-01-01T00:00:00.000Z" }),
       );
       yield* refused();
+      yield* forkRefused();
       yield* fs.writeFileString(lease, original);
+      yield* fs.makeDirectory(`${lease}.lock`);
+      yield* forkRefused();
+      yield* fs.remove(`${lease}.lock`, { recursive: true });
       yield* send(2);
       withdrawnLease = JSON.stringify({ ...stamp, hostId: "foreign-host" });
       yield* refused();
       const calls = (yield* fs.readFileString(wire))
         .trim()
         .split("\n")
-        .map((line) => JSON.parse(line) as { method: string });
-      assert.equal(calls.filter((call) => call.method === "session/prompt").length, 2);
+        .map((line) => JSON.parse(line) as { method: string; pid: number; sessionId?: string });
+      assert.deepEqual(
+        calls
+          .filter((call) => call.method === "session/prompt")
+          .map((call) => [call.pid, call.sessionId]),
+        [
+          [stamp.pid, nativeId],
+          [forkStamp.pid, `${nativeId}-fork`],
+          [stamp.pid, nativeId],
+        ],
+      );
+      assert.equal(calls.filter((call) => call.method === "session/prompt").length, 3);
+      assert.equal(calls.filter((call) => call.method === "session/fork").length, 1);
       assert.equal(calls.filter((call) => call.method === "session/load").length, 0);
       yield* Scope.close(runtimeScope, Exit.void);
+      withdrawnLease = undefined;
+      yield* fs.writeFileString(lease, original);
+      yield* forkRefused();
       if (observedRuntime)
         assert.isFalse(
           yield* observedRuntime.ownsProcess!(stamp.pid, stamp.parentPid, stamp.acquiredAt),
