@@ -186,6 +186,9 @@ function holdGatedReplayLines(
     );
 }
 
+const isReplayRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
 export function makeAcpReplayRuntime(input: {
   readonly transcript: AcpReplayTranscript;
   readonly statusPath: string;
@@ -206,7 +209,7 @@ export function makeAcpReplayRuntime(input: {
 > {
   // Transcripts exceed the kernel's 128 KiB per-environment-variable limit.
   const transcriptPath = `${input.statusPath}.transcript.json`;
-  // Recorded Kiro prompts predate T3's transport-only native turn correlation tag.
+  // Recorded Kiro frames predate boolean config, Approve for Me and native turn correlation.
   const transcript =
     input.transcript.provider !== "kiro"
       ? input.transcript
@@ -215,20 +218,31 @@ export function makeAcpReplayRuntime(input: {
           entries: input.transcript.entries.map((entry) => {
             if (entry.type !== "expect_outbound") return entry;
             const frame = entry.frame;
-            if (
-              typeof frame !== "object" ||
-              frame === null ||
-              !("kind" in frame) ||
-              !("method" in frame) ||
-              !("params" in frame) ||
-              frame.kind !== "request" ||
-              frame.method !== "session/prompt" ||
-              typeof frame.params !== "object" ||
-              frame.params === null ||
-              Array.isArray(frame.params) ||
-              "_meta" in frame.params
-            )
+            if (!isReplayRecord(frame) || frame.kind !== "request" || !isReplayRecord(frame.params))
               return entry;
+            const params = frame.params;
+            if (frame.method === "initialize" && isReplayRecord(params.clientCapabilities)) {
+              const capabilities = params.clientCapabilities;
+              const session = isReplayRecord(capabilities.session) ? capabilities.session : {};
+              const config = isReplayRecord(session.configOptions) ? session.configOptions : {};
+              const meta = isReplayRecord(capabilities._meta) ? capabilities._meta : {};
+              const kiro = isReplayRecord(meta.kiro) ? meta.kiro : {};
+              return {
+                ...entry,
+                frame: {
+                  ...frame,
+                  params: {
+                    ...params,
+                    clientCapabilities: {
+                      ...capabilities,
+                      session: { ...session, configOptions: { ...config, boolean: {} } },
+                      _meta: { ...meta, kiro: { ...kiro, approveForMeOption: true } },
+                    },
+                  },
+                },
+              };
+            }
+            if (frame.method !== "session/prompt" || "_meta" in params) return entry;
             return {
               ...entry,
               frame: {
