@@ -69,8 +69,9 @@ describe("runMigrations", () => {
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 
-  it.effect("upgrades a database at exactly 54", () =>
+  it.effect("upgrades a database at exactly 54, then rechecks it without a write lock", () =>
     Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
       assert.isTrue(yield* hasPendingMigrations());
       yield* runMigrations({ toMigrationInclusive: 54 });
       assert.isTrue(yield* hasPendingMigrations());
@@ -78,6 +79,11 @@ describe("runMigrations", () => {
       assert.isFalse(yield* hasPendingMigrations());
       assert.deepStrictEqual(yield* history, migrationManifest);
       assert.isAbove(yield* v2TableCount, 0);
+
+      // query_only rejects BEGIN IMMEDIATE, which CLI startup would otherwise take on the live database.
+      yield* sql`PRAGMA query_only = ON`;
+      assert.deepStrictEqual(yield* runMigrations(), []);
+      assert.deepStrictEqual(yield* history, migrationManifest);
     }).pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" }))),
   );
 

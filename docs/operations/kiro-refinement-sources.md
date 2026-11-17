@@ -480,3 +480,22 @@ Kiro checks helper readiness before starting sessions and reports an actionable
 build/install error for unavailable helpers. Ownership still fails closed.
 `check:changed` selects the cross-package Kiro/ACP suites
 and runs native formatting, tests and a release build when helper sources change.
+
+### November 16 evening upstream refresh
+
+This normal merge includes all upstream main through
+[`9e32c95576f75c45d543778900b2186ece9c6711`](https://github.com/pingdotgg/t3code/commit/9e32c95576f75c45d543778900b2186ece9c6711)
+(commit time November 17, 2026, 02:20:25 UTC), from published refinement
+[`ae0e6874b62c2e0bab9375d800839c83d2217d20`](https://github.com/brandonvincitore/t3code/commit/ae0e6874b62c2e0bab9375d800839c83d2217d20).
+All 139 upstream commits after the preceding cutoff are included. Earlier pins,
+original author credits, and replacement records remain historical attribution.
+
+Upstream's idle-child history isolation (#37556) uses the fork's scoped session-load
+routing alongside its native workflow wakes and model-bound context readings.
+Upstream's configured permission-mode tracking and provider settings boundaries
+(#37826) compose with the fork's policy ceilings and Approve for Me admission.
+Registry inspection recovers an absent or corrupt index (#37549) while retaining
+policy refusal and prepared-agent metadata when installations are disabled.
+No native Kiro Resume support or remote OAuth callback forwarding is implied.
+The earlier monitor-selected fixes and November 16 fork repairs were already
+present before this refresh; they are not new integrations.
