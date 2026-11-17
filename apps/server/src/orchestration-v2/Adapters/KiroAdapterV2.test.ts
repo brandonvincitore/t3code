@@ -56,6 +56,7 @@ import {
   refusedBeforePrompt,
 } from "@t3tools/provider-core/server/failure";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import type * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import {
@@ -500,6 +501,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
   /** Holds the script's inbound frames at labels the test releases. */
   readonly replayGate?: ProviderReplayGate;
   readonly testHooks?: Parameters<typeof makeKiroAdapterV2>[0]["testHooks"];
+  readonly continuationRequests?: Parameters<typeof makeKiroAdapterV2>[0]["continuationRequests"];
   readonly onSessionUpdate?: (
     notification: EffectAcpSchema.SessionNotification,
   ) => Effect.Effect<void>;
@@ -538,6 +540,7 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
     /** Runs T3's compact action as turn `ordinal`. */
     readonly compact: (ordinal: number) => Effect.Effect<void, ProviderAdapterV2Error>;
+    readonly continueTurn: (ordinal: number) => Effect.Effect<void, ProviderAdapterV2Error>;
     readonly interrupt: (
       providerTurnId: ProviderTurnId,
     ) => Effect.Effect<void, ProviderAdapterV2Error>;
@@ -649,6 +652,9 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
       );
     },
     ...(input.testHooks === undefined ? {} : { testHooks: input.testHooks }),
+    ...(input.continuationRequests === undefined
+      ? {}
+      : { continuationRequests: input.continuationRequests }),
     ...(input.skills === undefined ? {} : { skills: input.skills }),
   });
   // Held frames must not outlive a failed drive and wedge teardown.
@@ -772,6 +778,13 @@ const runKiroScript = Effect.fn("runKiroScript")(function* (input: {
           return startTurnOn(ordinal, modelSelection.model, input.options);
         }),
       compact,
+      continueTurn: (ordinal) => {
+        const turn = turnInput(ordinal, modelSelection.model, input.options);
+        return session.startTurn({
+          ...turn,
+          message: { ...turn.message, createdBy: "agent", creationSource: "provider" },
+        });
+      },
       interrupt: (providerTurnId) => session.interruptTurn({ providerThread, providerTurnId }),
       respond: (requestId, decision) => session.respondToRuntimeRequest({ requestId, decision }),
       answerQuestion: (requestId, answers) =>
@@ -1905,6 +1918,270 @@ const terminalStatus = (events: ReadonlyArray<ProviderAdapterV2Event>) => {
   return terminal?.type === "turn.terminal" ? terminal.status : undefined;
 };
 
+it.effect.each([
+  "buffered",
+  "streaming",
+  "user-race",
+  "overlap",
+  "cancel-queued",
+  "error",
+  "cancelled",
+  "refusal",
+] as const)("projects distinct native Kiro wake turns without re-prompting: %s", (timing) =>
+  Effect.gen(function* () {
+    const requests: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
+    const delivered = yield* Deferred.make<void>();
+    const chunks = yield* Effect.forEach([1, 2, 3], () => Deferred.make<void>());
+    const gate = makeProviderReplayGate(["native-wakes", "end-1", "end-2", "end-3"]);
+    const boundary = (turnId: string, kind: "turn_start" | "turn_end") =>
+      update({
+        sessionUpdate: "session_info_update",
+        _meta: {
+          kiro: {
+            kind,
+            executionId: turnId,
+            turnId,
+            boundarySource: "observed",
+            ...(kind === "turn_end"
+              ? {
+                  stopReason:
+                    turnId === "wake-3" &&
+                    (timing === "error" || timing === "cancelled" || timing === "refusal")
+                      ? timing
+                      : "end_turn",
+                }
+              : {}),
+            ...(turnId === "original" || turnId === "user-next"
+              ? {
+                  userMessageTag: `message:thread-kiro-native-workflow-wakes-${timing}:${turnId === "original" ? 1 : 2}`,
+                }
+              : {}),
+          },
+        },
+      });
+    yield* runKiroScript({
+      scenario: `native-workflow-wakes-${timing}`,
+      replayGate: gate,
+      continuationRequests: {
+        offer: (request) =>
+          Effect.sync(() => {
+            requests.push(request);
+          }),
+      },
+      onSessionUpdate: (notification) => {
+        if (
+          notification.update.sessionUpdate === "agent_message_chunk" &&
+          notification.update.content.type === "text"
+        ) {
+          const n = [1, 2, 3].find(
+            (n) =>
+              notification.update.sessionUpdate === "agent_message_chunk" &&
+              notification.update.content.type === "text" &&
+              notification.update.content.text === `Assessment ${n}.`,
+          );
+          if (n !== undefined)
+            return Deferred.succeed(chunks[n - 1]!, undefined).pipe(Effect.asVoid);
+        }
+        return notification.update.sessionUpdate === "session_info_update" &&
+          notification.update._meta?.kiro &&
+          typeof notification.update._meta.kiro === "object" &&
+          "turnId" in notification.update._meta.kiro &&
+          notification.update._meta.kiro.turnId === "wake-3" &&
+          "kind" in notification.update._meta.kiro &&
+          notification.update._meta.kiro.kind === "turn_end"
+          ? Deferred.succeed(delivered, undefined).pipe(Effect.asVoid)
+          : Effect.void;
+      },
+      frames: [
+        ...openSessionFrames({
+          initialize: KIRO_V3_INITIALIZE,
+          configOptions: [modeOption, autopilotOption("on")],
+        }),
+        turnPrompt,
+        boundary("original", "turn_start"),
+        update({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Started three investigations." },
+        }),
+        boundary("original", "turn_end"),
+        answer("session/prompt", { stopReason: "end_turn" }),
+        ...(timing === "overlap" ? [turnPrompt] : []),
+        { ...boundary("original", "turn_start"), label: "native-wakes" },
+        update({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Late original output." },
+          _meta: { kiro: { executionId: "original", turnId: "original" } },
+        }),
+        update({
+          sessionUpdate: "session_info_update",
+          _meta: {
+            kiro: {
+              kind: "turn_start",
+              executionId: "recovered",
+              turnId: "recovered",
+              boundarySource: "recovered",
+            },
+          },
+        }),
+        update({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Recovered output." },
+          _meta: { kiro: { executionId: "recovered", turnId: "recovered" } },
+        }),
+        update({
+          sessionUpdate: "session_info_update",
+          _meta: {
+            kiro: {
+              kind: "turn_start",
+              executionId: "replayed",
+              turnId: "replayed",
+              boundarySource: "observed",
+              replay: true,
+            },
+          },
+        }),
+        update({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Replay output." },
+          _meta: { kiro: { replay: true } },
+        }),
+        update({
+          sessionUpdate: "session_info_update",
+          _meta: {
+            kiro: {
+              kind: "turn_end",
+              executionId: "replayed",
+              turnId: "replayed",
+              boundarySource: "observed",
+              stopReason: "end_turn",
+              replay: true,
+            },
+          },
+        }),
+        ...[1, 2, 3].flatMap((n): ReadonlyArray<Frame> => [
+          boundary(`wake-${n}`, "turn_start"),
+          boundary(`wake-${n}`, "turn_start"),
+          update({
+            sessionUpdate: "session_info_update",
+            _meta: {
+              kiro: {
+                kind: "turn_end",
+                executionId: `wake-${n}`,
+                turnId: `wake-${n}`,
+                boundarySource: "recovered",
+                stopReason: "end_turn",
+              },
+            },
+          }),
+          update({
+            sessionUpdate: "agent_thought_chunk",
+            content: { type: "text", text: `Reasoning ${n}.` },
+          }),
+          update({
+            sessionUpdate: "tool_call",
+            toolCallId: `wake-tool-${n}`,
+            title: "Read workflow output",
+            kind: "read",
+            status: "completed",
+            rawOutput: { text: `Output ${n}` },
+          }),
+          update({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: `Assessment ${n}.` },
+          }),
+          {
+            ...boundary(`wake-${n}`, "turn_end"),
+            ...(timing === "streaming" ? { label: `end-${n}` } : {}),
+          },
+          boundary(`wake-${n}`, "turn_end"),
+        ]),
+        ...(timing === "user-race" || timing === "overlap"
+          ? [
+              ...(timing === "user-race" ? [turnPrompt] : []),
+              boundary("user-next", "turn_start"),
+              update({
+                sessionUpdate: "agent_message_chunk",
+                content: { type: "text", text: "User reply." },
+              }),
+              boundary("user-next", "turn_end"),
+              answer("session/prompt", { stopReason: "end_turn" }),
+            ]
+          : []),
+        ...closeSession,
+      ],
+      drive: ({ events, startTurn, startTurnOn, continueTurn, hasPendingBackgroundWork }) =>
+        Effect.gen(function* () {
+          yield* startTurn;
+          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          if (timing === "overlap") yield* startTurnOn(2, "default");
+          gate.release("native-wakes");
+          if (timing === "streaming") yield* Deferred.await(chunks[0]!);
+          else yield* Deferred.await(delivered);
+          assert.lengthOf(requests, 1, "native wake output must offer one queued continuation");
+          const firstRequest = requests[0]!;
+          if (timing === "cancel-queued") {
+            assert.isDefined(firstRequest.onRunEndedWithoutStarting);
+            yield* firstRequest.onRunEndedWithoutStarting!();
+            assert.isFalse(yield* hasPendingBackgroundWork);
+            if (firstRequest.dispatchIfCurrent)
+              assert.isTrue(
+                Option.isNone(yield* firstRequest.dispatchIfCurrent(Effect.succeed(true))),
+              );
+            return;
+          }
+          if (timing === "user-race" || timing === "overlap") {
+            if (timing === "user-race") yield* startTurnOn(2, "default");
+            const user = yield* collectTurn(events);
+            assert.isTrue(
+              user.some(
+                (event) =>
+                  event.type === "message.updated" && event.message.text.includes("User reply."),
+              ),
+            );
+            assert.isFalse(
+              user.some(
+                (event) =>
+                  event.type === "message.updated" && event.message.text.includes("Assessment"),
+              ),
+            );
+          }
+          for (const n of [1, 2, 3]) {
+            if (timing === "streaming") yield* Deferred.await(chunks[n - 1]!);
+            yield* continueTurn(n + (timing === "user-race" || timing === "overlap" ? 2 : 1));
+            if (timing === "streaming") gate.release(`end-${n}`);
+            const projected = yield* collectTurn(events);
+            assert.equal(
+              terminalStatus(projected),
+              n === 3 && (timing === "error" || timing === "refusal")
+                ? "failed"
+                : n === 3 && timing === "cancelled"
+                  ? "cancelled"
+                  : "completed",
+            );
+            const text = projected
+              .flatMap((event) => (event.type === "message.updated" ? [event.message.text] : []))
+              .join("");
+            assert.include(text, `Assessment ${n}.`);
+            assert.notInclude(text, `Assessment ${n === 3 ? 1 : n + 1}.`);
+            assert.notInclude(text, "Late original output.");
+            assert.notInclude(text, "Recovered output.");
+            assert.notInclude(text, "Replay output.");
+            assert.isTrue(
+              projected.some(
+                (event) =>
+                  event.type === "turn_item.updated" && event.turnItem.type === "dynamic_tool",
+              ),
+            );
+          }
+          assert.lengthOf(requests, 3, "each native wake must own a continuation run");
+          assert.isFalse(yield* hasPendingBackgroundWork);
+          yield* firstRequest.onRunEndedWithoutStarting?.() ?? Effect.void;
+          assert.isFalse(yield* hasPendingBackgroundWork);
+        }),
+    });
+  }).pipe(Effect.provide(testLayer)),
+);
+
 describe("Kiro native question callbacks", () => {
   const native = "_kiro/userInput";
   const mcp = "_kiro/mcp/elicitation";
@@ -2023,84 +2300,144 @@ describe("Kiro native question callbacks", () => {
     },
   ];
 
-  it.live.each(["approval-required", "full-access"] as const)(
+  it.live.each(["approval-required", "full-access", "wake"] as const)(
     "round-trips native questions and typed forms on the original ACP request in %s",
-    (runtimeMode) =>
-      runKiroScript({
-        scenario: `native-questions-${runtimeMode}`,
-        runtimeMode,
-        frames: [
-          ...openSessionFrames({
-            initialize: KIRO_V3_INITIALIZE,
-            configOptions: [modeOption, autopilotOption("on")],
-          })
-            .map((entry) => {
-              const frame = entry.frame as Frame;
-              return runtimeMode === "full-access" && frame.method === "session/set_config_option"
-                ? undefined
-                : entry;
+    (mode) =>
+      Effect.gen(function* () {
+        const runtimeMode = mode === "wake" ? "approval-required" : mode;
+        const wake = mode === "wake";
+        const offered = yield* Deferred.make<void>();
+        let wakeRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+        yield* runKiroScript({
+          scenario: `native-questions-${runtimeMode}`,
+          runtimeMode,
+          wrapRuntime: (runtime) => {
+            wakeRuntime = runtime;
+            return runtime;
+          },
+          ...(wake
+            ? {
+                continuationRequests: {
+                  offer: () => Deferred.succeed(offered, undefined).pipe(Effect.asVoid),
+                },
+              }
+            : {}),
+          frames: [
+            ...openSessionFrames({
+              initialize: KIRO_V3_INITIALIZE,
+              configOptions: [modeOption, autopilotOption("on")],
             })
-            .filter((entry): entry is Frame => entry !== undefined),
-          turnPrompt,
-          ...cases.flatMap(({ method, payload, result }) => [
-            kiroSecretRequest(method, {
-              sessionId: SESSION_ID,
-              toolCallId: "same-native-tool",
-              ...payload,
+              .map((entry) => {
+                const frame = entry.frame as Frame;
+                return runtimeMode === "full-access" && frame.method === "session/set_config_option"
+                  ? undefined
+                  : entry;
+              })
+              .filter((entry): entry is Frame => entry !== undefined),
+            turnPrompt,
+            ...(wake
+              ? [
+                  answer("session/prompt", { stopReason: "end_turn" }),
+                  outbound("_t3/test/wake", {}),
+                  answer("_t3/test/wake", {}),
+                  {
+                    ...update({
+                      sessionUpdate: "session_info_update",
+                      _meta: {
+                        kiro: {
+                          kind: "turn_start",
+                          executionId: "question-wake",
+                          turnId: "question-wake",
+                          boundarySource: "observed",
+                        },
+                      },
+                    }),
+                    label: "wake-start",
+                  },
+                ]
+              : []),
+            ...cases.flatMap(({ method, payload, result }) => [
+              kiroSecretRequest(method, {
+                sessionId: SESSION_ID,
+                toolCallId: "same-native-tool",
+                ...payload,
+              }),
+              kiroSecretResponse(method, result),
+            ]),
+            ...(wake
+              ? [
+                  update({
+                    sessionUpdate: "session_info_update",
+                    _meta: {
+                      kiro: {
+                        kind: "turn_end",
+                        executionId: "question-wake",
+                        turnId: "question-wake",
+                        boundarySource: "observed",
+                        stopReason: "end_turn",
+                      },
+                    },
+                  }),
+                ]
+              : [answer("session/prompt", { stopReason: "end_turn" })]),
+            ...closeSession,
+          ],
+          drive: ({ events, startTurn, continueTurn, answerQuestion }) =>
+            Effect.gen(function* () {
+              yield* startTurn;
+              if (wake) {
+                assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+                yield* wakeRuntime!.request("_t3/test/wake", {}).pipe(Effect.forkChild);
+                yield* Deferred.await(offered);
+                yield* continueTurn(2);
+              }
+              const ids = new Set<string>();
+              let index = 0;
+              const turn = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) => {
+                    if (
+                      event.type !== "turn_item.updated" ||
+                      event.turnItem.type !== "user_input_request"
+                    )
+                      return Effect.void;
+                    const item = event.turnItem;
+                    const expected = cases[index++];
+                    assert.ok(expected);
+                    assert.isFalse(
+                      ids.has(item.id),
+                      "repeated tool calls need distinct question identities",
+                    );
+                    ids.add(item.id);
+                    assert.include(item.nativeItemRef?.nativeId, "same-native-tool");
+                    assert.equal(item.status, "waiting");
+                    if (expected.choices !== undefined) {
+                      assert.deepEqual(
+                        item.questions[0]?.options.map((choice) => choice.value ?? choice.label),
+                        expected.choices,
+                      );
+                      assert.isUndefined(item.questions[0]?.multiSelect);
+                    } else if (expected.name === "typed MCP form") {
+                      assert.equal(
+                        item.questions.find((question) => question.id === "areas")?.multiSelect,
+                        true,
+                      );
+                    }
+                    return answerQuestion(item.requestId, expected.answers);
+                  }),
+                ),
+              );
+              assert.equal(terminalStatus(turn), "completed");
+              assert.equal(index, cases.length);
+              assert.isFalse(
+                turn.some(
+                  (event) =>
+                    event.type === "turn_item.updated" &&
+                    event.turnItem.type === "approval_request",
+                ),
+              );
             }),
-            kiroSecretResponse(method, result),
-          ]),
-          answer("session/prompt", { stopReason: "end_turn" }),
-          ...closeSession,
-        ],
-        drive: ({ events, startTurn, answerQuestion }) =>
-          Effect.gen(function* () {
-            yield* startTurn;
-            const ids = new Set<string>();
-            let index = 0;
-            const turn = yield* collectTurn(
-              events.pipe(
-                Stream.tap((event) => {
-                  if (
-                    event.type !== "turn_item.updated" ||
-                    event.turnItem.type !== "user_input_request"
-                  )
-                    return Effect.void;
-                  const item = event.turnItem;
-                  const expected = cases[index++];
-                  assert.ok(expected);
-                  assert.isFalse(
-                    ids.has(item.id),
-                    "repeated tool calls need distinct question identities",
-                  );
-                  ids.add(item.id);
-                  assert.include(item.nativeItemRef?.nativeId, "same-native-tool");
-                  assert.equal(item.status, "waiting");
-                  if (expected.choices !== undefined) {
-                    assert.deepEqual(
-                      item.questions[0]?.options.map((choice) => choice.value ?? choice.label),
-                      expected.choices,
-                    );
-                    assert.isUndefined(item.questions[0]?.multiSelect);
-                  } else if (expected.name === "typed MCP form") {
-                    assert.equal(
-                      item.questions.find((question) => question.id === "areas")?.multiSelect,
-                      true,
-                    );
-                  }
-                  return answerQuestion(item.requestId, expected.answers);
-                }),
-              ),
-            );
-            assert.equal(terminalStatus(turn), "completed");
-            assert.equal(index, cases.length);
-            assert.isFalse(
-              turn.some(
-                (event) =>
-                  event.type === "turn_item.updated" && event.turnItem.type === "approval_request",
-              ),
-            );
-          }),
+        });
       }).pipe(Effect.provide(testLayer), Effect.scoped),
   );
 
@@ -4811,65 +5148,122 @@ describe("KiroAdapterV2", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
-  it.effect("answers a stale 'this session' approval with Kiro's allow_once", () =>
-    runKiroScript({
-      scenario: "stale-session-approval",
-      frames: [
-        ...openSessionFrames({
-          initialize: KIRO_V3_INITIALIZE,
-          configOptions: [modeOption, autopilotOption("on")],
-        }),
-        turnPrompt,
-        {
-          type: "emit_inbound",
-          label: "session/request_permission",
-          frame: {
-            kind: "request",
-            method: "session/request_permission",
-            // Kiro 2.27's options for a write (kiro_supervised_transcript.ndjson).
-            params: {
-              sessionId: SESSION_ID,
-              toolCall: { toolCallId: "call-1", title: "Write File", kind: "edit" },
-              options: [
-                { optionId: "accept", name: "Allow", kind: "allow_once" },
-                { optionId: "always-accept", name: "Always allow", kind: "allow_always" },
-                { optionId: "reject", name: "Deny", kind: "reject_once" },
-              ],
+  it.effect.each([false, true])(
+    "answers a stale 'this session' approval with Kiro's allow_once (wake=%s)",
+    (wake) =>
+      Effect.gen(function* () {
+        const offered = yield* Deferred.make<void>();
+        let wakeRuntime: AcpSessionRuntime.AcpSessionRuntime["Service"] | undefined;
+        yield* runKiroScript({
+          scenario: `stale-session-approval-${wake}`,
+          wrapRuntime: (runtime) => {
+            wakeRuntime = runtime;
+            return runtime;
+          },
+          ...(wake
+            ? {
+                continuationRequests: {
+                  offer: () => Deferred.succeed(offered, undefined).pipe(Effect.asVoid),
+                },
+              }
+            : {}),
+          frames: [
+            ...openSessionFrames({
+              initialize: KIRO_V3_INITIALIZE,
+              configOptions: [modeOption, autopilotOption("on")],
+            }),
+            turnPrompt,
+            ...(wake
+              ? [
+                  answer("session/prompt", { stopReason: "end_turn" }),
+                  outbound("_t3/test/wake", {}),
+                  answer("_t3/test/wake", {}),
+                  update({
+                    sessionUpdate: "session_info_update",
+                    _meta: {
+                      kiro: {
+                        kind: "turn_start",
+                        executionId: "approval-wake",
+                        turnId: "approval-wake",
+                        boundarySource: "observed",
+                      },
+                    },
+                  }),
+                ]
+              : []),
+            {
+              type: "emit_inbound",
+              label: "session/request_permission",
+              frame: {
+                kind: "request",
+                method: "session/request_permission",
+                // Kiro 2.27's options for a write (kiro_supervised_transcript.ndjson).
+                params: {
+                  sessionId: SESSION_ID,
+                  toolCall: { toolCallId: "call-1", title: "Write File", kind: "edit" },
+                  options: [
+                    { optionId: "accept", name: "Allow", kind: "allow_once" },
+                    { optionId: "always-accept", name: "Always allow", kind: "allow_always" },
+                    { optionId: "reject", name: "Deny", kind: "reject_once" },
+                  ],
+                },
+              },
             },
-          },
-        },
-        // The card offered no "this session" choice, so the answer is one-time
-        // rather than Kiro's workspace-wide `allow_always`.
-        {
-          type: "expect_outbound",
-          label: "session/request_permission.result",
-          frame: {
-            kind: "response",
-            method: "session/request_permission",
-            result: { outcome: { outcome: "selected", optionId: "accept" } },
-          },
-        },
-        answer("session/prompt", { stopReason: "end_turn" }),
-        ...closeSession,
-      ],
-      drive: ({ events, startTurn, respond }) =>
-        Effect.gen(function* () {
-          const pending = yield* Deferred.make<RuntimeRequestId>();
-          const turn = yield* collectTurn(
-            events.pipe(
-              Stream.tap((event) =>
-                event.type === "runtime_request.updated" &&
-                event.runtimeRequest.status === "pending"
-                  ? Deferred.succeed(pending, event.runtimeRequest.id)
-                  : Effect.void,
-              ),
-            ),
-          ).pipe(Effect.forkChild);
-          yield* startTurn;
-          yield* respond(yield* Deferred.await(pending), "acceptForSession");
-          assert.equal(terminalStatus(yield* Fiber.join(turn)), "completed");
-        }),
-    }).pipe(Effect.provide(testLayer)),
+            // The card offered no "this session" choice, so the answer is one-time
+            // rather than Kiro's workspace-wide `allow_always`.
+            {
+              type: "expect_outbound",
+              label: "session/request_permission.result",
+              frame: {
+                kind: "response",
+                method: "session/request_permission",
+                result: { outcome: { outcome: "selected", optionId: "accept" } },
+              },
+            },
+            ...(wake
+              ? [
+                  update({
+                    sessionUpdate: "session_info_update",
+                    _meta: {
+                      kiro: {
+                        kind: "turn_end",
+                        executionId: "approval-wake",
+                        turnId: "approval-wake",
+                        boundarySource: "observed",
+                        stopReason: "end_turn",
+                      },
+                    },
+                  }),
+                ]
+              : [answer("session/prompt", { stopReason: "end_turn" })]),
+            ...closeSession,
+          ],
+          drive: ({ events, startTurn, continueTurn, respond }) =>
+            Effect.gen(function* () {
+              if (wake) {
+                yield* startTurn;
+                assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+                yield* wakeRuntime!.request("_t3/test/wake", {}).pipe(Effect.forkChild);
+                yield* Deferred.await(offered);
+              }
+              const pending = yield* Deferred.make<RuntimeRequestId>();
+              const turn = yield* collectTurn(
+                events.pipe(
+                  Stream.tap((event) =>
+                    event.type === "runtime_request.updated" &&
+                    event.runtimeRequest.status === "pending"
+                      ? Deferred.succeed(pending, event.runtimeRequest.id)
+                      : Effect.void,
+                  ),
+                ),
+              ).pipe(Effect.forkChild);
+              if (wake) yield* continueTurn(2);
+              else yield* startTurn;
+              yield* respond(yield* Deferred.await(pending), "acceptForSession");
+              assert.equal(terminalStatus(yield* Fiber.join(turn)), "completed");
+            }),
+        });
+      }).pipe(Effect.provide(testLayer)),
   );
 
   it.effect("advertises secret storage without importing native credentials", () =>

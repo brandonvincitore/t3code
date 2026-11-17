@@ -46,6 +46,7 @@ import { mergeProviderInstanceEnvironment } from "@t3tools/provider-core/server/
 import type * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
 import * as ProviderEventLoggers from "@t3tools/provider-core/server/ProviderEventLoggers";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import * as ProviderContinuationRequests from "@t3tools/provider-core/server/ProviderContinuationRequests";
 import {
   KIRO_AGENT_CONFIG_ID,
   KIRO_AUTOPILOT_CONFIG_ID,
@@ -336,6 +337,7 @@ const kiroForkFromTurn = {
 };
 
 export interface KiroAdapterV2Options {
+  readonly continuationRequests?: Parameters<typeof makeAcpAdapterV2>[0]["continuationRequests"];
   readonly instanceId: Parameters<typeof makeAcpAdapterV2>[0]["instanceId"];
   readonly settings: KiroSettings;
   readonly environment: NodeJS.ProcessEnv;
@@ -816,6 +818,57 @@ function makeKiroAcpAdapterFlavor(
       notification.update._meta.kiro.kind === "summarization_completed",
 
     supportsNativeWorkflows: true,
+    enablePostSettleContinuation: true,
+    promptMeta: (turn) => ({ kiro: { userMessageTag: turn.message.messageId } }),
+    nativeTurnUpdate: (notification) => {
+      const metadata = "_meta" in notification.update ? notification.update._meta?.kiro : undefined;
+      if (typeof metadata !== "object" || metadata === null) return;
+      if ("replay" in metadata && metadata.replay === true) return { replay: true };
+      if (
+        !("executionId" in metadata) ||
+        typeof metadata.executionId !== "string" ||
+        !("turnId" in metadata) ||
+        typeof metadata.turnId !== "string" ||
+        metadata.executionId.length === 0 ||
+        metadata.turnId.length === 0 ||
+        metadata.executionId.length > 128 ||
+        metadata.turnId.length > 128
+      )
+        return;
+      const id = JSON.stringify([metadata.executionId, metadata.turnId]);
+      if (notification.update.sessionUpdate !== "session_info_update" || !("kind" in metadata))
+        return { id };
+      if (
+        metadata.kind === "turn_start" &&
+        "boundarySource" in metadata &&
+        metadata.boundarySource === "observed"
+      )
+        return {
+          id,
+          boundary: "start",
+          ...("userMessageTag" in metadata && typeof metadata.userMessageTag === "string"
+            ? { messageId: metadata.userMessageTag }
+            : {}),
+        };
+      if (
+        metadata.kind === "turn_end" &&
+        "stopReason" in metadata &&
+        "boundarySource" in metadata &&
+        metadata.boundarySource === "observed"
+      ) {
+        const reason = metadata.stopReason;
+        const stopReason =
+          reason === "end_turn" ||
+          reason === "cancelled" ||
+          reason === "max_tokens" ||
+          reason === "max_turn_requests" ||
+          reason === "refusal"
+            ? reason
+            : "error";
+        return { id, boundary: "end", stopReason };
+      }
+      return { id };
+    },
     registerExtensions: (context) =>
       workflows
         .registerExtensions(context)
@@ -1050,6 +1103,9 @@ export const makeKiroAdapterV2 = Effect.fn("makeKiroAdapterV2")(function* (
       host.ensureProcessIdentity,
     ),
     selfInvocation: options.selfInvocation,
+    ...(options.continuationRequests === undefined
+      ? {}
+      : { continuationRequests: options.continuationRequests }),
     ...(options.nativeLogging === undefined ? {} : { nativeLogging: options.nativeLogging }),
     ...(options.testHooks === undefined ? {} : { testHooks: options.testHooks }),
   });
@@ -1142,12 +1198,14 @@ export const makeKiroAdapterV2Driver = (
       const hostEnvironment = yield* HostProcess.Environment;
       const selfInvocation = yield* resolveSelfInvocation();
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
+      const continuationRequests = yield* ProviderContinuationRequests.ProviderContinuationRequests;
       const makeNativeLogger = yield* makeAcpNativeLoggerFactory();
       return yield* makeKiroAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
         environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
         selfInvocation,
+        continuationRequests,
         defaultModel,
         skills,
         ...(configurations === undefined ? {} : { configurations }),

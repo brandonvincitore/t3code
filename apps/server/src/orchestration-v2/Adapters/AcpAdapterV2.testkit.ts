@@ -206,10 +206,42 @@ export function makeAcpReplayRuntime(input: {
 > {
   // Transcripts exceed the kernel's 128 KiB per-environment-variable limit.
   const transcriptPath = `${input.statusPath}.transcript.json`;
+  // Recorded Kiro prompts predate T3's transport-only native turn correlation tag.
+  const transcript =
+    input.transcript.provider !== "kiro"
+      ? input.transcript
+      : {
+          ...input.transcript,
+          entries: input.transcript.entries.map((entry) => {
+            if (entry.type !== "expect_outbound") return entry;
+            const frame = entry.frame;
+            if (
+              typeof frame !== "object" ||
+              frame === null ||
+              !("kind" in frame) ||
+              !("method" in frame) ||
+              !("params" in frame) ||
+              frame.kind !== "request" ||
+              frame.method !== "session/prompt" ||
+              typeof frame.params !== "object" ||
+              frame.params === null ||
+              Array.isArray(frame.params) ||
+              "_meta" in frame.params
+            )
+              return entry;
+            return {
+              ...entry,
+              frame: {
+                ...frame,
+                params: { ...frame.params, _meta: { kiro: { userMessageTag: "<any>" } } },
+              },
+            };
+          }),
+        };
   return (runtimeInput) =>
     Effect.gen(function* () {
       yield* input.fileSystem
-        .writeFileString(transcriptPath, encodeReplayTranscriptJson(input.transcript))
+        .writeFileString(transcriptPath, encodeReplayTranscriptJson(transcript))
         .pipe(
           Effect.mapError(
             (cause) =>
