@@ -37,7 +37,7 @@ const SESSION_ACCESS_MESSAGES: Record<ProviderSessionAccessReason, string> = {
   unavailable:
     "Native conversation access is unavailable. Check the provider setup and restart T3 before retrying.",
   active:
-    "This native conversation has an active turn. Wait for it to finish or stop it before retrying.",
+    "This native conversation is still in use by another T3 session. Finish its work or close that session before retrying.",
 };
 
 export class ProviderSessionAccessError extends Schema.TaggedError<ProviderSessionAccessError>()(
