@@ -7454,6 +7454,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         const cancelPendingRuntimeRequests = Effect.fnUntraced(function* (options?: {
           readonly preserveWorkflowRequests?: boolean;
+          readonly stopMcpCalls?: boolean;
           readonly threadId?: ThreadId;
           readonly sessionBoundTurnId?: OrchestrationV2ProviderTurn["id"];
           readonly requestId?: RuntimeRequestId;
@@ -7466,6 +7467,10 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             const waiting = turnAttached;
             turnAttached = yield* Deferred.make<boolean>();
             yield* Deferred.succeed(waiting, false);
+            // The bridge has no session IDs. A scoped callback cancellation cannot stop its calls.
+            if (options?.stopMcpCalls !== false && runtimeMcpBridge !== undefined) {
+              yield* runtimeMcpBridge.stopCalls;
+            }
           }
           const requests = yield* Ref.modify(pendingRuntimeRequests, (current) => {
             const retained = new Map<string, PendingRuntimeRequest>();
@@ -8475,7 +8480,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               const nativeForm = flavor.extractElicitationForm?.(params);
               const parsedForm =
                 nativeForm === undefined
-                  ? parseElicitationForm(params.requestedSchema, params.message)
+                  ? parseElicitationForm(params.requestedSchema, params.message, {
+                      allowOther: unknownRecord(params._meta)?.["cognition.ai/allowOther"] === true,
+                    })
                   : undefined;
               const form =
                 nativeForm ??
@@ -8841,6 +8848,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                   }
                   yield* terminalizeNativeWorkflows("interrupted");
                   yield* quarantineNativeTransportAtGeneration(previousGeneration);
+                  yield* runtimeMcpBridge?.stopCalls ?? Effect.void;
                   runtime = replacementExit.value.replacementRuntime;
                   spawnedRuntimePolicyKey = flavor.runtimePolicyKey?.(replacementPolicy);
                   runtimeScope = replacementScope;
@@ -8881,7 +8889,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       { discard: true },
                     );
                   }
-                  yield* cancelPendingRuntimeRequests();
+                  yield* cancelPendingRuntimeRequests({ stopMcpCalls: false });
                   if (previousScope !== undefined) {
                     yield* Scope.close(previousScope, Exit.void).pipe(
                       Effect.catchCause((cause) =>
@@ -11578,9 +11586,16 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       if (hardRestart || turnInput.requestRuntimeRestart === true) {
                         yield* quarantineStoppedRun();
                       }
+                      const preserveWorkflowRequests =
+                        !hardRestart && flavor.supportsNativeWorkflows === true;
+                      const keepsWorkflowMcpCalls =
+                        preserveWorkflowRequests &&
+                        [...workflows.values()].some(({ coordinator }) =>
+                          isOrchestrationV2WorkActive(coordinator.task.status),
+                        );
                       yield* cancelPendingRuntimeRequests({
-                        preserveWorkflowRequests:
-                          !hardRestart && flavor.supportsNativeWorkflows === true,
+                        preserveWorkflowRequests,
+                        stopMcpCalls: !settledSoftInterrupt && !keepsWorkflowMcpCalls,
                       });
                       // Finalize before killing so projection catches up and concurrent interrupts see activeTurn cleared.
                       if (

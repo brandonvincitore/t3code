@@ -499,3 +499,20 @@ policy refusal and prepared-agent metadata when installations are disabled.
 No native Kiro Resume support or remote OAuth callback forwarding is implied.
 The earlier monitor-selected fixes and November 16 fork repairs were already
 present before this refresh; they are not new integrations.
+
+### November 17 manual upstream refresh
+
+The fork merged all 170 upstream commits through
+[`724f5c6bec`](https://github.com/pingdotgg/t3code/commit/724f5c6bec1781c6d7d6ad09033030f198e4607d),
+committed November 18, 2026 at 02:21:45 UTC. The refinement baseline
+[`85582c49c0`](https://github.com/brandonvincitore/t3code/commit/85582c49c021530adeb557bce6bcf20f2280ae7d)
+already included owned native forks, idle handoff, and deterministic session-access refusals.
+
+Upstream [#37879](https://github.com/pingdotgg/t3code/pull/37879) replaces the fork's
+whitespace-path reveal patch `4436045b3e` with the same exact-path behavior and a regression case
+that also checks the trailing space in the parsed filename. The original fork commit remains in
+branch history. The shipped [#30188](https://github.com/pingdotgg/t3code/pull/30188) adds
+fresh-context boundaries to the fork's earlier kept-history adaptation. The merged recovery
+retains native import receipts, exact-attempt checks, and upstream's missed-attachment delivery.
+Upstream ACP bridge cancellation runs alongside scoped callback retirement and stops abandoned
+MCP calls without terminating calls from retained workflow work.
