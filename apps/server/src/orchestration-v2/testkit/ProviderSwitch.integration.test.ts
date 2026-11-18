@@ -533,6 +533,7 @@ describe("orchestration v2 provider switching", () => {
     "imported-prior-images-fallback",
     "prior-images-telemetry-native",
     "prior-images-unsent-native",
+    "prior-images-unsent-room-native",
     "prior-images-legacy-replacement-native",
     "delivery-write-failure",
   ] as const)("preserves handoffs through %s", (scenario) =>
@@ -624,7 +625,11 @@ describe("orchestration v2 provider switching", () => {
               : scenario === "large-current-input" || priorImages || exhaustedTarget
                 ? {
                     getModelContextWindow: () =>
-                      scenario.includes("target-tight") ? 18_241 : 32_000,
+                      scenario.includes("target-tight")
+                        ? 18_241
+                        : scenario.includes("unsent-room")
+                          ? 40_000
+                          : 32_000,
                   }
                 : {}),
           ...(scenario.endsWith("-native") || scenario === "large-current-input"
@@ -993,7 +998,6 @@ describe("orchestration v2 provider switching", () => {
           return;
         }
         if (priorImages) {
-          const handoff = projection.contextHandoffs.at(-1)!;
           const context = scenario.endsWith("-native")
             ? yield* encodeJson(yield* Ref.get(injectedHistory))
             : (yield* Ref.get(capturedTurns)).at(-1)!.text;
@@ -1001,7 +1005,7 @@ describe("orchestration v2 provider switching", () => {
             turnUsageScenario ||
             scenario.startsWith("imported") ||
             scenario.includes("telemetry") ||
-            scenario.includes("unsent") ||
+            scenario.includes("unsent-room") ||
             replaceNative;
           const sourceText =
             `${replaceNative ? "Another" : "New"} source constraint ` + "q".repeat(9_000);
@@ -1009,23 +1013,27 @@ describe("orchestration v2 provider switching", () => {
             (item) => item.type === "user_message" && item.text === sourceText,
           )!;
           assert.isDefined(sourceItem);
+          const deliveryRun = scenario.includes("retry")
+            ? projection.runs.find((run) => run.ordinal === targetOrdinal)!
+            : projection.runs.at(-1)!;
+          const deliveries = projection.contextHandoffs
+            .filter((record) => record.targetRunId === deliveryRun.id)
+            .flatMap((record) => (record.delivery === undefined ? [] : [record.delivery]));
           if (shouldFit) {
             assert.include(context, sourceText);
             assert.include(
-              projection.contextHandoffs
-                .filter(
-                  (record) =>
-                    record.targetRunId ===
-                    (scenario.includes("retry")
-                      ? projection.runs.find((run) => run.ordinal === targetOrdinal)!.id
-                      : projection.runs.at(-1)!.id),
-                )
-                .flatMap((record) => record.delivery?.itemIds ?? []),
+              deliveries.flatMap((delivery) => delivery.itemIds),
               sourceItem.id,
             );
           } else {
             assert.notInclude(context, "q".repeat(9_000));
-            assert.isAbove(handoff.delivery!.omittedItemIds!.length, 0);
+            assert.include(
+              deliveries.flatMap((delivery) => delivery.omittedItemIds ?? []),
+              sourceItem.id,
+            );
+          }
+          if (scenario.includes("unsent")) {
+            assert.deepEqual((yield* Ref.get(capturedTurns)).at(-1)!.attachments, [screenshot]);
           }
           const latestRun = projection.runs.at(-1)!;
           const latestAttempt = projection.attempts.find(
