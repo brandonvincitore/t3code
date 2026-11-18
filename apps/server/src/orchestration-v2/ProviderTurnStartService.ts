@@ -503,11 +503,13 @@ export const layer: Layer.Layer<
                   source.status === "cancelled" ||
                   (source.status === "completed" &&
                     handoff.delivery === undefined &&
-                    // Compaction and /goal turns defer history to the next turn.
+                    // A wake that replays provider output defers history just like /compact and /goal.
                     projection.messages.some(
                       (message) =>
                         message.id === source.userMessageId &&
-                        (isCompactionCommandMessage(message) || parseGoalCommand(message) !== null),
+                        (isBufferedProviderNotification(message) ||
+                          isCompactionCommandMessage(message) ||
+                          parseGoalCommand(message) !== null),
                     ))),
             )));
       const isSideChatHandoff = (handoff: OrchestrationV2ContextHandoff) =>

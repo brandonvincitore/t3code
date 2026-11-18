@@ -2370,6 +2370,13 @@ describe("orchestration v2 provider switching", () => {
       true,
     ],
     [
+      "background work followed by a buffered wake after native session loss",
+      new ClaudeBackgroundWorkBlocksQueryReplacementError(),
+      false,
+      true,
+      true,
+    ],
+    [
       "background work near the context limit",
       new ClaudeBackgroundWorkBlocksQueryReplacementError(),
       false,
@@ -2484,6 +2491,7 @@ describe("orchestration v2 provider switching", () => {
           assert.equal(deliveredTurn?.nativeThreadId, turns[0]?.nativeThreadId);
         }
         const delivered = `${deliveredTurn?.text}${JSON.stringify(yield* Ref.get(injectedHistory))}`;
+        if (wake && loseSession) assert.include(delivered, "Request 1");
         if (nearLimit) assert.notInclude(delivered, largeRequest);
         else assert.include(delivered, "Request 2");
         assert.include(delivered, "Request 3");
