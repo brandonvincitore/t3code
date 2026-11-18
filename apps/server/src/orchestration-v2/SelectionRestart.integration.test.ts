@@ -18,6 +18,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -26,6 +27,7 @@ import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
+import { isActiveRun } from "./CommandPolicy.ts";
 import * as EffectWorker from "./EffectWorker.ts";
 import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
@@ -462,20 +464,30 @@ it.live.each(["pooled", "exclusive"] as const)(
         state,
         mode === "pooled" ? pooledCapabilities : exclusiveCapabilities,
       );
+      const continuationStarted = yield* Deferred.make<void>();
       // A session that closes on detach is never asked to interrupt: Claude's cannot answer.
-      const adapter: ProviderAdapter.ProviderAdapterV2["Service"] =
-        mode === "pooled"
-          ? base
-          : {
-              ...base,
-              openSession: (input) =>
-                base.openSession(input).pipe(
-                  Effect.map((session) => ({
-                    ...session,
-                    interruptTurn: () => Effect.die("an exclusive handoff must not interrupt"),
-                  })),
-                ),
-            };
+      const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+        ...base,
+        openSession: (input) =>
+          base.openSession(input).pipe(
+            Effect.map((session) => ({
+              ...session,
+              startTurn: (turn) =>
+                session
+                  .startTurn(turn)
+                  .pipe(
+                    Effect.tap(() =>
+                      turn.runtimePolicy.cwd === handoffCwd
+                        ? Deferred.succeed(continuationStarted, undefined)
+                        : Effect.void,
+                    ),
+                  ),
+              ...(mode === "exclusive"
+                ? { interruptTurn: () => Effect.die("an exclusive handoff must not interrupt") }
+                : {}),
+            })),
+          ),
+      };
       const layerRegistry = ProviderAdapterRegistry.layerSingle(adapter);
 
       const projection = yield* Effect.gen(function* () {
@@ -537,9 +549,9 @@ it.live.each(["pooled", "exclusive"] as const)(
             Stream.filter(
               (event) =>
                 event.type === "run.updated" &&
-                event.payload.status !== "running" &&
+                event.payload.ordinal === 1 &&
                 event.payload.status !== "queued" &&
-                event.payload.status !== "starting",
+                !isActiveRun(event.payload),
             ),
             Stream.take(1),
             Stream.runDrain,
@@ -565,6 +577,7 @@ it.live.each(["pooled", "exclusive"] as const)(
           ["queued"],
         );
         yield* Fiber.join(settled);
+        yield* Deferred.await(continuationStarted);
         yield* worker.drain();
         return yield* orchestrator.getThreadProjection(threadId);
       }).pipe(
