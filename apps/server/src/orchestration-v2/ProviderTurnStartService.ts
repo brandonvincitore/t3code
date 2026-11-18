@@ -1221,7 +1221,9 @@ export const layer: Layer.Layer<
       };
       let resumedRetryHandoff: Effect.Success<ReturnType<typeof prepareRetryHandoff>> | undefined;
       let resumedHandoffContext: ReturnType<typeof handoffContextForThread> | undefined;
-      let resumedBudget: Effect.Effect<number> | undefined;
+      let resumedBudget:
+        | ReturnType<ReturnType<typeof handoffContextForThread>["budgetWithAttachments"]>
+        | undefined;
       let portableForkFallback: OrchestrationV2ContextHandoff | undefined;
       let recoveryTurnItem: OrchestrationV2TurnItem | undefined;
       const loadedProviderThread = yield* Effect.gen(function* () {
@@ -1466,13 +1468,14 @@ export const layer: Layer.Layer<
           const context = handoffContextForThread(resumed.success);
           resumedHandoffContext = context;
           resumedRetryHandoff = yield* prepareRetryHandoff(context);
-          resumedBudget = yield* Effect.cached(
+          const budget = yield* Effect.cached(
             context.budgetWithAttachments(resumedRetryHandoff.attachments),
           );
+          resumedBudget = budget;
           const fits = yield* deliverContextHandoffs({
             handoffs: [...handoffs, ...resumedRetryHandoff.handoffs],
             providerThread: { ...resumed.success, id: providerThread.id },
-            budget: resumedBudget,
+            budget,
             deferInline: isCompactionCommandMessage(providerMessage) || goalCommand,
             alreadyDeliveredItemIds: context.deliveredItemIds,
             persist: () => Effect.void,
