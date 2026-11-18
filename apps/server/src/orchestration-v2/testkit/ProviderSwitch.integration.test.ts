@@ -553,6 +553,7 @@ describe("orchestration v2 provider switching", () => {
     "imported-prior-images-fallback",
     "prior-images-telemetry-native",
     "prior-images-unsent-native",
+    "prior-images-unsent-room-native",
     "prior-images-legacy-replacement-native",
     "delivery-write-failure",
   ] as const)("preserves handoffs through %s", (scenario) =>
@@ -644,7 +645,11 @@ describe("orchestration v2 provider switching", () => {
               : scenario === "large-current-input" || priorImages || exhaustedTarget
                 ? {
                     getModelContextWindow: () =>
-                      scenario.includes("target-tight") ? 18_241 : 32_000,
+                      scenario.includes("target-tight")
+                        ? 18_241
+                        : scenario.includes("unsent-room")
+                          ? 40_000
+                          : 32_000,
                   }
                 : {}),
           ...(scenario.endsWith("-native") || scenario === "large-current-input"
@@ -1013,7 +1018,6 @@ describe("orchestration v2 provider switching", () => {
           return;
         }
         if (priorImages) {
-          const handoff = projection.contextHandoffs.at(-1)!;
           const context = scenario.endsWith("-native")
             ? yield* encodeJson(yield* Ref.get(injectedHistory))
             : (yield* Ref.get(capturedTurns)).at(-1)!.text;
@@ -1021,7 +1025,7 @@ describe("orchestration v2 provider switching", () => {
             turnUsageScenario ||
             scenario.startsWith("imported") ||
             scenario.includes("telemetry") ||
-            scenario.includes("unsent") ||
+            scenario.includes("unsent-room") ||
             replaceNative;
           const sourceText =
             `${replaceNative ? "Another" : "New"} source constraint ` + "q".repeat(9_000);
@@ -1029,23 +1033,27 @@ describe("orchestration v2 provider switching", () => {
             (item) => item.type === "user_message" && item.text === sourceText,
           )!;
           assert.isDefined(sourceItem);
+          const deliveryRun = scenario.includes("retry")
+            ? projection.runs.find((run) => run.ordinal === targetOrdinal)!
+            : projection.runs.at(-1)!;
+          const deliveries = projection.contextHandoffs
+            .filter((record) => record.targetRunId === deliveryRun.id)
+            .flatMap((record) => (record.delivery === undefined ? [] : [record.delivery]));
           if (shouldFit) {
             assert.include(context, sourceText);
             assert.include(
-              projection.contextHandoffs
-                .filter(
-                  (record) =>
-                    record.targetRunId ===
-                    (scenario.includes("retry")
-                      ? projection.runs.find((run) => run.ordinal === targetOrdinal)!.id
-                      : projection.runs.at(-1)!.id),
-                )
-                .flatMap((record) => record.delivery?.itemIds ?? []),
+              deliveries.flatMap((delivery) => delivery.itemIds),
               sourceItem.id,
             );
           } else {
             assert.notInclude(context, "q".repeat(9_000));
-            assert.isAbove(handoff.delivery!.omittedItemIds!.length, 0);
+            assert.include(
+              deliveries.flatMap((delivery) => delivery.omittedItemIds ?? []),
+              sourceItem.id,
+            );
+          }
+          if (scenario.includes("unsent")) {
+            assert.deepEqual((yield* Ref.get(capturedTurns)).at(-1)!.attachments, [screenshot]);
           }
           const latestRun = projection.runs.at(-1)!;
           const latestAttempt = projection.attempts.find(
@@ -2354,14 +2362,31 @@ describe("orchestration v2 provider switching", () => {
       false,
       true,
     ],
-  ] as const)("retains missed images after %s", ([, refusalCause, inject, loseSession]) =>
+    [
+      "background work followed by a buffered wake",
+      new ClaudeBackgroundWorkBlocksQueryReplacementError(),
+      false,
+      false,
+      true,
+    ],
+    [
+      "background work near the context limit",
+      new ClaudeBackgroundWorkBlocksQueryReplacementError(),
+      false,
+      false,
+      false,
+      true,
+    ],
+  ] as const)("retains missed images after %s", (scenario) =>
     Effect.gen(function* () {
+      const [, refusalCause, inject, loseSession, wake, nearLimit] = scenario;
       const cwd = yield* checkpointWorkspace("refused-start-keeps-native");
       const failResumeOnce = yield* Ref.make(false);
       const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
       const injectedHistory = yield* Ref.make<ReadonlyArray<unknown>>([]);
       const refuseStarts = yield* Ref.make(0);
       const generation = yield* Ref.make(0);
+      const largeRequest = "x".repeat(3_200);
       const registry = ProviderAdapterRegistry.layerFromAdapters([
         makeTestAdapter({
           instanceId: CLAUDE_MODEL_SELECTION.instanceId,
@@ -2374,6 +2399,7 @@ describe("orchestration v2 provider switching", () => {
           refusalCause,
           failResumeOnce,
           nativeThreadGeneration: generation,
+          ...(nearLimit ? { getModelContextWindow: () => 20_000 } : {}),
           ...(inject === true ? { injectedHistory } : {}),
         }),
       ]);
@@ -2387,18 +2413,30 @@ describe("orchestration v2 provider switching", () => {
           mimeType: "image/png",
           sizeBytes: 100_000,
         };
-        const run = Effect.fn("run")(function* (ordinal: number) {
+        const run = Effect.fn("run")(function* (ordinal: number, buffered = false) {
           yield* orchestrator.dispatch({
             type: "message.dispatch",
             commandId: CommandId.make(`refused-start:${ordinal}`),
             threadId,
             messageId: MessageId.make(`refused-start:${ordinal}`),
-            createdBy: "user",
-            creationSource: "web",
-            text: `Request ${ordinal}`,
+            createdBy: buffered ? "agent" : "user",
+            creationSource: buffered ? "provider" : "web",
+            ...(buffered
+              ? {
+                  notification: {
+                    source: { kind: "background_task" as const },
+                    outcome: "updated" as const,
+                    summary: "Background activity updated",
+                  },
+                }
+              : {}),
+            text:
+              nearLimit && ordinal === 2
+                ? `Request ${ordinal} ${largeRequest}`
+                : `Request ${ordinal}`,
             attachments: ordinal === 2 ? [missedImage] : [],
             modelSelection: CLAUDE_MODEL_SELECTION,
-            dispatchMode: { type: "start_immediately" },
+            dispatchMode: { type: buffered ? "queue_after_active" : "start_immediately" },
           });
           yield* orchestrator.streamStoredEvents.pipe(
             Stream.filter(
@@ -2431,18 +2469,25 @@ describe("orchestration v2 provider switching", () => {
         assert.equal(yield* run(2), "failed");
         assert.equal(yield* run(3), "failed");
         yield* Ref.set(failResumeOnce, loseSession === true);
-        assert.equal(yield* run(4), "completed");
+        assert.equal(yield* run(4, wake === true), "completed");
+        if (wake) assert.equal(yield* run(5), "completed");
 
         const turns = yield* Ref.get(capturedTurns);
-        assert.equal(turns.length, 2);
+        assert.equal(turns.length, wake ? 3 : 2);
+        if (wake) {
+          assert.equal(turns[1]?.text, "Request 4");
+          assert.deepEqual(turns[1]?.attachments, []);
+        }
+        const deliveredTurn = turns.at(-1);
         assert.equal(yield* Ref.get(generation), loseSession === true ? 2 : 1);
         if (loseSession !== true) {
-          assert.equal(turns[1]?.nativeThreadId, turns[0]?.nativeThreadId);
+          assert.equal(deliveredTurn?.nativeThreadId, turns[0]?.nativeThreadId);
         }
-        const delivered = `${turns[1]?.text}${JSON.stringify(yield* Ref.get(injectedHistory))}`;
-        assert.include(delivered, "Request 2");
+        const delivered = `${deliveredTurn?.text}${JSON.stringify(yield* Ref.get(injectedHistory))}`;
+        if (nearLimit) assert.notInclude(delivered, largeRequest);
+        else assert.include(delivered, "Request 2");
         assert.include(delivered, "Request 3");
-        assert.deepEqual(turns[1]?.attachments, [missedImage]);
+        assert.deepEqual(deliveredTurn?.attachments, [missedImage]);
       }).pipe(
         Effect.provide(
           ProviderReplayHarness.layerWithRegistry(
@@ -5578,13 +5623,16 @@ describe("orchestration v2 provider switching", () => {
     "immediately",
     "behind a running turn",
     "after a cancelled queued switch",
+    "after fresh context",
   ] as const)(
     "hands a portable fork's inherited conversation to a provider switched %s",
     (variant) =>
       Effect.gen(function* () {
-        const queued = variant !== "immediately";
+        const fresh = variant === "after fresh context";
+        const queued =
+          variant === "behind a running turn" || variant === "after a cancelled queued switch";
         const cancelled = variant === "after a cancelled queued switch";
-        const key = cancelled ? "cancelled" : queued ? "queued" : "immediate";
+        const key = fresh ? "fresh" : cancelled ? "cancelled" : queued ? "queued" : "immediate";
         const cwd = yield* checkpointWorkspace(`fork-switch-history-${key}`);
         const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
         const started = yield* Deferred.make<void>();
@@ -5595,7 +5643,9 @@ describe("orchestration v2 provider switching", () => {
             driver: CODEX_DRIVER,
             capabilities: CodexProviderCapabilitiesV2,
             modelSelection: CODEX_MODEL_SELECTION,
-            responseByRunOrdinal: { 1: "The release marker is violet." },
+            responseByRunOrdinal: fresh
+              ? { 1: "Previous context is private.", 2: "The release marker is violet." }
+              : { 1: "The release marker is violet." },
             capturedTurns,
           }),
           makeTestAdapter({
@@ -5613,7 +5663,12 @@ describe("orchestration v2 provider switching", () => {
         yield* Effect.gen(function* () {
           const orchestrator = yield* Orchestrator.OrchestratorV2;
           const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-          const send = (threadId: ThreadId, name: string, modelSelection: ModelSelection) =>
+          const send = (
+            threadId: ThreadId,
+            name: string,
+            modelSelection: ModelSelection,
+            freshContext = false,
+          ) =>
             orchestrator.dispatch({
               type: "message.dispatch",
               createdBy: "user",
@@ -5624,6 +5679,7 @@ describe("orchestration v2 provider switching", () => {
               text: `Prompt ${name}`,
               attachments: [],
               modelSelection,
+              ...(freshContext ? { freshContext: true } : {}),
               dispatchMode: { type: "start_immediately" },
             });
           const settle = (threadId: ThreadId) =>
@@ -5645,7 +5701,11 @@ describe("orchestration v2 provider switching", () => {
             branch: null,
             worktreePath: null,
           });
-          yield* send(sourceThreadId, "source", CODEX_MODEL_SELECTION);
+          if (fresh) {
+            yield* send(sourceThreadId, "discarded", CODEX_MODEL_SELECTION);
+            yield* settle(sourceThreadId);
+          }
+          yield* send(sourceThreadId, "source", CODEX_MODEL_SELECTION, fresh);
           const source = yield* settle(sourceThreadId);
           yield* orchestrator.dispatch({
             type: "thread.fork",
@@ -5654,7 +5714,7 @@ describe("orchestration v2 provider switching", () => {
             commandId: CommandId.make(`command:fork-switch-history:${key}:fork`),
             sourceThreadId,
             targetThreadId: forkThreadId,
-            sourcePoint: { type: "run", runId: source.runs[0]!.id },
+            sourcePoint: { type: "run", runId: source.runs.at(-1)!.id },
             title: "Fork",
           });
           // A first turn on another provider resolves the fork through portable context.
@@ -5694,6 +5754,12 @@ describe("orchestration v2 provider switching", () => {
           const turnFor = (name: string) =>
             turns.find((turn) => turn.text.endsWith(`Prompt ${name}`))!.text;
           const switched = turnFor("fork-codex");
+          if (fresh) {
+            for (const text of [turnFor("fork-claude"), switched]) {
+              assert.notInclude(text, "Prompt discarded");
+              assert.notInclude(text, "Previous context is private.");
+            }
+          }
           // The switched provider gets the conversation the fork shows, oldest first.
           assert.include(switched, "Prompt source");
           const positions = ["Prompt source", "release marker is violet", "Prompt fork-claude"].map(

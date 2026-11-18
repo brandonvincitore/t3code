@@ -58,6 +58,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import { unsentManualContinuationSource } from "./manualContinuation.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import { isBufferedProviderNotification } from "./NotificationMailbox.ts";
 import {
   ContextHandoffBackgroundWorkError,
   knownProviderFailureMessage,
@@ -556,6 +557,7 @@ export const layer: Layer.Layer<
           ? projection.messages.find((source) => source.id === resumeSource.userMessageId)
           : undefined;
       const providerMessage = unsentResumeMessage ?? message;
+      const bufferedWake = isBufferedProviderNotification(providerMessage);
       const settleStartFailure = Effect.fn("ProviderTurnStartService.settleStartFailure")(
         function* (failed: {
           readonly signal: string;
@@ -1055,23 +1057,26 @@ export const layer: Layer.Layer<
           legacyInputRunIds,
           missedRuns,
           missedRunIds,
-          budget: Effect.gen(function* () {
-            return handoffBudget({
-              tokenCap,
-              modelContextWindow,
-              userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
-              attachments: providerMessage.attachments,
-              providerThread: budgetProviderThread,
-              nativeContextEstimate:
-                budgetProviderThread.contextUsage?.usedTokens === undefined
-                  ? yield* nativeContextEstimate
-                  : 0,
-            });
-          }),
+          budgetWithAttachments: Effect.fn("ProviderTurnStartService.budgetWithAttachments")(
+            function* (attachments: typeof providerMessage.attachments) {
+              return handoffBudget({
+                tokenCap,
+                modelContextWindow,
+                userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
+                attachments: [...attachments, ...providerMessage.attachments],
+                providerThread: budgetProviderThread,
+                nativeContextEstimate:
+                  budgetProviderThread.contextUsage?.usedTokens === undefined
+                    ? yield* nativeContextEstimate
+                    : 0,
+              });
+            },
+          ),
         };
       };
       const prepareRetryHandoff = Effect.fn("ProviderTurnStartService.prepareRetryHandoff")(
         function* (context: ReturnType<typeof handoffContextForThread>) {
+          if (bufferedWake) return { handoffs: [], attachments: [] };
           const { missedRunIds, coveredItemIds, missedRuns, acceptedAttempts } = context;
           const missedHistory =
             missedRunIds.size === 0
@@ -1106,6 +1111,9 @@ export const layer: Layer.Layer<
                     createdAt: yield* DateTime.now,
                   }),
                 ];
+          if (goalCommand || isCompactionCommandMessage(providerMessage)) {
+            return { handoffs, attachments: [] };
+          }
           // History delivery (inline or injected) is text only, so missed images ride on prompts
           // until a later run's is accepted. Compaction and /goal starts carry none. A missed run's
           // own accepted attempt predates its unsent steering input, so it does not count.
@@ -1120,11 +1128,13 @@ export const layer: Layer.Layer<
               return source === undefined ||
                 (message !== undefined &&
                   (isCompactionCommandMessage(message) ||
+                    isBufferedProviderNotification(message) ||
                     (goalDriver && parseGoalCommand(message) !== null)))
                 ? []
                 : [source.ordinal];
             }),
           );
+          const currentAttachmentIds = new Set(providerMessage.attachments.map(({ id }) => id));
           const attachments = missedHistory.flatMap((item) =>
             item.type === "user_message" &&
             missedRuns.some(
@@ -1133,7 +1143,12 @@ export const layer: Layer.Layer<
               ? item.attachments
               : [],
           );
-          return { handoffs, attachments };
+          const carriedAttachments = new Map(
+            attachments
+              .filter(({ id }) => !currentAttachmentIds.has(id))
+              .map((attachment) => [attachment.id, attachment]),
+          );
+          return { handoffs, attachments: [...carriedAttachments.values()] };
         },
       );
       const prepareRecoveryHandoff = Effect.fn("ProviderTurnStartService.prepareRecoveryHandoff")(
@@ -1194,6 +1209,9 @@ export const layer: Layer.Layer<
       };
       let resumedRetryHandoff: Effect.Success<ReturnType<typeof prepareRetryHandoff>> | undefined;
       let resumedHandoffContext: ReturnType<typeof handoffContextForThread> | undefined;
+      let resumedBudget:
+        | ReturnType<ReturnType<typeof handoffContextForThread>["budgetWithAttachments"]>
+        | undefined;
       let portableForkFallback: OrchestrationV2ContextHandoff | undefined;
       let recoveryTurnItem: OrchestrationV2TurnItem | undefined;
       const loadedProviderThread = yield* Effect.gen(function* () {
@@ -1314,9 +1332,11 @@ export const layer: Layer.Layer<
             }),
           );
           if (loaded === undefined) return undefined;
-          portableForkFallback = handoff;
-          effectiveHandoffs = [handoff, ...effectiveHandoffs];
-          yield* eventSink.write({
+          const forkWrite = yield* eventSink.writeIfRunCurrent({
+            threadId: projection.thread.id,
+            runId: run.id,
+            activeAttemptId: attempt.id,
+            expectedStatus: "starting",
             events: [
               {
                 id: yield* idAllocator.allocate.event({ threadId: projection.thread.id }),
@@ -1384,6 +1404,9 @@ export const layer: Layer.Layer<
                   ]),
             ],
           });
+          if (!forkWrite.committed) return undefined;
+          portableForkFallback = handoff;
+          effectiveHandoffs = [handoff, ...effectiveHandoffs];
           return loaded;
         }
         if (providerThread.nativeThreadRef === null) {
@@ -1491,14 +1514,18 @@ export const layer: Layer.Layer<
                 ].every((itemId) => nativeImportItemIds.has(itemId)),
             );
           }
+          if (bufferedWake) return resumed.success;
           const context = handoffContextForThread(resumed.success);
-          context.budget = yield* Effect.cached(context.budget);
           resumedHandoffContext = context;
           resumedRetryHandoff = yield* prepareRetryHandoff(context);
+          const budget = yield* Effect.cached(
+            context.budgetWithAttachments(resumedRetryHandoff.attachments),
+          );
+          resumedBudget = budget;
           const fits = yield* deliverContextHandoffs({
             handoffs: [...effectiveHandoffs, ...resumedRetryHandoff.handoffs],
             providerThread: { ...resumed.success, id: providerThread.id },
-            budget: context.budget,
+            budget,
             deferInline: isCompactionCommandMessage(providerMessage) || goalCommand,
             alreadyDeliveredItemIds: context.deliveredItemIds,
             persist: () => Effect.void,
@@ -1513,7 +1540,7 @@ export const layer: Layer.Layer<
           const fitsFresh = yield* deliverContextHandoffs({
             handoffs: withRecoveryHandoff(handoff),
             providerThread: freshThread,
-            budget: freshContext.budget,
+            budget: freshContext.budgetWithAttachments(resumedRetryHandoff.attachments),
             alreadyDeliveredItemIds: freshContext.deliveredItemIds,
             persist: () => Effect.void,
           }).pipe(
@@ -1544,6 +1571,7 @@ export const layer: Layer.Layer<
         }
         resumedHandoffContext = undefined;
         resumedRetryHandoff = undefined;
+        resumedBudget = undefined;
         nativeImportItemIds = new Set();
         effectiveHandoffs = handoffs;
         if (!(yield* isCurrentAttemptInStatus("starting"))) return undefined;
@@ -1704,7 +1732,6 @@ export const layer: Layer.Layer<
         acceptedAttempts,
         nativeInputRunIds,
         legacyInputRunIds,
-        budget,
       } = handoffContext;
       if (manualResume && unsentResumeMessage === undefined && session.resumeTurn === undefined) {
         yield* settleStartFailure({
@@ -1718,6 +1745,8 @@ export const layer: Layer.Layer<
         return;
       }
       const retryHandoff = resumedRetryHandoff ?? (yield* prepareRetryHandoff(handoffContext));
+      const budget =
+        resumedBudget ?? handoffContext.budgetWithAttachments(retryHandoff.attachments);
       const runningProviderThread: OrchestrationV2ProviderThread = {
         ...loadedProviderThread,
         contextUsage: handoffUsage,
@@ -1930,13 +1959,7 @@ export const layer: Layer.Layer<
           const startInput = noteContinuation ? promptedInput : turnInput;
           const { resume: _resume, ...contextInput } = startInput;
           const { message: resumeMessage, resume: _resumeIntent, ...resumeInput } = startInput;
-          const missedAttachments =
-            compact || goalCommand
-              ? []
-              : retryHandoff.attachments.filter(
-                  (missed) =>
-                    !turnInput.message.attachments.some((current) => current.id === missed.id),
-                );
+          const missedAttachments = compact ? [] : retryHandoff.attachments;
           // Like pending history, pending images need a prompt; native resume carries none.
           const prompted = context !== "" || missedAttachments.length > 0;
           const operation = Effect.suspend(() =>
@@ -2017,12 +2040,13 @@ export const layer: Layer.Layer<
         ),
       );
       const deliverySession =
-        effectiveHandoffs.length === 0 &&
-        retryHandoff.handoffs.length === 0 &&
-        retryHandoff.attachments.length === 0 &&
-        sideChatHandoff === undefined &&
-        restartNote === "" &&
-        !noteContinuation
+        bufferedWake ||
+        (effectiveHandoffs.length === 0 &&
+          retryHandoff.handoffs.length === 0 &&
+          retryHandoff.attachments.length === 0 &&
+          sideChatHandoff === undefined &&
+          restartNote === "" &&
+          !noteContinuation)
           ? session
           : makeDeliverySession(session, startWithHandoffs);
       return runExecution.startRootRun({

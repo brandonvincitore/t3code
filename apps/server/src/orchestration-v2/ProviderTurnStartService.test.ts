@@ -496,6 +496,7 @@ function makeLocalCommandHarness(input: {
     readonly acceptedResume?: boolean;
     readonly restartedResume?: boolean;
     readonly nativeForkFrom?: "idle" | "busy";
+    readonly stopDuringFallback?: boolean;
     readonly switchedProvider?: boolean;
     readonly threadRuntimeMode?: OrchestrationV2ThreadProjection["thread"]["runtimeMode"];
   };
@@ -1142,7 +1143,11 @@ function makeLocalCommandHarness(input: {
   const sideChatSession = {
     driver: providerThread.driver,
     providerSession,
-    ensureThread: () => Effect.succeed(sideChatThread),
+    ensureThread: () =>
+      Effect.sync(() => {
+        if (input.sideChat?.stopDuringFallback) interruptRun();
+        return sideChatThread;
+      }),
     resumeThread: () => Effect.succeed(sideChatThread),
     forkThread,
     startTurn,
@@ -2305,27 +2310,42 @@ effectIt.effect.each([
 );
 
 effectIt.effect.each([
-  { nativeForkFrom: "idle", forks: true, transferStatus: "consumed", handoffIds: [] },
+  {
+    nativeForkFrom: "idle",
+    stopDuringFallback: false,
+    forks: true,
+    transferStatus: "consumed",
+    handoffIds: [],
+  },
   {
     nativeForkFrom: "busy",
+    stopDuringFallback: false,
     forks: false,
     transferStatus: "resolved_portable",
     handoffIds: ["side-chat-fork-context"],
   },
   {
     nativeForkFrom: "busy",
+    stopDuringFallback: true,
+    forks: false,
+    transferStatus: "pending",
+    handoffIds: [],
+  },
+  {
+    nativeForkFrom: "busy",
     canForkWhileSourceRunning: true,
+    stopDuringFallback: false,
     forks: true,
     transferStatus: "consumed",
     handoffIds: [],
   },
 ] as const)(
   "runs a planned native side chat fork when the parent is $nativeForkFrom (fork while running: $canForkWhileSourceRunning)",
-  ({ nativeForkFrom, forks, transferStatus, handoffIds, ...capability }) =>
+  ({ nativeForkFrom, forks, transferStatus, handoffIds, stopDuringFallback, ...capability }) =>
     Effect.gen(function* () {
       const harness = makeLocalCommandHarness({
         text: "What is the main thread doing?",
-        sideChat: { contextRun: "current", nativeForkFrom },
+        sideChat: { contextRun: "current", nativeForkFrom, stopDuringFallback },
         ...capability,
       });
 
@@ -2339,9 +2359,16 @@ effectIt.effect.each([
       expect(harness.projection().contextTransfers).toMatchObject([
         { id: "side-chat-fork", status: transferStatus },
       ]);
-      expect(harness.startTurn.mock.calls[0]?.[0].message.text.includes("PARENT_HISTORY")).toBe(
-        !forks,
-      );
+      if (stopDuringFallback) {
+        expect(harness.startTurn).not.toHaveBeenCalled();
+        expect(harness.projection().contextHandoffs.map((handoff) => handoff.id)).toEqual([
+          "side-chat-context",
+        ]);
+      } else {
+        expect(harness.startTurn.mock.calls[0]?.[0].message.text.includes("PARENT_HISTORY")).toBe(
+          !forks,
+        );
+      }
       expect(harness.projection().providerThreads[0]?.handoffIds).toEqual(handoffIds);
     }),
 );
