@@ -372,11 +372,11 @@ export function isRestartNoteContinuation(
   );
 }
 
-/** Derive delivery from later completed turns on the same provider thread, excluding compactions, resumes, and rolled-back runs. */
+/** Derive delivery from later completed turns on the same provider thread, excluding unprompted runs, native resumes and rollbacks. */
 export function pendingRestartCancelledBackgroundWork(input: {
   readonly runs: ReadonlyArray<OrchestrationV2Run>;
   readonly providerTurns: ReadonlyArray<ProviderTurnState>;
-  readonly compactionMessageIds: ReadonlySet<string>;
+  readonly unpromptedMessageIds: ReadonlySet<string>;
   readonly run: Pick<
     OrchestrationV2Run,
     | "id"
@@ -390,11 +390,11 @@ export function pendingRestartCancelledBackgroundWork(input: {
 
   readonly attempts: ReadonlyArray<Attempt>;
 }): ReadonlyArray<Work> {
-  const isCompaction = (run: typeof input.run) => input.compactionMessageIds.has(run.userMessageId);
+  const isUnprompted = (run: typeof input.run) => input.unpromptedMessageIds.has(run.userMessageId);
   if (
     input.run.providerThreadId === null ||
     input.run.restartContinuationOfRunId !== undefined ||
-    isCompaction(input.run)
+    isUnprompted(input.run)
   )
     return [];
   const providerThreadId = input.run.providerThreadId;
@@ -413,7 +413,7 @@ export function pendingRestartCancelledBackgroundWork(input: {
         input.attempts.some(
           (attempt) => attempt.runId === candidate.id && deliveredAttemptIds.has(attempt.id),
         )) &&
-      !isCompaction(candidate) &&
+      !isUnprompted(candidate) &&
       (candidate.restartContinuationOfRunId === undefined ||
         isRestartNoteContinuation(candidate, input.runs, input.providerTurns, input.attempts)),
   );

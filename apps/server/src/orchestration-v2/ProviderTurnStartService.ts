@@ -955,11 +955,12 @@ export const layer: Layer.Layer<
       const restartCancelledWork = pendingRestartCancelledBackgroundWork({
         runs: projection.runs,
         providerTurns: projection.providerTurns,
-        compactionMessageIds: new Set(
+        unpromptedMessageIds: new Set(
           projection.messages
             .filter(
               (candidate) =>
                 isCompactionCommandMessage(candidate) ||
+                isBufferedProviderNotification(candidate) ||
                 (goalDriver && parseGoalCommand(candidate) !== null),
             )
             .map((candidate) => candidate.id),
