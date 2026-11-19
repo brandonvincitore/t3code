@@ -2736,6 +2736,24 @@ describe("orchestration v2 provider switching", () => {
           worktreePath: null,
         });
         assert.equal(yield* run(1), "completed");
+        if (wake && loseSession) {
+          const source = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+          yield* (yield* EventSink.EventSinkV2).write({
+            events: [
+              {
+                id: EventId.make("refused-start:cancelled-background"),
+                type: "run.updated",
+                threadId,
+                runId: source.id,
+                occurredAt: source.completedAt!,
+                payload: {
+                  ...source,
+                  restartCancelledBackgroundWork: [{ kind: "subagent", label: "Review worker" }],
+                },
+              },
+            ],
+          });
+        }
         yield* Ref.set(refuseStarts, 2);
         assert.equal(yield* run(2), "failed");
         assert.equal(yield* run(3), "failed");
@@ -2755,7 +2773,10 @@ describe("orchestration v2 provider switching", () => {
           assert.equal(deliveredTurn?.nativeThreadId, turns[0]?.nativeThreadId);
         }
         const delivered = `${deliveredTurn?.text}${JSON.stringify(yield* Ref.get(injectedHistory))}`;
-        if (wake && loseSession) assert.include(delivered, "Request 1");
+        if (wake && loseSession) {
+          assert.include(delivered, "Request 1");
+          assert.include(deliveredTurn?.text ?? "", "- subagent: Review worker");
+        }
         if (nearLimit) assert.notInclude(delivered, largeRequest);
         else assert.include(delivered, "Request 2");
         assert.include(delivered, "Request 3");
