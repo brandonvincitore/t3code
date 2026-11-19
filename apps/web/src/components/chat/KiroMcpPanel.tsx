@@ -3,9 +3,10 @@ import type {
   KiroMcpBeginSignInResult,
   KiroMcpStatus,
 } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { useEffect, useRef, useState } from "react";
 
-import { writeTextToClipboard } from "../../hooks/useCopyToClipboard";
+import { namedClipboardTarget, writeTextToClipboard } from "../../hooks/useCopyToClipboard";
 import { useStableCallback } from "../../hooks/useStableCallback";
 
 import { Button } from "../ui/button";
@@ -29,6 +30,7 @@ export function KiroMcpPanel({
   readonly openAuthorizationUrl: (url: string) => Promise<void>;
   readonly refresh: () => Promise<void>;
 }) {
+  const gt = useGT();
   const [authorizationUrl, setAuthorizationUrl] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
   const previousStatus = useRef(status);
@@ -79,7 +81,7 @@ export function KiroMcpPanel({
       if (generation.current === current) setAuthorizationUrl(result.url);
     } catch {
       if (generation.current === current) {
-        setError("Could not start MCP sign-in. Refresh the status and try again.");
+        setError(gt("Could not start MCP sign-in. Refresh the status and try again."));
         await refresh().catch(() => {});
       }
     }
@@ -97,7 +99,7 @@ export function KiroMcpPanel({
       if (current) await cancelSignIn(current);
       await refresh();
     } catch {
-      setError("The sign-in page was dismissed. Refresh to check the Kiro connection attempt.");
+      setError(gt("The sign-in page was dismissed. Refresh to check the Kiro connection attempt."));
     }
   }
 
@@ -107,10 +109,12 @@ export function KiroMcpPanel({
     const current = generation.current;
     try {
       await openAuthorizationUrl(url);
-      if (generation.current === current) setFeedback("Sign-in page opened.");
+      if (generation.current === current) setFeedback(gt("Sign-in page opened."));
     } catch {
       if (generation.current === current)
-        setError("Could not open the sign-in page. Copy the sign-in link or try opening it again.");
+        setError(
+          gt("Could not open the sign-in page. Copy the sign-in link or try opening it again."),
+        );
     }
   }
 
@@ -118,33 +122,35 @@ export function KiroMcpPanel({
     if (!authorizationUrl || !canManage || !isLocalEnvironment) return;
     const current = generation.current;
     try {
-      await writeTextToClipboard(authorizationUrl, "MCP sign-in link");
-      if (generation.current === current) setFeedback("Sign-in link copied.");
+      await writeTextToClipboard(authorizationUrl, namedClipboardTarget("MCP sign-in link"));
+      if (generation.current === current) setFeedback(gt("Sign-in link copied."));
     } catch {
-      if (generation.current === current) setError("Could not copy the sign-in link.");
+      if (generation.current === current) setError(gt("Could not copy the sign-in link."));
     }
   }
 
   return (
-    <section aria-label="Kiro MCP servers" className="flex flex-col gap-3 text-sm">
+    <section aria-label={gt("Kiro MCP servers")} className="flex flex-col gap-3 text-sm">
       <div className="flex items-center justify-between gap-3">
-        <span className="font-medium">Kiro MCP servers</span>
+        <span className="font-medium">{gt("Kiro MCP servers")}</span>
         <Button
           variant="outline"
           size="sm"
           onClick={() => {
-            void refresh().catch(() => setError("Could not refresh MCP status."));
+            void refresh().catch(() => setError(gt("Could not refresh MCP status.")));
           }}
         >
-          Refresh
+          <T>Refresh</T>
         </Button>
       </div>
       {!status.reported ? (
         <p className="text-muted-foreground">
-          Kiro has not reported MCP status for this session yet.
+          <T>Kiro has not reported MCP status for this session yet.</T>
         </p>
       ) : status.servers.length === 0 ? (
-        <p className="text-muted-foreground">Kiro reported no MCP servers in this session.</p>
+        <p className="text-muted-foreground">
+          <T>Kiro reported no MCP servers in this session.</T>
+        </p>
       ) : (
         status.servers.map((server) => (
           <div key={server.name} className="flex items-center justify-between gap-3">
@@ -152,10 +158,14 @@ export function KiroMcpPanel({
               <span>{server.name}</span>
               <p className="text-muted-foreground">
                 {server.failedAuthorization
-                  ? "Authorization needed"
+                  ? gt("Authorization needed")
                   : server.status === "pending"
-                    ? "Connecting"
-                    : server.status.charAt(0).toUpperCase() + server.status.slice(1)}
+                    ? gt("Connecting")
+                    : server.status === "connected"
+                      ? gt("Connected")
+                      : server.status === "failed"
+                        ? gt("Failed")
+                        : gt("Disabled")}
               </p>
             </div>
             {server.failedAuthorization && server.status === "failed" && status.canSignIn ? (
@@ -167,7 +177,7 @@ export function KiroMcpPanel({
                   void signIn(server.name);
                 }}
               >
-                Sign in / reconnect
+                <T>Sign in / reconnect</T>
               </Button>
             ) : null}
           </div>
@@ -175,21 +185,31 @@ export function KiroMcpPanel({
       )}
       {status.servers.some((server) => server.failedAuthorization) && !status.canSignIn ? (
         <p className="text-muted-foreground">
-          MCP sign-in is unavailable in this connection. Update Kiro CLI on its server and start a
-          new session, then retry here. CLI MCP credentials are separate from T3.
+          <T>
+            MCP sign-in is unavailable in this connection. Update Kiro CLI on its server and start a
+            new session, then retry here. CLI MCP credentials are separate from T3.
+          </T>
         </p>
       ) : null}
       {!isLocalEnvironment ? (
         <p className="text-muted-foreground">
-          MCP sign-in must finish in a browser on the machine running Kiro. Remote callback
-          forwarding is not supported. Open this T3 server through localhost on that machine and
-          start sign-in there. CLI MCP credentials are separate from T3.
+          <T>
+            MCP sign-in must finish in a browser on the machine running Kiro. Remote callback
+            forwarding is not supported. Open this T3 server through localhost on that machine and
+            start sign-in there. CLI MCP credentials are separate from T3.
+          </T>
         </p>
       ) : null}
-      {pending ? <p role="status">Waiting for a fresh sign-in page from Kiro…</p> : null}
+      {pending ? (
+        <p role="status">
+          <T>Waiting for a fresh sign-in page from Kiro…</T>
+        </p>
+      ) : null}
       {authorizationUrl ? (
         <div className="flex flex-col gap-2">
-          <p>Continue in your browser to authorize this MCP server.</p>
+          <p>
+            <T>Continue in your browser to authorize this MCP server.</T>
+          </p>
           <div className="flex flex-wrap gap-2">
             <Button
               size="sm"
@@ -198,7 +218,7 @@ export function KiroMcpPanel({
                 void open();
               }}
             >
-              Open sign-in page
+              <T>Open sign-in page</T>
             </Button>
             <Button
               variant="outline"
@@ -208,7 +228,7 @@ export function KiroMcpPanel({
                 void copy();
               }}
             >
-              Copy sign-in link
+              <T>Copy sign-in link</T>
             </Button>
           </div>
         </div>
@@ -224,17 +244,19 @@ export function KiroMcpPanel({
                 void dismiss();
               }}
             >
-              Dismiss sign-in
+              <T>Dismiss sign-in</T>
             </Button>
           </div>
           <p className="text-muted-foreground">
-            Dismissal closes this flow. Kiro may still finish its connection attempt; it does not
-            sign out or revoke access.
+            <T>
+              Dismissal closes this flow. Kiro may still finish its connection attempt; it does not
+              sign out or revoke access.
+            </T>
           </p>
         </div>
       ) : status.busy ? (
         <p className="text-muted-foreground">
-          A previous sign-in is still finishing. Refresh to check its status.
+          <T>A previous sign-in is still finishing. Refresh to check its status.</T>
         </p>
       ) : null}
       {feedback ? <p role="status">{feedback}</p> : null}

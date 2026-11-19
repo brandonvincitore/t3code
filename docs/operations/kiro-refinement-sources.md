@@ -516,3 +516,28 @@ fresh-context boundaries to the fork's earlier kept-history adaptation. The merg
 retains native import receipts, exact-attempt checks, and upstream's missed-attachment delivery.
 Upstream ACP bridge cancellation runs alongside scoped callback retirement and stops abandoned
 MCP calls without terminating calls from retained workflow work.
+
+### November 18 evening upstream refresh
+
+The fork merges all 104 upstream commits after `724f5c6bec` through
+[`a7522ff02f`](https://github.com/pingdotgg/t3code/commit/a7522ff02f710e8ddc5129b2b8dc432c239d0e2e),
+committed November 19, 2026 at 02:19:25 UTC. The starting fork heads are
+[`137d3d8ec6`](https://github.com/brandonvincitore/t3code/commit/137d3d8ec63ca208e132e36392cc0fbfbe288600)
+on `main` and
+[`ab56713b83`](https://github.com/brandonvincitore/t3code/commit/ab56713b830496e435ab381a20d7d83533107906)
+on refinement. Earlier source pins, adaptations, and original author credits remain in this record.
+
+Upstream [#38575](https://github.com/pingdotgg/t3code/pull/38575) skips replay for
+legacy imports with a strong native reference. Kiro and ACP Registry imports,
+and other imports that carry a receipt, still verify it against the native
+session that actually resumes before withholding portable history.
+Upstream [#38554](https://github.com/pingdotgg/t3code/pull/38554) shares MCP app
+context handling between sends and steering. The fork retains startup interruption
+cleanup around that read. Upstream [#38683](https://github.com/pingdotgg/t3code/pull/38683)
+preserves explicit app renames before the first message and composes with Kiro's
+native title ownership.
+
+The upstream localization work retains the fork's managed-policy controls, workflow
+steps and plans, and credit-only Kiro billing. Device-key renewal and remote
+loopback previews arrive through upstream history. Their integration does not
+establish live relay, tunnel, mixed-version, or physical-device behavior on the fork.
