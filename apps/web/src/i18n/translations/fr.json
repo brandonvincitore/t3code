@@ -12138,5 +12138,6 @@
   "0895342b8f773e71": "Vérification / synchronisation en cours",
   "ce045a87c1ac2bc9": "Synchroniser depuis Kiro",
   "abaec2a010c64f13": "Vérifier l’historique",
-  "5792960f1c11d608": "{reason} Désactivez cette tâche pour l’enregistrer."
+  "5792960f1c11d608": "{reason} Désactivez cette tâche pour l’enregistrer.",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédit} other {{amount} crédits}}"
 }

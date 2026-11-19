@@ -12145,5 +12145,6 @@
   "0895342b8f773e71": "Kontrollerar / synkroniserar",
   "ce045a87c1ac2bc9": "Synkronisera från Kiro",
   "abaec2a010c64f13": "Kontrollera historiken",
-  "5792960f1c11d608": "{reason} Stäng av den här uppgiften för att spara den."
+  "5792960f1c11d608": "{reason} Stäng av den här uppgiften för att spara den.",
+  "561112eb900de6b5": "{count, plural, one {{amount} kredit} other {{amount} krediter}}"
 }

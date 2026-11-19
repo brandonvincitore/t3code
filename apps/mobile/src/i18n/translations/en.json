@@ -5255,5 +5255,6 @@
   "69b7d628fb45cda4": "Show full plan",
   "8378f1586eac80ba": "Billed in credits · no token data",
   "ce1386a3ae96da48": "Billed in {credits} · no token data",
-  "c4b268c6c8fe2912": "Kiro credits are shown in the totals. Token and dollar charts are unavailable."
+  "c4b268c6c8fe2912": "Kiro credits are shown in the totals. Token and dollar charts are unavailable.",
+  "561112eb900de6b5": "{count, plural, one {{amount} credit} other {{amount} credits}}"
 }

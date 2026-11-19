@@ -5248,5 +5248,6 @@
   "69b7d628fb45cda4": "Afficher le plan complet",
   "8378f1586eac80ba": "Facturation en crédits · aucune donnée de jetons",
   "ce1386a3ae96da48": "Facturation en {credits} · aucune donnée de jetons",
-  "c4b268c6c8fe2912": "Les crédits Kiro figurent dans les totaux. Les graphiques en jetons et en dollars sont indisponibles."
+  "c4b268c6c8fe2912": "Les crédits Kiro figurent dans les totaux. Les graphiques en jetons et en dollars sont indisponibles.",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédit} other {{amount} crédits}}"
 }

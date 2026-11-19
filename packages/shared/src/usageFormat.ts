@@ -5,16 +5,20 @@ import {
   type UsageSource,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import { msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 
-const CURRENCY = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 2,
-});
-
-const INTEGER = new Intl.NumberFormat("en-US");
-const CREDITS = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 });
+const NUMBER_FORMAT_OPTIONS = {
+  currency: {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  },
+  integer: {},
+  credits: { maximumFractionDigits: 2 },
+} as const satisfies Record<string, Intl.NumberFormatOptions>;
+const INTEGER = new Intl.NumberFormat("en-US", NUMBER_FORMAT_OPTIONS.integer);
 
 // Clients pass their UI locale; English (and the server, which passes none) keeps en-US.
 function formatLocale(locale: string | undefined): string {
@@ -23,19 +27,15 @@ function formatLocale(locale: string | undefined): string {
 
 const numberFormatters = new Map<string, Intl.NumberFormat>();
 
-function numberFormatter(locale: string, currency: boolean): Intl.NumberFormat {
-  if (locale === "en-US") return currency ? CURRENCY : INTEGER;
-  const key = `${locale}:${currency}`;
+function numberFormatter(
+  locale: string,
+  format: keyof typeof NUMBER_FORMAT_OPTIONS,
+): Intl.NumberFormat {
+  if (locale === "en-US" && format === "integer") return INTEGER;
+  const key = `${locale}:${format}`;
   let formatter = numberFormatters.get(key);
   if (formatter === undefined) {
-    formatter = currency
-      ? new Intl.NumberFormat(locale, {
-          style: "currency",
-          currency: "USD",
-          minimumFractionDigits: 2,
-          maximumFractionDigits: 2,
-        })
-      : new Intl.NumberFormat(locale);
+    formatter = new Intl.NumberFormat(locale, NUMBER_FORMAT_OPTIONS[format]);
     numberFormatters.set(key, formatter);
   }
   return formatter;
@@ -83,11 +83,21 @@ export function usageSourceMessages(
 }
 
 export function formatUsd(value: number, locale?: string): string {
-  return numberFormatter(formatLocale(locale), true).format(value);
+  return numberFormatter(formatLocale(locale), "currency").format(value);
 }
 
-export function formatCredits(value: number): string {
-  return `${CREDITS.format(value)} ${value === 1 ? "credit" : "credits"}`;
+export function formatCredits(
+  value: number,
+  locale: string | undefined,
+  resolve: MFunctionType,
+): string {
+  const amount = numberFormatter(formatLocale(locale), "credits").format(value);
+  return resolve(
+    msg("{count, plural, one {{amount} credit} other {{amount} credits}}", {
+      amount,
+      count: value,
+    }),
+  );
 }
 
 /** Credit-metered usage has no token count or dollar cost to show. */
@@ -100,7 +110,7 @@ export function isCreditsOnly(totals: {
 }
 
 export function formatCount(value: number, locale?: string): string {
-  return numberFormatter(formatLocale(locale), false).format(Math.round(value));
+  return numberFormatter(formatLocale(locale), "integer").format(Math.round(value));
 }
 
 const TOKEN_SUFFIXES = ["K", "M", "B", "T"] as const;

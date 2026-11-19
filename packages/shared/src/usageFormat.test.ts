@@ -1,8 +1,20 @@
 // @effect-diagnostics globalDate:off -- A fixed instant keeps calendar-window assertions deterministic.
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { UsageSource } from "@t3tools/contracts";
+import { mFallback } from "gt-i18n";
 
-import { formatHourShort, formatTokens, makeWindow, usageSourceMessages } from "./usageFormat.ts";
+import {
+  formatCredits,
+  formatHourShort,
+  formatTokens,
+  makeWindow,
+  usageSourceMessages,
+} from "./usageFormat.ts";
+
+it("formats credit quantities with locale separators and the credit unit", () => {
+  expect(formatCredits(1, "en", mFallback)).toBe("1 credit");
+  expect(formatCredits(1234.5, "de", mFallback)).toBe("1.234,5 credits");
+});
 
 function malformedSource(count: number, overrides: Partial<UsageSource> = {}): UsageSource {
   return {

@@ -752,7 +752,7 @@ describe("ThreadTitleRegenerationService", () => {
           );
           assert.deepEqual(
             effects.map((effect) => effect.request.type),
-            ["thread-title.sync"],
+            ["provider-session.apply-thread-title", "thread-title.sync"],
           );
           assert.deepInclude(projection.thread.lastTitleRegeneration, {
             requestId,

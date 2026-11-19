@@ -1370,6 +1370,16 @@ export function shouldPrepareLegacyImportHandoff(input: {
   );
 }
 
+function canAssumeLegacyNativeHistory(providerThread: OrchestrationV2ProviderThread | undefined) {
+  // Startup verifies receipt-based history against the native identity that actually resumes.
+  return (
+    providerThread?.nativeThreadRef?.strength === "strong" &&
+    providerThread.driver !== "kiro" &&
+    providerThread.driver !== "acpRegistry" &&
+    providerThread.nativeMetadata?.importedHistory === undefined
+  );
+}
+
 function appendContextHandoffId(
   handoffIds: OrchestrationV2ProviderThread["handoffIds"],
   handoffId: OrchestrationV2ContextHandoff["id"] | null,
@@ -2846,28 +2856,32 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
                     }),
                 ),
               );
-      const legacyImportRecoveryHandoff =
-        latestCompletedRun === undefined && needsFullContext && legacyImportItems.length > 0
-          ? yield* contextHandoffService
-              .prepareLegacyImport({
-                threadId,
-                targetRunId: queuedRun.id,
-                toProviderThreadId: queuedProviderThread.id,
-                toProviderInstanceId: queuedRun.providerInstanceId,
-                items: legacyImportItems,
-                createdAt: now,
-              })
-              .pipe(
-                Effect.mapError(
-                  (cause) =>
-                    new OrchestratorDispatchError({
-                      commandId,
-                      commandType: "message.dispatch",
-                      cause,
-                    }),
-                ),
-              )
-          : null;
+      const legacyImportRecoveryHandoff = shouldPrepareLegacyImportHandoff({
+        hasNativeHistory: canAssumeLegacyNativeHistory(deliveryProviderThread),
+        historyOrigin: projection.thread.historyOrigin,
+        hasCompletedRun: latestCompletedRun !== undefined,
+        legacyImportItemCount: legacyImportItems.length,
+      })
+        ? yield* contextHandoffService
+            .prepareLegacyImport({
+              threadId,
+              targetRunId: queuedRun.id,
+              toProviderThreadId: queuedProviderThread.id,
+              toProviderInstanceId: queuedRun.providerInstanceId,
+              items: legacyImportItems,
+              createdAt: now,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestratorDispatchError({
+                    commandId,
+                    commandType: "message.dispatch",
+                    cause,
+                  }),
+              ),
+            )
+        : null;
       const activeHandoff = handoff ?? legacyImportRecoveryHandoff;
       const checkpointScope =
         storedCheckpointScope ??
@@ -8138,14 +8152,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           driver: adapter.driver,
           nativeThreadId: `pending:${runId}`,
         });
-      // Startup must verify receipt-based history against the native identity that actually resumes.
-      const needsImportReceipt =
-        reusableProviderThread?.driver === "kiro" ||
-        reusableProviderThread?.driver === "acpRegistry" ||
-        reusableProviderThread?.nativeMetadata?.importedHistory !== undefined;
       const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
-        hasNativeHistory:
-          reusableProviderThread?.nativeThreadRef?.strength === "strong" && !needsImportReceipt,
+        hasNativeHistory: canAssumeLegacyNativeHistory(reusableProviderThread),
         historyOrigin: projection.thread.historyOrigin,
         hasCompletedRun: latestCompletedRun !== undefined,
         legacyImportItemCount: legacyImportItems.length,
@@ -8853,10 +8861,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             );
     const legacyImportRecoveryHandoff =
       isProviderSwitch &&
-      !canResumeAcrossInstances &&
-      ensuredProviderThread.nativeThreadRef === null &&
-      latestCompletedRun === undefined &&
-      legacyImportItems.length > 0
+      shouldPrepareLegacyImportHandoff({
+        hasNativeHistory: canAssumeLegacyNativeHistory(ensuredProviderThread),
+        historyOrigin: projection.thread.historyOrigin,
+        hasCompletedRun: latestCompletedRun !== undefined,
+        legacyImportItemCount: legacyImportItems.length,
+      })
         ? yield* contextHandoffService
             .prepareLegacyImport({
               threadId: command.threadId,

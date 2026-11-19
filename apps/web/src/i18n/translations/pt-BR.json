@@ -12137,5 +12137,6 @@
   "0895342b8f773e71": "Verificando / sincronizando",
   "ce045a87c1ac2bc9": "Sincronizar do Kiro",
   "abaec2a010c64f13": "Verificar histórico",
-  "5792960f1c11d608": "{reason} Desative esta tarefa para salvá-la."
+  "5792960f1c11d608": "{reason} Desative esta tarefa para salvá-la.",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédito} other {{amount} créditos}}"
 }

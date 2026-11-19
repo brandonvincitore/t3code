@@ -5248,5 +5248,6 @@
   "69b7d628fb45cda4": "Mostrar plano completo",
   "8378f1586eac80ba": "Cobrança em créditos · sem dados de tokens",
   "ce1386a3ae96da48": "Cobrança em {credits} · sem dados de tokens",
-  "c4b268c6c8fe2912": "Os créditos do Kiro aparecem nos totais. Os gráficos de tokens e dólares não estão disponíveis."
+  "c4b268c6c8fe2912": "Os créditos do Kiro aparecem nos totais. Os gráficos de tokens e dólares não estão disponíveis.",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédito} other {{amount} créditos}}"
 }

@@ -12133,5 +12133,6 @@
   "0895342b8f773e71": "Comprobando / sincronizando",
   "ce045a87c1ac2bc9": "Sincronizar desde Kiro",
   "abaec2a010c64f13": "Comprobar historial",
-  "5792960f1c11d608": "{reason} Desactiva esta tarea para guardarla."
+  "5792960f1c11d608": "{reason} Desactiva esta tarea para guardarla.",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédito} other {{amount} créditos}}"
 }

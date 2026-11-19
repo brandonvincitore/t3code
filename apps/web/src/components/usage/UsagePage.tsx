@@ -776,7 +776,7 @@ function UsageOverview({
                     {awaitingData
                       ? "-"
                       : totals !== undefined && isCreditsOnly(totals)
-                        ? formatCredits(totals.credits)
+                        ? formatCredits(totals.credits, locale, m)
                         : metric === "cost"
                           ? formatUsd(totals?.costUsd ?? 0, locale)
                           : formatTokens(totals?.totalTokens ?? 0)}
@@ -987,7 +987,7 @@ function UsageOverview({
                       </td>
                       <td className={cn("py-2.5 pl-6 text-foreground", rowFigures)}>
                         {isCreditsOnly(model) ? (
-                          formatCredits(model.credits)
+                          formatCredits(model.credits, locale, m)
                         ) : isModelCostUnknown(model) ? (
                           <span className="text-muted-foreground">
                             <T>Unpriced</T>

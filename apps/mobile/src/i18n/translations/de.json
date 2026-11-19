@@ -5254,5 +5254,6 @@
   "69b7d628fb45cda4": "Vollständigen Plan anzeigen",
   "8378f1586eac80ba": "Abrechnung in Credits · keine Tokendaten",
   "ce1386a3ae96da48": "Abrechnung in {credits} · keine Tokendaten",
-  "c4b268c6c8fe2912": "Kiro-Credits sind in den Summen enthalten. Diagramme für Tokens und Dollar sind nicht verfügbar."
+  "c4b268c6c8fe2912": "Kiro-Credits sind in den Summen enthalten. Diagramme für Tokens und Dollar sind nicht verfügbar.",
+  "561112eb900de6b5": "{count, plural, one {{amount} Credit} other {{amount} Credits}}"
 }

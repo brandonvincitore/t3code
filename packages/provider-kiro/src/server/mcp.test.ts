@@ -104,9 +104,13 @@ describe("Kiro MCP sessions", () => {
       }).pipe(Effect.scoped),
   );
 
-  it.effect.each([{ methods: [resetMethod] }, { methods: [] }])(
+  it.effect.each([
+    { methods: [resetMethod], disconnected: false },
+    { methods: [], disconnected: false },
+    { methods: [resetMethod], disconnected: true },
+  ])(
     "routes fresh user-requested URLs with advertised methods $methods to the owner once",
-    ({ methods }) =>
+    ({ methods, disconnected }) =>
       Effect.gen(function* () {
         const h = yield* setup();
         yield* h.activate("first", methods);
@@ -130,6 +134,12 @@ describe("Kiro MCP sessions", () => {
           .takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "different-owner" })
           .pipe(Effect.flip);
         assert.equal(wrong.code, "attempt_unavailable");
+        if (disconnected) {
+          const waiting = yield* h.support
+            .takeAuthorizationUrl({ sessionId: "first", attemptId, ownerId: "owner" })
+            .pipe(Effect.forkChild({ startImmediately: true }));
+          yield* Fiber.interrupt(waiting);
+        }
         const url = "https://login.example.test/authorize?state=private-value";
         const foreignCallback = yield* Effect.exit(
           h.emit("_kiro/openExternalUrl", {

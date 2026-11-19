@@ -1,4 +1,4 @@
-import { T, useGT, useLocale, Var } from "gt-react";
+import { T, useGT, useLocale, useMessages, Var } from "gt-react";
 import { formatCredits, formatPercent, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
 import { isModelCostUnknown, type ModelTotals } from "@t3tools/shared/usageMerge";
 
@@ -51,6 +51,7 @@ export function UsageModelDialog({
 }) {
   const gt = useGT();
   const locale = useLocale();
+  const m = useMessages();
   const usage = mergeAnsweredUsage(
     environments,
     (bucket) => bucket.provider === model.provider && bucket.model === model.model,
@@ -62,7 +63,7 @@ export function UsageModelDialog({
   const perMillion = costPerMillionTokens(model);
   const stats =
     model.provider === "kiro"
-      ? [{ label: gt("Credits"), value: formatCredits(model.credits) }]
+      ? [{ label: gt("Credits"), value: formatCredits(model.credits, locale, m) }]
       : [
           {
             label: gt("Cost"),

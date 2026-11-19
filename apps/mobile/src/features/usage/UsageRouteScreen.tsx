@@ -574,6 +574,8 @@ function ProviderSection(props: {
   const { merged, metric } = props;
   const colors = useProviderColors();
   const gt = useGT();
+  const locale = useLocale();
+  const m = useMessages();
   if (merged.providers.length === 0) return null;
 
   // Hermes lacks toSorted.
@@ -615,7 +617,7 @@ function ProviderSection(props: {
                 }
               >
                 {isCreditsOnly(provider)
-                  ? formatCredits(provider.credits)
+                  ? formatCredits(provider.credits, locale, m)
                   : metric === "cost"
                     ? formatUsd(provider.costUsd)
                     : formatTokens(provider.totalTokens)}
@@ -854,6 +856,8 @@ function ModelsSection(props: {
   const { merged, metric } = props;
   const colors = useProviderColors();
   const gt = useGT();
+  const locale = useLocale();
+  const m = useMessages();
   if (merged.models.length === 0) return null;
 
   // Hermes lacks toSorted.
@@ -887,7 +891,7 @@ function ModelsSection(props: {
               <Text className="text-sm text-foreground-muted">
                 {isCreditsOnly(model)
                   ? gt("Billed in {credits} · no token data", {
-                      credits: formatCredits(model.credits),
+                      credits: formatCredits(model.credits, locale, m),
                     })
                   : metric === "tokens"
                     ? isModelCostUnknown(model)
@@ -910,7 +914,7 @@ function ModelsSection(props: {
             </View>
             <Text className="text-base tabular-nums text-foreground">
               {isCreditsOnly(model)
-                ? formatCredits(model.credits)
+                ? formatCredits(model.credits, locale, m)
                 : metric === "tokens"
                   ? formatTokens(model.totalTokens)
                   : isModelCostUnknown(model)

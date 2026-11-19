@@ -5254,5 +5254,6 @@
   "69b7d628fb45cda4": "Visa hela planen",
   "8378f1586eac80ba": "Debiteras i krediter · inga tokendata",
   "ce1386a3ae96da48": "Debiteras i {credits} · inga tokendata",
-  "c4b268c6c8fe2912": "Kiro-krediter visas i totalerna. Diagram för token och dollar är inte tillgängliga."
+  "c4b268c6c8fe2912": "Kiro-krediter visas i totalerna. Diagram för token och dollar är inte tillgängliga.",
+  "561112eb900de6b5": "{count, plural, one {{amount} kredit} other {{amount} krediter}}"
 }

@@ -1477,11 +1477,13 @@ describe("orchestration v2 provider switching", () => {
 
   const importedNativeSessionScenario = (
     scenario: "first-send" | "after-failed-switch" | "resume-fails" | "stale-receipt",
+    staleReturn?: "immediate" | "queued",
   ) =>
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace(`imported-native-session-${scenario}`);
       const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
-      const claudeOrdinal = scenario === "after-failed-switch" ? 2 : 1;
+      const afterFailedSwitch = scenario === "after-failed-switch" || staleReturn !== undefined;
+      const claudeOrdinal = afterFailedSwitch ? 2 : 1;
       const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
         makeTestAdapter({
           instanceId: CLAUDE_MODEL_SELECTION.instanceId,
@@ -1640,7 +1642,12 @@ describe("orchestration v2 provider switching", () => {
               text: "What was the code word?",
               attachments: [],
               modelSelection,
-              dispatchMode: { type: "start_immediately" },
+              dispatchMode: {
+                type:
+                  ordinal === claudeOrdinal && staleReturn === "queued"
+                    ? "queue_after_active"
+                    : "start_immediately",
+              },
             });
             yield* orchestrator.streamStoredEvents.pipe(
               Stream.filter(
@@ -1653,7 +1660,7 @@ describe("orchestration v2 provider switching", () => {
             );
             yield* worker.drain();
           });
-        if (scenario === "after-failed-switch") yield* send(1, CODEX_MODEL_SELECTION);
+        if (afterFailedSwitch) yield* send(1, CODEX_MODEL_SELECTION);
         yield* send(claudeOrdinal, CLAUDE_MODEL_SELECTION);
 
         const projection = yield* orchestrator.getThreadProjection(threadId);
@@ -1676,7 +1683,10 @@ describe("orchestration v2 provider switching", () => {
         }
         assert.equal(claudeTurn?.nativeThreadId, "native-session");
         if (scenario === "stale-receipt") {
-          assert.deepEqual(importHandoffTargets, [providerThread.id]);
+          assert.lengthOf(
+            importHandoffTargets.filter((id) => id === providerThread.id),
+            1,
+          );
           assert.include(claudeTurn?.text ?? "", "Remember the code word PELICAN.");
           return;
         }
@@ -1711,6 +1721,10 @@ describe("orchestration v2 provider switching", () => {
   );
   it.live("carries imported history when its receipt belongs to a different native session", () =>
     importedNativeSessionScenario("stale-receipt"),
+  );
+  it.live.each(["immediate", "queued"] as const)(
+    "carries imported history with a stale receipt after a failed switch through a %s send",
+    (send) => importedNativeSessionScenario("stale-receipt", send),
   );
 
   it.live.each(["native", "legacy"] as const)(

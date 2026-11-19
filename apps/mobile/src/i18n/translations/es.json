@@ -5248,5 +5248,6 @@
   "69b7d628fb45cda4": "Mostrar el plan completo",
   "8378f1586eac80ba": "Facturación en créditos · sin datos de tokens",
   "ce1386a3ae96da48": "Facturación en {credits} · sin datos de tokens",
-  "c4b268c6c8fe2912": "Los totales incluyen los créditos de Kiro. Los gráficos de tokens y dólares no están disponibles."
+  "c4b268c6c8fe2912": "Los totales incluyen los créditos de Kiro. Los gráficos de tokens y dólares no están disponibles.",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédito} other {{amount} créditos}}"
 }

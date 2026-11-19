@@ -318,19 +318,27 @@ export const makeKiroMcpSupport = Effect.fn("KiroMcp.make")(function* () {
     const { state, attempt } = yield* attemptFor(input);
     if (attempt.claimed) return yield* new KiroMcpError({ code: "attempt_unavailable" });
     attempt.claimed = true;
-    const ready = yield* Deferred.await(attempt.ready).pipe(Effect.timeoutOption("30 seconds"));
-    if (Option.isNone(ready)) {
-      state.quarantined = true;
-      yield* dismiss(attempt);
-      return yield* new KiroMcpError({ code: "connection_failed" });
-    }
-    const current = yield* attemptFor(input);
-    const url = current.attempt.url;
-    current.attempt.url = undefined;
-    current.attempt.delivered = true;
-    if (!url) return yield* new KiroMcpError({ code: "attempt_unavailable" });
-    current.attempt.phase = "connecting";
-    return { url };
+    return yield* Effect.gen(function* () {
+      const ready = yield* Deferred.await(attempt.ready).pipe(Effect.timeoutOption("30 seconds"));
+      if (Option.isNone(ready)) {
+        state.quarantined = true;
+        yield* dismiss(attempt);
+        return yield* new KiroMcpError({ code: "connection_failed" });
+      }
+      const current = yield* attemptFor(input);
+      const url = current.attempt.url;
+      if (!url) return yield* new KiroMcpError({ code: "attempt_unavailable" });
+      current.attempt.url = undefined;
+      current.attempt.delivered = true;
+      current.attempt.phase = "connecting";
+      return { url };
+    }).pipe(
+      Effect.ensuring(
+        Effect.sync(() => {
+          if (!attempt.delivered) attempt.claimed = false;
+        }),
+      ),
+    );
   });
 
   const cancelSignIn: KiroMcpController["cancelSignIn"] = Effect.fn("KiroMcp.cancelSignIn")(
