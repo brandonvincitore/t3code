@@ -1477,7 +1477,10 @@ describe("orchestration v2 provider switching", () => {
 
   const importedNativeSessionScenario = (
     scenario: "first-send" | "after-failed-switch" | "resume-fails" | "stale-receipt",
-    staleReturn?: "immediate" | "queued",
+    staleReturn?: {
+      readonly dispatch: "immediate" | "queued";
+      readonly firstRun: "failed" | "completed";
+    },
   ) =>
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace(`imported-native-session-${scenario}`);
@@ -1499,9 +1502,9 @@ describe("orchestration v2 provider switching", () => {
           driver: CODEX_DRIVER,
           capabilities: CodexProviderCapabilitiesV2,
           modelSelection: CODEX_MODEL_SELECTION,
-          responseByRunOrdinal: {},
+          responseByRunOrdinal: staleReturn?.firstRun === "completed" ? { 1: "I can help." } : {},
           capturedTurns,
-          failedRunOrdinals: new Set([1]),
+          ...(staleReturn?.firstRun === "completed" ? {} : { failedRunOrdinals: new Set([1]) }),
         }),
       ]);
       yield* Effect.gen(function* () {
@@ -1644,7 +1647,7 @@ describe("orchestration v2 provider switching", () => {
               modelSelection,
               dispatchMode: {
                 type:
-                  ordinal === claudeOrdinal && staleReturn === "queued"
+                  ordinal === claudeOrdinal && staleReturn?.dispatch === "queued"
                     ? "queue_after_active"
                     : "start_immediately",
               },
@@ -1664,6 +1667,8 @@ describe("orchestration v2 provider switching", () => {
         yield* send(claudeOrdinal, CLAUDE_MODEL_SELECTION);
 
         const projection = yield* orchestrator.getThreadProjection(threadId);
+        if (staleReturn !== undefined)
+          assert.equal(projection.runs[0]?.status, staleReturn.firstRun);
         assert.equal(projection.runs.at(-1)?.status, "completed");
         const claudeTurn = (yield* Ref.get(capturedTurns)).findLast(
           (turn) => turn.driver === CLAUDE_DRIVER,
@@ -1722,9 +1727,14 @@ describe("orchestration v2 provider switching", () => {
   it.live("carries imported history when its receipt belongs to a different native session", () =>
     importedNativeSessionScenario("stale-receipt"),
   );
-  it.live.each(["immediate", "queued"] as const)(
-    "carries imported history with a stale receipt after a failed switch through a %s send",
-    (send) => importedNativeSessionScenario("stale-receipt", send),
+  it.live.each([
+    { dispatch: "immediate", firstRun: "failed" },
+    { dispatch: "queued", firstRun: "failed" },
+    { dispatch: "immediate", firstRun: "completed" },
+    { dispatch: "queued", firstRun: "completed" },
+  ] as const)(
+    "carries history with a stale receipt with $dispatch dispatch after a $firstRun switch run",
+    (scenario) => importedNativeSessionScenario("stale-receipt", scenario),
   );
 
   it.live.each(["native", "legacy"] as const)(

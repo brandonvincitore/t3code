@@ -1380,6 +1380,18 @@ function canAssumeLegacyNativeHistory(providerThread: OrchestrationV2ProviderThr
   );
 }
 
+function hasCompletedLegacyImportTargetRun(
+  projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
+  providerThreadId: ProviderThreadId,
+) {
+  return (
+    projection.thread.historyOrigin === "v1_import" &&
+    projection.runs.some(
+      (run) => run.providerThreadId === providerThreadId && run.status === "completed",
+    )
+  );
+}
+
 function appendContextHandoffId(
   handoffIds: OrchestrationV2ProviderThread["handoffIds"],
   handoffId: OrchestrationV2ContextHandoff["id"] | null,
@@ -2859,7 +2871,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const legacyImportRecoveryHandoff = shouldPrepareLegacyImportHandoff({
         hasNativeHistory: canAssumeLegacyNativeHistory(deliveryProviderThread),
         historyOrigin: projection.thread.historyOrigin,
-        hasCompletedRun: latestCompletedRun !== undefined,
+        hasCompletedRun:
+          (handoff !== null && needsFullContext && latestCompletedRun !== undefined) ||
+          hasCompletedLegacyImportTargetRun(projection, deliveryProviderThread.id),
         legacyImportItemCount: legacyImportItems.length,
       })
         ? yield* contextHandoffService
@@ -8155,7 +8169,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const legacyImportHandoff = shouldPrepareLegacyImportHandoff({
         hasNativeHistory: canAssumeLegacyNativeHistory(reusableProviderThread),
         historyOrigin: projection.thread.historyOrigin,
-        hasCompletedRun: latestCompletedRun !== undefined,
+        hasCompletedRun:
+          reusableProviderThread === undefined
+            ? latestCompletedRun !== undefined
+            : hasCompletedLegacyImportTargetRun(projection, reusableProviderThread.id),
         legacyImportItemCount: legacyImportItems.length,
       })
         ? yield* contextHandoffService
@@ -8864,7 +8881,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       shouldPrepareLegacyImportHandoff({
         hasNativeHistory: canAssumeLegacyNativeHistory(ensuredProviderThread),
         historyOrigin: projection.thread.historyOrigin,
-        hasCompletedRun: latestCompletedRun !== undefined,
+        hasCompletedRun:
+          (providerSwitchHandoff !== null &&
+            providerSwitchNeedsFullContext &&
+            latestCompletedRun !== undefined) ||
+          hasCompletedLegacyImportTargetRun(projection, ensuredProviderThread.id),
         legacyImportItemCount: legacyImportItems.length,
       })
         ? yield* contextHandoffService
