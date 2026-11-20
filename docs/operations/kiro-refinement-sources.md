@@ -528,9 +528,10 @@ on `main` and
 on refinement. Earlier source pins, adaptations, and original author credits remain in this record.
 
 Upstream [#38575](https://github.com/pingdotgg/t3code/pull/38575) skips replay for
-legacy imports with a strong native reference. Kiro and ACP Registry imports,
-and other imports that carry a receipt, still verify it against the native
-session that actually resumes before withholding portable history.
+legacy imports with a strong native reference. Older ACP Registry imports without
+a receipt keep their existing bound-session behavior. Kiro and receipt-bearing
+imports verify the native session that actually resumes before withholding
+portable history, including when returning through the queue after a provider switch.
 Upstream [#38554](https://github.com/pingdotgg/t3code/pull/38554) shares MCP app
 context handling between sends and steering. The fork retains startup interruption
 cleanup around that read. Upstream [#38683](https://github.com/pingdotgg/t3code/pull/38683)
@@ -539,5 +540,5 @@ native title ownership.
 
 The upstream localization work retains the fork's managed-policy controls, workflow
 steps and plans, and credit-only Kiro billing. Device-key renewal and remote
-loopback previews arrive through upstream history. Their integration does not
-establish live relay, tunnel, mixed-version, or physical-device behavior on the fork.
+loopback previews arrive through upstream history. Live relay, tunnel,
+mixed-version, and physical-device behavior remain runtime qualifications.

@@ -1476,24 +1476,38 @@ describe("orchestration v2 provider switching", () => {
   );
 
   const importedNativeSessionScenario = (
-    scenario: "first-send" | "after-failed-switch" | "resume-fails" | "stale-receipt",
+    scenario:
+      | "first-send"
+      | "after-failed-switch"
+      | "resume-fails"
+      | "stale-receipt"
+      | "legacy-acp",
     staleReturn?: {
       readonly dispatch: "immediate" | "queued";
       readonly firstRun: "failed" | "completed";
     },
+    legacyAcpStrength: "strong" | "weak" = "strong",
   ) =>
     Effect.gen(function* () {
       const cwd = yield* checkpointWorkspace(`imported-native-session-${scenario}`);
       const capturedTurns = yield* Ref.make<ReadonlyArray<CapturedTurn>>([]);
-      const afterFailedSwitch = scenario === "after-failed-switch" || staleReturn !== undefined;
-      const claudeOrdinal = afterFailedSwitch ? 2 : 1;
+      const legacyAcp = scenario === "legacy-acp";
+      const importedDriver = legacyAcp ? ProviderDriverKind.make("acpRegistry") : CLAUDE_DRIVER;
+      const importedSelection = legacyAcp
+        ? { instanceId: ProviderInstanceId.make("acp-registry-legacy"), model: "fixture" }
+        : CLAUDE_MODEL_SELECTION;
+      const queuedReturn = staleReturn?.dispatch === "queued";
+      const heldSwitch = yield* Deferred.make<void>();
+      const releaseSwitch = yield* Deferred.make<void>();
+      const afterProviderSwitch = scenario === "after-failed-switch" || staleReturn !== undefined;
+      const importedOrdinal = afterProviderSwitch ? 2 : 1;
       const layerRegistry = ProviderAdapterRegistry.layerFromAdapters([
         makeTestAdapter({
-          instanceId: CLAUDE_MODEL_SELECTION.instanceId,
-          driver: CLAUDE_DRIVER,
-          capabilities: ClaudeProviderCapabilitiesV2,
-          modelSelection: CLAUDE_MODEL_SELECTION,
-          responseByRunOrdinal: { [claudeOrdinal]: "PELICAN" },
+          instanceId: importedSelection.instanceId,
+          driver: importedDriver,
+          capabilities: legacyAcp ? AcpProviderCapabilitiesV2 : ClaudeProviderCapabilitiesV2,
+          modelSelection: importedSelection,
+          responseByRunOrdinal: { [importedOrdinal]: "PELICAN" },
           capturedTurns,
           failResume: scenario === "resume-fails",
         }),
@@ -1504,6 +1518,7 @@ describe("orchestration v2 provider switching", () => {
           modelSelection: CODEX_MODEL_SELECTION,
           responseByRunOrdinal: staleReturn?.firstRun === "completed" ? { 1: "I can help." } : {},
           capturedTurns,
+          ...(queuedReturn ? { holdFirstTurn: heldSwitch, releaseFirstTurn: releaseSwitch } : {}),
           ...(staleReturn?.firstRun === "completed" ? {} : { failedRunOrdinals: new Set([1]) }),
         }),
       ]);
@@ -1517,8 +1532,8 @@ describe("orchestration v2 provider switching", () => {
           projectId,
           createdBy: "system",
           creationSource: "server",
-          title: "Imported Claude Code session",
-          modelSelection: CLAUDE_MODEL_SELECTION,
+          title: "Imported native session",
+          modelSelection: importedSelection,
           runtimeMode: "full-access",
           interactionMode: "default",
           branch: null,
@@ -1530,22 +1545,22 @@ describe("orchestration v2 provider switching", () => {
         const at = created.thread.createdAt;
         const providerThread: OrchestrationV2ProviderThread = {
           id: ProviderThreadId.make("provider-thread:imported-native"),
-          driver: CLAUDE_DRIVER,
-          providerInstanceId: CLAUDE_MODEL_SELECTION.instanceId,
+          driver: importedDriver,
+          providerInstanceId: importedSelection.instanceId,
           providerSessionId: null,
           appThreadId: threadId,
           ownerNodeId: null,
           nativeThreadRef: {
-            driver: CLAUDE_DRIVER,
+            driver: importedDriver,
             nativeId: "native-session",
-            strength: "strong",
+            strength: legacyAcp ? legacyAcpStrength : "strong",
           },
           ...(scenario === "stale-receipt"
             ? {
                 nativeMetadata: {
                   importedHistory: {
-                    driver: CLAUDE_DRIVER,
-                    providerInstanceId: CLAUDE_MODEL_SELECTION.instanceId,
+                    driver: importedDriver,
+                    providerInstanceId: importedSelection.instanceId,
                     nativeThreadId: "previous-native-session",
                     itemCount: 2,
                   },
@@ -1581,7 +1596,7 @@ describe("orchestration v2 provider switching", () => {
               id: EventId.make("imported-native:thread"),
               type: "thread.metadata-updated",
               threadId,
-              providerInstanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              providerInstanceId: importedSelection.instanceId,
               occurredAt: at,
               payload: {
                 ...created.thread,
@@ -1626,79 +1641,99 @@ describe("orchestration v2 provider switching", () => {
               id: EventId.make("imported-native:provider-thread"),
               type: "provider-thread.updated",
               threadId,
-              driver: CLAUDE_DRIVER,
-              providerInstanceId: CLAUDE_MODEL_SELECTION.instanceId,
+              driver: importedDriver,
+              providerInstanceId: importedSelection.instanceId,
               occurredAt: at,
               payload: providerThread,
             },
           ],
         });
         const send = (ordinal: number, modelSelection: ModelSelection) =>
-          Effect.gen(function* () {
-            yield* orchestrator.dispatch({
-              type: "message.dispatch",
-              commandId: CommandId.make(`imported-native:${ordinal}`),
-              threadId,
-              messageId: MessageId.make(`imported-native:${ordinal}`),
-              createdBy: "user",
-              creationSource: "web",
-              text: "What was the code word?",
-              attachments: [],
-              modelSelection,
-              dispatchMode: {
-                type:
-                  ordinal === claudeOrdinal && staleReturn?.dispatch === "queued"
-                    ? "queue_after_active"
-                    : "start_immediately",
-              },
-            });
-            yield* orchestrator.streamStoredEvents.pipe(
-              Stream.filter(
-                ({ event }) =>
-                  event.type === "run.updated" &&
-                  event.payload.ordinal === ordinal &&
-                  (event.payload.status === "completed" || event.payload.status === "failed"),
-              ),
-              Stream.runHead,
-            );
-            yield* worker.drain();
+          orchestrator.dispatch({
+            type: "message.dispatch",
+            commandId: CommandId.make(`imported-native:${ordinal}`),
+            threadId,
+            messageId: MessageId.make(`imported-native:${ordinal}`),
+            createdBy: "user",
+            creationSource: "web",
+            text: "What was the code word?",
+            attachments: [],
+            modelSelection,
+            dispatchMode: {
+              type:
+                ordinal === importedOrdinal && queuedReturn
+                  ? "queue_after_active"
+                  : "start_immediately",
+            },
           });
-        if (afterFailedSwitch) yield* send(1, CODEX_MODEL_SELECTION);
-        yield* send(claudeOrdinal, CLAUDE_MODEL_SELECTION);
+        const waitForSettlement = (ordinal: number) =>
+          orchestrator.streamStoredEvents.pipe(
+            Stream.filter(
+              ({ event }) =>
+                event.type === "run.updated" &&
+                event.payload.ordinal === ordinal &&
+                (event.payload.status === "completed" || event.payload.status === "failed"),
+            ),
+            Stream.runHead,
+            Effect.andThen(worker.drain()),
+          );
+        if (afterProviderSwitch) {
+          yield* send(1, CODEX_MODEL_SELECTION);
+          if (queuedReturn) yield* Deferred.await(heldSwitch);
+          else yield* waitForSettlement(1);
+        }
+        yield* send(importedOrdinal, importedSelection);
+        if (queuedReturn) {
+          const waiting = yield* orchestrator.getThreadProjection(threadId);
+          assert.equal(waiting.runs.at(-1)?.status, "queued");
+          yield* Deferred.succeed(releaseSwitch, undefined);
+          if (staleReturn?.firstRun === "failed") {
+            yield* waitForSettlement(1);
+            const settled = yield* orchestrator.getThreadProjection(threadId);
+            if (settled.runs.at(-1)?.queueHeld === true) {
+              yield* orchestrator.dispatch({
+                type: "queue.resume",
+                commandId: CommandId.make("imported-native:resume-queue"),
+                threadId,
+              });
+            }
+          }
+        }
+        yield* waitForSettlement(importedOrdinal);
 
         const projection = yield* orchestrator.getThreadProjection(threadId);
         if (staleReturn !== undefined)
           assert.equal(projection.runs[0]?.status, staleReturn.firstRun);
         assert.equal(projection.runs.at(-1)?.status, "completed");
-        const claudeTurn = (yield* Ref.get(capturedTurns)).findLast(
-          (turn) => turn.driver === CLAUDE_DRIVER,
+        const importedTurn = (yield* Ref.get(capturedTurns)).findLast(
+          (turn) => turn.driver === importedDriver,
         );
         const importHandoffTargets = projection.contextHandoffs
           .filter((handoff) => handoff.strategy === "manual_context")
           .map((handoff) => handoff.toProviderThreadId);
         if (scenario === "resume-fails") {
           // The replacement session is empty, so the recovery summary carries the import.
-          assert.notEqual(claudeTurn?.nativeThreadId, "native-session");
+          assert.notEqual(importedTurn?.nativeThreadId, "native-session");
           assert.deepEqual(
             projection.contextHandoffs.map((handoff) => handoff.strategy),
             ["full_thread_summary"],
           );
-          assert.include(claudeTurn?.text ?? "", "Remember the code word PELICAN.");
+          assert.include(importedTurn?.text ?? "", "Remember the code word PELICAN.");
           return;
         }
-        assert.equal(claudeTurn?.nativeThreadId, "native-session");
+        assert.equal(importedTurn?.nativeThreadId, "native-session");
         if (scenario === "stale-receipt") {
           assert.lengthOf(
             importHandoffTargets.filter((id) => id === providerThread.id),
             1,
           );
-          assert.include(claudeTurn?.text ?? "", "Remember the code word PELICAN.");
+          assert.include(importedTurn?.text ?? "", "Remember the code word PELICAN.");
           return;
         }
         assert.notInclude(importHandoffTargets, providerThread.id);
         assert.lengthOf(importHandoffTargets, scenario === "after-failed-switch" ? 1 : 0);
         if (scenario === "first-send") assert.deepEqual(projection.contextHandoffs, []);
-        assert.notInclude(claudeTurn?.text ?? "", "Remember the code word PELICAN.");
+        assert.notInclude(importedTurn?.text ?? "", "Remember the code word PELICAN.");
       }).pipe(
         Effect.provide(
           ProviderReplayHarness.layerWithRegistry(
@@ -1715,6 +1750,10 @@ describe("orchestration v2 provider switching", () => {
         ),
       );
     });
+  it.live.each(["strong", "weak"] as const)(
+    "resumes a legacy ACP Registry import with a %s native reference without echoing history",
+    (strength) => importedNativeSessionScenario("legacy-acp", undefined, strength),
+  );
   it.live("resumes an imported native session without resending its history", () =>
     importedNativeSessionScenario("first-send"),
   );

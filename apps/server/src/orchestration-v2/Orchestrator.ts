@@ -1373,16 +1373,17 @@ export function shouldPrepareLegacyImportHandoff(input: {
 function canAssumeLegacyNativeHistory(providerThread: OrchestrationV2ProviderThread | undefined) {
   // Startup verifies receipt-based history against the native identity that actually resumes.
   return (
-    providerThread?.nativeThreadRef?.strength === "strong" &&
+    providerThread?.nativeThreadRef != null &&
     providerThread.driver !== "kiro" &&
-    providerThread.driver !== "acpRegistry" &&
-    providerThread.nativeMetadata?.importedHistory === undefined
+    providerThread.nativeMetadata?.importedHistory === undefined &&
+    (providerThread.nativeThreadRef.strength === "strong" ||
+      providerThread.driver === "acpRegistry")
   );
 }
 
 function hasCompletedLegacyImportTargetRun(
   projection: Pick<OrchestrationV2ThreadProjection, "thread" | "runs">,
-  providerThreadId: ProviderThreadId,
+  providerThreadId: OrchestrationV2ProviderThread["id"],
 ) {
   return (
     projection.thread.historyOrigin === "v1_import" &&
