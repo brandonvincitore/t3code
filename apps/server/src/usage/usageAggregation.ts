@@ -56,7 +56,8 @@ interface MutableBucket {
   fastCostUsd: number;
   ultrafastCostUsd: number;
   speedPremiumUsd: number;
-  credits: number;
+  credits: number | undefined;
+  creditConflicts: number;
   records: number;
   unpricedRecords: number;
   unpricedTokens: number;
@@ -141,6 +142,34 @@ export interface AggregateResult {
   readonly buckets: readonly UsageBucket[];
   readonly duplicatesDropped: number;
   readonly outOfWindow: number;
+  readonly creditConflicts: readonly {
+    readonly provider: UsageRecord["provider"];
+    readonly sourcePath: string;
+    readonly records: number;
+  }[];
+}
+
+function mergeKiroCredits(held: UsageRecord, copy: UsageRecord): UsageRecord {
+  if (copy.credits === undefined && copy.creditsConflict === undefined) return held;
+  const heldAt = held.creditsUpdatedAtMs ?? held.timestampMs;
+  const copyAt = copy.creditsUpdatedAtMs ?? copy.timestampMs;
+  if ((held.credits !== undefined || held.creditsConflict === true) && copyAt < heldAt) return held;
+  const conflict =
+    copyAt === heldAt &&
+    (held.creditsConflict === true ||
+      copy.creditsConflict === true ||
+      (held.credits !== undefined && held.credits !== copy.credits));
+  if (copyAt === heldAt && !conflict && held.credits === copy.credits) return held;
+  const { credits: _credits, creditsConflict: _conflict, ...rest } = held;
+  return {
+    ...rest,
+    creditsUpdatedAtMs: copyAt,
+    ...(conflict || copy.creditsConflict === true
+      ? { creditsConflict: true as const }
+      : copy.credits === undefined
+        ? {}
+        : { credits: copy.credits }),
+  };
 }
 
 /**
@@ -148,6 +177,8 @@ export interface AggregateResult {
  * reported cost, and the first copy's time, model, session and speed so it stays in its bucket.
  */
 export function mergeUsageCopies(held: UsageRecord, copy: UsageRecord): UsageRecord {
+  // Kiro summaries replace a turn's billed snapshot; their changes are not additive or monotonic.
+  const credited = held.provider === "kiro" ? mergeKiroCredits(held, copy) : held;
   const a = held.totals;
   const b = copy.totals;
   const reportedCostUsd =
@@ -161,7 +192,8 @@ export function mergeUsageCopies(held: UsageRecord, copy: UsageRecord): UsageRec
     b.outputTokens <= a.outputTokens &&
     b.reasoningTokens <= a.reasoningTokens &&
     (copy.cacheCreation1hTokens ?? 0) <= (held.cacheCreation1hTokens ?? 0) &&
-    reportedCostUsd === held.reportedCostUsd
+    reportedCostUsd === held.reportedCostUsd &&
+    credited === held
   ) {
     return held;
   }
@@ -170,7 +202,7 @@ export function mergeUsageCopies(held: UsageRecord, copy: UsageRecord): UsageRec
     copy.cacheCreation1hTokens ?? 0,
   );
   return {
-    ...held,
+    ...credited,
     ...(cacheCreation1hTokens > 0 ? { cacheCreation1hTokens } : {}),
     totals: {
       uncachedInputTokens: Math.max(a.uncachedInputTokens, b.uncachedInputTokens),
@@ -326,7 +358,8 @@ export class UsageAggregator {
     if (record.speed === "fast") bucket.fastCostUsd += priced.costUsd;
     if (record.speed === "ultrafast") bucket.ultrafastCostUsd += priced.costUsd;
     bucket.speedPremiumUsd += priced.speedPremiumUsd;
-    bucket.credits += record.credits ?? 0;
+    if (record.credits !== undefined) bucket.credits = (bucket.credits ?? 0) + record.credits;
+    bucket.creditConflicts += record.creditsConflict === true ? 1 : 0;
     bucket.cacheSavingsUsd += cacheSavingsUsd(
       this.#options.rates,
       record,
@@ -389,7 +422,8 @@ export class UsageAggregator {
         fastCostUsd: 0,
         ultrafastCostUsd: 0,
         speedPremiumUsd: 0,
-        credits: 0,
+        credits: undefined,
+        creditConflicts: 0,
         records: 0,
         unpricedRecords: 0,
         unpricedTokens: 0,
@@ -408,10 +442,18 @@ export class UsageAggregator {
     }
     this.#seen.clear();
     const buckets: UsageBucket[] = [];
+    const creditConflicts: AggregateResult["creditConflicts"][number][] = [];
     for (const [key, bucket] of this.#buckets) {
       const [day = "", hourStart = "", provider = "", model = "", sourcePath = ""] =
         key.split("\u0000");
       const category = bucket.categoryCostUsd;
+      if (bucket.creditConflicts > 0) {
+        creditConflicts.push({
+          provider: provider as UsageRecord["provider"],
+          sourcePath,
+          records: bucket.creditConflicts,
+        });
+      }
       const fastCostUsd = roundUsd(bucket.fastCostUsd);
       const ultrafastCostUsd = roundUsd(bucket.ultrafastCostUsd);
       const speedPremiumUsd = roundUsd(bucket.speedPremiumUsd);
@@ -437,7 +479,10 @@ export class UsageAggregator {
         ...(fastCostUsd === 0 ? {} : { fastCostUsd }),
         ...(ultrafastCostUsd === 0 ? {} : { ultrafastCostUsd }),
         ...(speedPremiumUsd === 0 ? {} : { speedPremiumUsd }),
-        ...(bucket.credits === 0 ? {} : { credits: roundUsd(bucket.credits) }),
+        ...(bucket.credits === undefined ? {} : { credits: bucket.credits }),
+        ...(bucket.creditConflicts > 0
+          ? { creditsUnavailableRecords: bucket.creditConflicts }
+          : {}),
         costSource: resolveCostSource(bucket),
         records: bucket.records,
         unpricedRecords: bucket.unpricedRecords,
@@ -457,6 +502,7 @@ export class UsageAggregator {
       buckets,
       duplicatesDropped: this.#duplicatesDropped,
       outOfWindow: this.#outOfWindow,
+      creditConflicts,
     };
   }
 }

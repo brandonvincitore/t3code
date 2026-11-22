@@ -1,5 +1,9 @@
 import type { ProjectThreadAwarenessV2Input } from "@t3tools/shared/agentAwareness";
-import { applyOrchestrationV2ThreadVisit, pendingGuestMessageCount } from "@t3tools/contracts";
+import {
+  applyOrchestrationV2ThreadVisit,
+  pendingGuestMessageCount,
+  preserveTurnCreditUsage,
+} from "@t3tools/contracts";
 import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullRequests.ts";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
@@ -970,11 +974,13 @@ function upsertProviderTurn(
   next: OrchestrationV2ProviderTurn,
 ): Array<OrchestrationV2ProviderTurn> {
   const current = turns.find((turn) => turn.id === next.id);
+  const turnCreditUsage = preserveTurnCreditUsage(current?.turnCreditUsage, next.turnCreditUsage);
   return upsertById(turns, {
     ...next,
     ...((next.tokenUsage ?? current?.tokenUsage) === undefined
       ? {}
       : { tokenUsage: next.tokenUsage ?? current?.tokenUsage }),
+    ...(turnCreditUsage === undefined ? {} : { turnCreditUsage }),
   });
 }
 
@@ -2973,7 +2979,8 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
             }
             case "provider-turn.updated": {
               const existingRows =
-                event.payload.tokenUsage === undefined
+                event.payload.tokenUsage === undefined ||
+                event.payload.turnCreditUsage?.coverage !== "conflicting"
                   ? yield* sql<PayloadRow>`
                     SELECT payload_json
                     FROM orchestration_v2_projection_provider_turns

@@ -4914,9 +4914,9 @@ it.effect(
     }),
 );
 
-it.effect(
-  "ProviderSessionManagerV2 persists session-scoped requests and recovered commands without a run",
-  () =>
+it.effect.each([false, true])(
+  "ProviderSessionManagerV2 persists session-scoped requests and recovered commands without a run (credits before turn: %s)",
+  (creditsBeforeTurn) =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
       const effect = Effect.gen(function* () {
@@ -4967,6 +4967,41 @@ it.effect(
           now,
         });
         const shellId = "sh_recovered";
+        const creditTurn = {
+          id: idAllocator.derive.providerTurn({
+            driver: CODEX_DRIVER,
+            nativeTurnId: "credit-turn",
+          }),
+          providerThreadId: providerThread.id,
+          nodeId: pendingRequest.nodeId,
+          runAttemptId: null,
+          nativeTurnRef: null,
+          ordinal: 1,
+          status: "cancelled" as const,
+          startedAt: now,
+          completedAt: now,
+          tokenUsage: { usedTokens: 123, updatedAt: DateTime.formatIso(now) },
+        };
+        const creditUsage = {
+          credits: 0.25,
+          coverage: "observed" as const,
+          source: "providerReported" as const,
+          usageScope: "main_agent" as const,
+          nativeSessionId: providerThread.nativeThreadRef!.nativeId!,
+          nativeTurnId: '["execution","turn"]',
+        };
+        const creditTurnEvent = {
+          id: yield* idAllocator.allocate.event({ threadId }),
+          type: "provider-turn.updated" as const,
+          threadId,
+          driver: CODEX_DRIVER,
+          occurredAt: now,
+          payload: creditTurn,
+        };
+        if (!creditsBeforeTurn)
+          yield* eventSink.write({
+            events: [creditTurnEvent],
+          });
         const command = {
           id: idAllocator.derive.turnItemFromProviderItem({
             driver: CODEX_DRIVER,
@@ -5055,6 +5090,28 @@ it.effect(
         yield* Queue.offerAll(adapterEvents!, [
           ...commandEvents,
           {
+            type: "provider_turn.updated",
+            driver: CODEX_DRIVER,
+            threadId,
+            creditUsageOnly: true,
+            providerTurn: {
+              ...creditTurn,
+              status: "completed",
+              tokenUsage: { usedTokens: 1, updatedAt: DateTime.formatIso(now) },
+              turnCreditUsage: creditUsage,
+            },
+          },
+          {
+            type: "provider_turn.updated",
+            driver: CODEX_DRIVER,
+            threadId,
+            creditUsageOnly: true,
+            providerTurn: {
+              ...creditTurn,
+              turnCreditUsage: { ...creditUsage, nativeSessionId: "unowned-session", credits: 100 },
+            },
+          },
+          {
             type: "turn_item.updated",
             driver: CODEX_DRIVER,
             sessionScoped: true,
@@ -5069,6 +5126,23 @@ it.effect(
           ...pendingRequest.providerEvents,
         ]);
         const persisted = Array.from(yield* Fiber.join(persistedFiber));
+
+        if (creditsBeforeTurn) {
+          const afterSequence = yield* eventSink.latestSequence({ threadId });
+          const creditsPersisted = yield* eventSink.stream({ threadId, afterSequence }).pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "provider-turn.updated" &&
+                stored.event.payload.id === creditTurn.id &&
+                stored.event.payload.turnCreditUsage !== undefined,
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
+          yield* eventSink.write({ events: [creditTurnEvent] });
+          yield* Fiber.join(creditsPersisted);
+        }
 
         assert.sameMembers(
           persisted.map((stored) => stored.event.type),
@@ -5100,6 +5174,10 @@ it.effect(
           { runId: anchored.runId, output: "retained" },
         );
         assert.isEmpty(projection.runs);
+        const creditedTurn = projection.providerTurns.find((turn) => turn.id === creditTurn.id);
+        assert.deepEqual(creditedTurn?.turnCreditUsage, creditUsage);
+        assert.equal(creditedTurn?.status, "cancelled");
+        assert.deepEqual(creditedTurn?.tokenUsage, creditTurn.tokenUsage);
         const unrelated = yield* projectionStore.getThreadProjection(otherThreadId);
         assert.isEmpty(unrelated.turnItems);
         assert.isEmpty(unrelated.providerThreads);

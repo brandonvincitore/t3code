@@ -1928,12 +1928,28 @@ it.effect.each([
   "error",
   "cancelled",
   "refusal",
+  "credit-conflict",
+  "late-credits",
 ] as const)("projects distinct native Kiro wake turns without re-prompting: %s", (timing) =>
   Effect.gen(function* () {
     const requests: Array<ProviderContinuationRequests.ProviderContinuationRequest> = [];
     const delivered = yield* Deferred.make<void>();
     const chunks = yield* Effect.forEach([1, 2, 3], () => Deferred.make<void>());
     const gate = makeProviderReplayGate(["native-wakes", "end-1", "end-2", "end-3"]);
+    const credits = (turnId: string, amount: number, replay = false) =>
+      update({
+        sessionUpdate: "session_info_update",
+        _meta: {
+          kiro: {
+            kind: "turn_completion",
+            executionId: turnId,
+            turnId,
+            promptTurnSummaries: [{ unit: "credit", usage: amount }],
+            requestIds: ["request-1"],
+            ...(replay ? { replay: true } : {}),
+          },
+        },
+      });
     const boundary = (turnId: string, kind: "turn_start" | "turn_end") =>
       update({
         sessionUpdate: "session_info_update",
@@ -1989,7 +2005,7 @@ it.effect.each([
           "turnId" in notification.update._meta.kiro &&
           notification.update._meta.kiro.turnId === "wake-3" &&
           "kind" in notification.update._meta.kiro &&
-          notification.update._meta.kiro.kind === "turn_end"
+          notification.update._meta.kiro.kind === "credit_test_drained"
           ? Deferred.succeed(delivered, undefined).pipe(Effect.asVoid)
           : Effect.void;
       },
@@ -2005,9 +2021,13 @@ it.effect.each([
           content: { type: "text", text: "Started three investigations." },
         }),
         boundary("original", "turn_end"),
+        credits("original", 0.000123456789),
+        credits("original", 0.000123456789),
         answer("session/prompt", { stopReason: "end_turn" }),
         ...(timing === "overlap" ? [turnPrompt] : []),
         { ...boundary("original", "turn_start"), label: "native-wakes" },
+        credits("unowned", 100),
+        credits("original", 100, true),
         update({
           sessionUpdate: "agent_message_chunk",
           content: { type: "text", text: "Late original output." },
@@ -2090,12 +2110,21 @@ it.effect.each([
             sessionUpdate: "agent_message_chunk",
             content: { type: "text", text: `Assessment ${n}.` },
           }),
+          ...(timing === "late-credits" ? [] : [credits(`wake-${n}`, n === 1 ? 0 : n / 100)]),
+          ...(timing === "credit-conflict" && n === 3 ? [credits(`wake-${n}`, 0.04)] : []),
+          credits("unowned", 100),
+          credits(`wake-${n}`, 100, true),
           {
             ...boundary(`wake-${n}`, "turn_end"),
             ...(timing === "streaming" ? { label: `end-${n}` } : {}),
           },
           boundary(`wake-${n}`, "turn_end"),
+          credits(`wake-${n}`, n === 1 ? 0 : n / 100),
         ]),
+        update({
+          sessionUpdate: "session_info_update",
+          _meta: { kiro: { kind: "credit_test_drained", turnId: "wake-3" } },
+        }),
         ...(timing === "user-race" || timing === "overlap"
           ? [
               ...(timing === "user-race" ? [turnPrompt] : []),
@@ -2110,10 +2139,19 @@ it.effect.each([
           : []),
         ...closeSession,
       ],
-      drive: ({ events, startTurn, startTurnOn, continueTurn, hasPendingBackgroundWork }) =>
+      drive: ({
+        events,
+        startTurn,
+        startTurnOn,
+        continueTurn,
+        hasPendingBackgroundWork,
+        readSnapshot,
+      }) =>
         Effect.gen(function* () {
           yield* startTurn;
-          assert.equal(terminalStatus(yield* collectTurn(events)), "completed");
+          const original = yield* collectTurn(events);
+          assert.equal(terminalStatus(original), "completed");
+          const observedTurns: ProviderTurnId[] = [];
           if (timing === "overlap") yield* startTurnOn(2, "default");
           gate.release("native-wakes");
           if (timing === "streaming") yield* Deferred.await(chunks[0]!);
@@ -2159,6 +2197,10 @@ it.effect.each([
                   ? "cancelled"
                   : "completed",
             );
+            observedTurns.push(
+              projected.findLast((event) => event.type === "provider_turn.updated")!.providerTurn
+                .id,
+            );
             const text = projected
               .flatMap((event) => (event.type === "message.updated" ? [event.message.text] : []))
               .join("");
@@ -2178,6 +2220,29 @@ it.effect.each([
           assert.isFalse(yield* hasPendingBackgroundWork);
           yield* firstRequest.onRunEndedWithoutStarting?.() ?? Effect.void;
           assert.isFalse(yield* hasPendingBackgroundWork);
+          const originalTurn = original.findLast(
+            (event) => event.type === "provider_turn.updated",
+          )?.providerTurn;
+          assert.deepEqual(originalTurn?.turnCreditUsage, {
+            credits: 0.000123456789,
+            usageScope: "main_agent",
+            coverage: "observed",
+            source: "providerReported",
+            nativeSessionId: SESSION_ID,
+            nativeTurnId: '["original","original"]',
+            requestIds: ["request-1"],
+          });
+          assert.equal(originalTurn?.turnTokenUsage?.usageStatus, "unavailable");
+          yield* Deferred.await(delivered);
+          const snapshot = yield* readSnapshot();
+          const reported = observedTurns.map(
+            (id) => snapshot.providerTurns?.find((turn) => turn.id === id)?.turnCreditUsage,
+          );
+          assert.deepEqual(
+            reported.map((usage) => (usage?.coverage === "observed" ? usage.credits : undefined)),
+            [0, 0.02, timing === "credit-conflict" ? undefined : 0.03],
+          );
+          if (timing === "credit-conflict") assert.equal(reported[2]?.coverage, "conflicting");
         }),
     });
   }).pipe(Effect.provide(testLayer)),

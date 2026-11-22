@@ -5,8 +5,10 @@ import { mFallback } from "gt-i18n";
 
 import {
   formatCredits,
+  formatCreditUsage,
   formatHourShort,
   formatTokens,
+  isCreditsOnly,
   makeWindow,
   usageSourceMessages,
 } from "./usageFormat.ts";
@@ -14,6 +16,7 @@ import {
 it("formats credit quantities with locale separators and the credit unit", () => {
   expect(formatCredits(1, "en", mFallback)).toBe("1 credit");
   expect(formatCredits(1234.5, "de", mFallback)).toBe("1.234,5 credits");
+  expect(formatCredits(0.009, "de", mFallback)).toBe("<0,01 credits");
 });
 
 function malformedSource(count: number, overrides: Partial<UsageSource> = {}): UsageSource {
@@ -194,5 +197,27 @@ describe("token formatting", () => {
     expect(formatTokens(999_999)).toBe("1M");
     expect(formatTokens(999_999_999)).toBe("1B");
     expect(formatTokens(-999_999)).toBe("-1M");
+  });
+});
+
+describe("credit formatting", () => {
+  it("distinguishes small positive amounts from reported zero", () => {
+    expect(formatCredits(0)).toBe("0 credits");
+    expect(formatCredits(0.000_001)).toBe("<0.01 credits");
+    expect(formatCredits(0.009)).toBe("<0.01 credits");
+    expect(formatCredits(0.01)).toBe("0.01 credits");
+    expect(formatCredits(1)).toBe("1 credit");
+    expect(formatCredits(1.234)).toBe("1.23 credits");
+    expect(formatCreditUsage({ credits: 0, records: 1 })).toBe("0 credits");
+    expect(formatCreditUsage({ credits: 2.5, records: 3, creditsUnavailableRecords: 2 })).toBe(
+      "2.5 credits observed",
+    );
+    expect(formatCreditUsage({ credits: 0, records: 2, creditsUnavailableRecords: 1 })).toBe(
+      "0 credits observed",
+    );
+    expect(formatCreditUsage({ credits: 0, records: 1, creditsUnavailableRecords: 1 })).toBe(
+      "Credits unavailable",
+    );
+    expect(isCreditsOnly({ provider: "kiro", credits: 0, totalTokens: 0, costUsd: 0 })).toBe(true);
   });
 });

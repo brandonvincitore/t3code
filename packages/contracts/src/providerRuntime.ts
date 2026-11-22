@@ -85,6 +85,42 @@ export const TurnTokenUsage = Schema.Union([
 ]);
 export type TurnTokenUsage = typeof TurnTokenUsage.Type;
 
+const TurnCreditUsageFields = {
+  usageScope: Schema.Literal("main_agent"),
+  source: Schema.Literal("providerReported"),
+  nativeSessionId: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256)),
+  nativeTurnId: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(2048)),
+  requestIds: Schema.optional(
+    Schema.Array(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256))).check(
+      Schema.isMaxLength(128),
+    ),
+  ),
+};
+export const TurnCreditUsage = Schema.Union([
+  Schema.Struct({
+    ...TurnCreditUsageFields,
+    coverage: Schema.Literal("observed"),
+    credits: Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
+  }),
+  Schema.Struct({ ...TurnCreditUsageFields, coverage: Schema.Literal("conflicting") }),
+]);
+export type TurnCreditUsage = typeof TurnCreditUsage.Type;
+
+/** Reports have no revision order, so a queued snapshot cannot resolve a native-turn conflict. */
+export function preserveTurnCreditUsage(
+  current: TurnCreditUsage | undefined,
+  incoming: TurnCreditUsage | undefined,
+): TurnCreditUsage | undefined {
+  if (incoming === undefined) return current;
+  if (
+    current?.coverage === "conflicting" &&
+    current.nativeSessionId === incoming.nativeSessionId &&
+    current.nativeTurnId === incoming.nativeTurnId
+  )
+    return current;
+  return incoming;
+}
+
 export const ToolActivitySurface = Schema.Literals(["browser", "computer"]);
 export type ToolActivitySurface = typeof ToolActivitySurface.Type;
 

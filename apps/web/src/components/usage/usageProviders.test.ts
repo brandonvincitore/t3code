@@ -31,4 +31,10 @@ it("includes providers whose usage is recorded only in credits", () => {
   expect(
     providersWithUsage([{ provider: "kiro", costUsd: 0, totalTokens: 0, credits: 2.5 }]),
   ).toContain("kiro");
+  expect(
+    providersWithUsage([{ provider: "kiro", costUsd: 0, totalTokens: 0, credits: 0, records: 1 }]),
+  ).toContain("kiro");
+  expect(
+    providersWithUsage([{ provider: "kiro", costUsd: 0, totalTokens: 0, records: 1 }]),
+  ).toContain("kiro");
 });

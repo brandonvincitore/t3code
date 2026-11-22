@@ -75,6 +75,7 @@ import {
 } from "./skills.ts";
 
 import { makeKiroWorkflowSupport } from "./workflows.ts";
+import { readKiroCredits } from "./creditSummary.ts";
 import { registerKiroQuestionExtensions } from "./questions.ts";
 
 export const KIRO_PROVIDER = ProviderDriverKind.make("kiro");
@@ -839,6 +840,35 @@ function makeKiroAcpAdapterFlavor(
       const id = JSON.stringify([metadata.executionId, metadata.turnId]);
       if (notification.update.sessionUpdate !== "session_info_update" || !("kind" in metadata))
         return { id };
+      if (metadata.kind === "turn_completion" && "promptTurnSummaries" in metadata) {
+        const credits = readKiroCredits(metadata.promptTurnSummaries);
+        if (credits === null) return { id };
+        const requestIds =
+          "requestIds" in metadata &&
+          Array.isArray(metadata.requestIds) &&
+          metadata.requestIds.length <= 128 &&
+          metadata.requestIds.every(
+            (requestId): requestId is string =>
+              typeof requestId === "string" &&
+              requestId.trim().length > 0 &&
+              requestId === requestId.trim() &&
+              requestId.length <= 256,
+          )
+            ? metadata.requestIds
+            : undefined;
+        return {
+          id,
+          turnCreditUsage: {
+            credits,
+            usageScope: "main_agent",
+            coverage: "observed",
+            source: "providerReported",
+            nativeSessionId: notification.sessionId,
+            nativeTurnId: id,
+            ...(requestIds === undefined ? {} : { requestIds }),
+          },
+        };
+      }
       if (
         metadata.kind === "turn_start" &&
         "boundarySource" in metadata &&

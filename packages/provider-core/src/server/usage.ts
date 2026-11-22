@@ -23,6 +23,10 @@ export interface UsageRecord {
   readonly reportedCostUsd: number | null;
   /** Provider-billed credits; these are not convertible to USD. */
   readonly credits?: number;
+  /** Newest native snapshot merged into the record's original bucket. */
+  readonly creditsUpdatedAtMs?: number;
+  /** Native credit evidence cannot be reconciled, leaving the amount unavailable. */
+  readonly creditsConflict?: true;
   readonly speed: UsageSpeed;
   readonly unresolvedServiceTierTurnId?: string;
   readonly dedupeKey: string | null;

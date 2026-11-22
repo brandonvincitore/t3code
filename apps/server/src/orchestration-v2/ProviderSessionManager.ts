@@ -337,6 +337,11 @@ interface LiveSessionEntry {
   readonly closeObservers: Ref.Ref<ReadonlySet<Effect.Effect<void>> | null>;
   readonly requestEventPermit: Semaphore.Semaphore;
   readonly instructionInvalidations: Map<ProviderThreadId, OrchestrationV2ProviderThread>;
+  readonly pendingTurnCredits: Map<
+    ProviderTurnId,
+    Extract<ProviderAdapter.ProviderAdapterV2Event, { readonly type: "provider_turn.updated" }>
+  >;
+  readonly turnCreditWaiters: Set<ProviderTurnId>;
   readonly scope: Scope.Closeable;
   readonly idleGeneration: number;
   readonly busyTurns: ReadonlySet<string>;
@@ -2905,6 +2910,89 @@ export const layerWithOptions = (
         );
       });
 
+      const flushTurnCredits = Effect.fn("ProviderSessionManager.flushTurnCredits")(function* (
+        entry: LiveSessionEntry,
+        providerTurnId: ProviderTurnId,
+      ) {
+        const event = entry.pendingTurnCredits.get(providerTurnId);
+        if (event === undefined) return true;
+        const threadId = event.threadId;
+        const current = (yield* Ref.get(sessions)).get(sessionKey(entry.runtime.providerSessionId));
+        if (
+          threadId === undefined ||
+          current?.runtime !== entry.runtime ||
+          !current.attachedThreadIds.has(threadId) ||
+          event.providerTurn.turnCreditUsage === undefined
+        ) {
+          entry.pendingTurnCredits.delete(providerTurnId);
+          return true;
+        }
+        const events = yield* providerEventIngestor.normalize({
+          providerSessionId: entry.runtime.providerSessionId,
+          providerInstanceId: entry.runtime.instanceId,
+          threadId,
+          event,
+        });
+        const stored = yield* eventSink.writeWithEffects({
+          events: events.filter((event) => event.type === "provider-turn.updated"),
+          effects: [],
+          updateTurnCreditUsageOnly: { providerSessionId: entry.runtime.providerSessionId },
+        });
+        if (stored.length === 0) return false;
+        entry.pendingTurnCredits.delete(providerTurnId);
+        return true;
+      });
+
+      const persistTurnCredits = Effect.fn("ProviderSessionManager.persistTurnCredits")(function* (
+        entry: LiveSessionEntry,
+        event: Extract<
+          ProviderAdapter.ProviderAdapterV2Event,
+          { readonly type: "provider_turn.updated" }
+        >,
+      ) {
+        if (event.threadId === undefined || event.providerTurn.turnCreditUsage === undefined)
+          return;
+        const projection = yield* projectionStore.getThreadRecords(
+          event.threadId,
+          ["providerThreads"],
+          { providerThreadIds: [event.providerTurn.providerThreadId] },
+        );
+        const thread = projection.providerThreads[0];
+        if (
+          thread?.providerSessionId !== entry.runtime.providerSessionId ||
+          thread.nativeThreadRef?.nativeId !== event.providerTurn.turnCreditUsage.nativeSessionId
+        )
+          return;
+        const providerTurnId = event.providerTurn.id;
+        const afterSequence = yield* eventSink.latestSequence({ threadId: event.threadId });
+        entry.pendingTurnCredits.set(providerTurnId, event);
+        if (yield* flushTurnCredits(entry, providerTurnId)) return;
+        if (entry.turnCreditWaiters.has(providerTurnId)) return;
+        entry.turnCreditWaiters.add(providerTurnId);
+        // Native completion can overtake queued turn creation; replay its commit before retrying.
+        yield* eventSink.stream({ threadId: event.threadId, afterSequence }).pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "provider-turn.updated" &&
+              stored.event.payload.id === providerTurnId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.andThen(
+            flushTurnCredits(entry, providerTurnId).pipe(entry.requestEventPermit.withPermits(1)),
+          ),
+          Effect.catch((cause) =>
+            Effect.logWarning("orchestration-v2.provider-session.credits-persist-failed", {
+              providerSessionId: entry.runtime.providerSessionId,
+              providerTurnId,
+              cause,
+            }),
+          ),
+          Effect.ensuring(Effect.sync(() => entry.turnCreditWaiters.delete(providerTurnId))),
+          Effect.forkIn(entry.scope),
+        );
+      });
+
       const makeRetryStallWatch = (entry: LiveSessionEntry) => {
         const runningRetries = new Map<ProviderTurnId, ProviderRetryItem>();
         const stalledRetries = new Map<ProviderTurnId, ProviderRetryItem>();
@@ -3143,8 +3231,9 @@ export const layerWithOptions = (
                 : Effect.void;
             // Metadata can change while idle without extending the runtime's lifetime.
             const metadataOnly =
-              event.type === "provider_session.updated" &&
-              event.providerSession.status === lastSessionStatus;
+              (event.type === "provider_session.updated" &&
+                event.providerSession.status === lastSessionStatus) ||
+              (event.type === "provider_turn.updated" && event.creditUsageOnly === true);
             if (event.type === "provider_session.updated") {
               lastSessionStatus = event.providerSession.status;
               if (lastSessionStatus === "stopped") stoppedByProvider = true;
@@ -3169,6 +3258,22 @@ export const layerWithOptions = (
               ),
               Effect.andThen(
                 Effect.gen(function* () {
+                  if (event.type === "provider_turn.updated" && event.creditUsageOnly === true) {
+                    yield* persistTurnCredits(entry, event).pipe(
+                      entry.requestEventPermit.withPermits(1),
+                      Effect.catch((cause) =>
+                        Effect.logWarning(
+                          "orchestration-v2.provider-session.credits-persist-failed",
+                          {
+                            providerSessionId: entry.runtime.providerSessionId,
+                            providerTurnId: event.providerTurn.id,
+                            cause,
+                          },
+                        ),
+                      ),
+                    );
+                    return;
+                  }
                   if (
                     event.type === "provider_thread.updated" &&
                     event.providerThread.status === "error"
@@ -3485,6 +3590,8 @@ export const layerWithOptions = (
                 closeObservers,
                 requestEventPermit: yield* Semaphore.make(1),
                 instructionInvalidations: new Map(),
+                pendingTurnCredits: new Map(),
+                turnCreditWaiters: new Set(),
                 scope: sessionScope,
                 idleGeneration: 0,
                 busyTurns: new Set(),

@@ -149,6 +149,81 @@ function sharedSessions(
   }
   return shared;
 }
+
+function legacyKiroCopyKeys(
+  files: readonly { readonly path: string; readonly records: readonly UsageRecord[] }[],
+  cache: ReadonlyMap<string, CachedFile>,
+): ReadonlyMap<UsageRecord, string | null> {
+  const legacy = files.flatMap((file) => {
+    const cached = cache.get(file.path);
+    if (cached?.provider !== "kiro" || cached.size !== -1) return [];
+    return file.records.filter(
+      (record) =>
+        record.provider === "kiro" &&
+        !record.dedupeKey?.startsWith("kiro:turn:") &&
+        !record.dedupeKey?.startsWith("kiro:row:"),
+    );
+  });
+  const aliases = new Map<UsageRecord, string | null>();
+  if (legacy.length === 0) return aliases;
+  const byExecution = new Map<string, Map<string, Set<number>>>();
+  const nativeTimes = new Set<string>();
+  const rowTimes = new Set<string>();
+  const at = (record: UsageRecord) => encodeUsageRecordKey([record.sessionId, record.timestampMs]);
+  for (const file of files) {
+    for (const record of file.records) {
+      if (record.provider !== "kiro" || record.dedupeKey === null) continue;
+      const key = record.dedupeKey;
+      let executionId: string | null = null;
+      if (key.startsWith("kiro:turn:")) {
+        let identity: unknown;
+        try {
+          identity = JSON.parse(key.slice("kiro:turn:".length));
+        } catch {
+          continue;
+        }
+        if (
+          !Array.isArray(identity) ||
+          identity.length !== 2 ||
+          typeof identity[1] !== "string" ||
+          identity[1].length === 0
+        )
+          continue;
+        if (typeof identity[0] === "string" && identity[0].length > 0) executionId = identity[0];
+      } else if (key.startsWith("kiro:row:")) {
+        rowTimes.add(at(record));
+        // Native usage rows without a turn ID use `${executionId}-usage` as their row ID.
+        if (key.endsWith("-usage")) executionId = key.slice("kiro:row:".length, -"-usage".length);
+      } else {
+        continue;
+      }
+      nativeTimes.add(at(record));
+      if (executionId === null || executionId.length === 0) continue;
+      const turns = byExecution.get(executionId) ?? new Map<string, Set<number>>();
+      const times = turns.get(key) ?? new Set<number>();
+      times.add(record.timestampMs);
+      turns.set(key, times);
+      byExecution.set(executionId, turns);
+    }
+  }
+  for (const record of legacy) {
+    const executionId = record.dedupeKey?.startsWith("kiro:")
+      ? record.dedupeKey.slice("kiro:".length)
+      : null;
+    const candidates = executionId === null ? undefined : byExecution.get(executionId);
+    const only = candidates?.size === 1 ? candidates.entries().next().value : undefined;
+    if (only?.[1].has(record.timestampMs)) {
+      aliases.set(record, only[0]);
+    } else if (
+      candidates !== undefined ||
+      (executionId === null ? nativeTimes : rowTimes).has(at(record))
+    ) {
+      aliases.set(record, null);
+    }
+  }
+  return aliases;
+}
+
 const decodeCachedSources = Schema.decodeUnknownOption(
   Schema.Struct({
     sources: Schema.Record(Schema.String, CachedSource),
@@ -1052,7 +1127,9 @@ export const make = Effect.gen(function* () {
         cacheDirty = true;
       }
     }
-    const crossFileSessions = sharedSessions(filesByDir.flat());
+    const usageFiles = filesByDir.flat();
+    const crossFileSessions = sharedSessions(usageFiles);
+    const legacyKiroKeys = legacyKiroCopyKeys(usageFiles, fileCache);
 
     for (const [
       index,
@@ -1087,7 +1164,15 @@ export const make = Effect.gen(function* () {
         for (const rawRecord of file.records) {
           const record = correctedRecord(rawRecord);
           let usageRecord = record;
+          const legacyKey = legacyKiroKeys.get(record);
+          if (legacyKey === null) {
+            const { credits: _credits, ...unavailable } = record;
+            usageRecord = { ...unavailable, creditsConflict: true };
+          } else if (legacyKey !== undefined) {
+            usageRecord = { ...record, dedupeKey: legacyKey };
+          }
           if (
+            usageRecord.dedupeKey === null &&
             sharedSessionProviders.has(record.provider) &&
             crossFileSessions.has(record.sessionId)
           ) {
@@ -1098,10 +1183,12 @@ export const make = Effect.gen(function* () {
               record.timestampMs,
               record.model,
               record.totals,
+              usageRecord.reportedCostUsd,
+              usageRecord.credits,
             ]);
             const occurrence = (eventOccurrences.get(key) ?? 0) + 1;
             eventOccurrences.set(key, occurrence);
-            usageRecord = { ...record, dedupeKey: key + ":" + occurrence };
+            usageRecord = { ...usageRecord, dedupeKey: key + ":" + occurrence };
           }
           if (aggregator.add(usageRecord, dir)) {
             counted = true;
@@ -1168,6 +1255,29 @@ export const make = Effect.gen(function* () {
       );
 
     const aggregated = aggregator.finish();
+    const creditConflicts = new Map<string, number>();
+    for (const { provider, sourcePath, records } of aggregated.creditConflicts) {
+      const key = `${provider}\0${sourcePath}`;
+      creditConflicts.set(key, (creditConflicts.get(key) ?? 0) + records);
+    }
+    const diagnosedSources = sources.map((source) => {
+      const conflicts =
+        creditConflicts.get(
+          `${source.fingerprint.provider}\0${source.fingerprint.resolvedHomePath}`,
+        ) ?? 0;
+      if (conflicts === 0) return source;
+      return {
+        ...source,
+        status: source.status === "ok" ? ("partial" as const) : source.status,
+        malformedRecords: source.malformedRecords + conflicts,
+        message: [
+          source.message,
+          "Some credit summaries could not be reconciled; their credit amount is unavailable.",
+        ]
+          .filter(Boolean)
+          .join(" "),
+      };
+    });
     const readAt = yield* DateTime.now;
     const finishedAtMs = yield* Clock.currentTimeMillis;
 
@@ -1178,7 +1288,7 @@ export const make = Effect.gen(function* () {
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
       buckets: aggregated.buckets,
-      sources,
+      sources: diagnosedSources,
       pricing: summaryPricing,
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
       ...(input.modelFilter === undefined ? {} : { modelFilter: input.modelFilter }),

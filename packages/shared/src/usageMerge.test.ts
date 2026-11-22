@@ -87,6 +87,14 @@ describe("mergeUsage", () => {
     const valid = summary([bucket({ provider: "kiro", credits: 2.5 })], [kiro]);
     expect(decodeSummary(valid).buckets[0]).toMatchObject({ credits: 2.5, provider: "kiro" });
     expect(
+      decodeSummary(summary([bucket({ provider: "kiro", creditsUnavailableRecords: 1 })], [kiro]))
+        .buckets[0],
+    ).toMatchObject({ creditsUnavailableRecords: 1 });
+    expect(
+      decodeSummary(summary([bucket({ provider: "kiro", creditsUnavailableRecords: -1 })], [kiro]))
+        .buckets,
+    ).toEqual([]);
+    expect(
       decodeSummary(summary([bucket({ provider: "kiro", credits: -1 })], [kiro])).buckets,
     ).toEqual([]);
     expect(
@@ -148,52 +156,64 @@ describe("mergeUsage", () => {
     expect(merged.contributingEnvironments).toEqual(["env-a"]);
   });
 
-  it("keeps provider credits separate from dollar and token totals", () => {
-    const kiro = { provider: "kiro" as const, hostId: "linux", homePath: "/home/user/.kiro" };
-    const merged = mergeUsage(
-      [
-        environment(
-          "linux",
-          summary(
-            [
-              bucket({
-                provider: "kiro",
-                model: "claude-sonnet-4.5",
-                sourcePath: kiro.homePath,
-                totals: {
-                  uncachedInputTokens: 0,
-                  cachedInputTokens: 0,
-                  cacheCreationTokens: 0,
-                  outputTokens: 0,
-                  reasoningTokens: 0,
-                },
-                credits: 2.5,
-                costUsd: 0,
-                costSource: "unpriced",
-                records: 1,
-                unpricedRecords: 1,
-              }),
-            ],
-            [kiro],
+  it.each([
+    { credits: 2.5, unavailable: 0, records: 1 },
+    { credits: 0, unavailable: 0, records: 1 },
+    { credits: 2.5, unavailable: 2, records: 3 },
+    { credits: undefined, unavailable: 1, records: 1 },
+    { credits: undefined, unavailable: undefined, records: 1 },
+  ])(
+    "keeps provider credit availability separate from dollars and tokens: %j",
+    ({ credits, unavailable, records }) => {
+      const kiro = { provider: "kiro" as const, hostId: "linux", homePath: "/home/user/.kiro" };
+      const merged = mergeUsage(
+        [
+          environment(
+            "linux",
+            summary(
+              [
+                bucket({
+                  provider: "kiro",
+                  model: "claude-sonnet-4.5",
+                  sourcePath: kiro.homePath,
+                  totals: {
+                    uncachedInputTokens: 0,
+                    cachedInputTokens: 0,
+                    cacheCreationTokens: 0,
+                    outputTokens: 0,
+                    reasoningTokens: 0,
+                  },
+                  ...(credits === undefined ? {} : { credits }),
+                  ...(unavailable === undefined ? {} : { creditsUnavailableRecords: unavailable }),
+                  costUsd: 0,
+                  costSource: "unpriced",
+                  records,
+                  unpricedRecords: records,
+                }),
+              ],
+              [kiro],
+            ),
           ),
-        ),
-      ],
-      USAGE_CONTRACT_VERSION,
-    );
+        ],
+        USAGE_CONTRACT_VERSION,
+      );
 
-    expect(merged.providers[0]).toMatchObject({
-      provider: "kiro",
-      credits: 2.5,
-      costUsd: 0,
-      totalTokens: 0,
-    });
-    expect(merged.models[0]).toMatchObject({
-      model: "claude-sonnet-4.5",
-      credits: 2.5,
-      costUsd: 0,
-      totalTokens: 0,
-    });
-  });
+      expect(merged.providers[0]).toMatchObject({
+        provider: "kiro",
+        credits: credits ?? 0,
+        creditsUnavailableRecords: unavailable ?? (credits === undefined ? records : 0),
+        costUsd: 0,
+        totalTokens: 0,
+      });
+      expect(merged.models[0]).toMatchObject({
+        model: "claude-sonnet-4.5",
+        credits: credits ?? 0,
+        creditsUnavailableRecords: unavailable ?? (credits === undefined ? records : 0),
+        costUsd: 0,
+        totalTokens: 0,
+      });
+    },
+  );
 
   it("drops only the duplicated provider, keeping the environment's other one", () => {
     const sharedClaude = {
@@ -345,6 +365,213 @@ describe("mergeUsage", () => {
     expect(merged.costUsd).toBe(10);
     expect(merged.sessions).toBe(1);
   });
+
+  it.each([
+    {
+      name: "newer conflict",
+      readAt: "2026-08-07T01:00:00Z",
+      filtered: false,
+      physicalAlias: false,
+      observed: undefined,
+      otherCell: false,
+      unavailable: true,
+    },
+    {
+      name: "equal-time conflict",
+      readAt: "2026-08-07T00:00:00Z",
+      filtered: false,
+      physicalAlias: false,
+      observed: undefined,
+      otherCell: true,
+      unavailable: true,
+    },
+    {
+      name: "older conflict",
+      readAt: "2026-08-06T23:00:00Z",
+      filtered: false,
+      physicalAlias: false,
+      observed: undefined,
+      otherCell: false,
+      unavailable: false,
+    },
+    {
+      name: "different model filter",
+      readAt: "2026-08-07T01:00:00Z",
+      filtered: true,
+      physicalAlias: false,
+      observed: undefined,
+      otherCell: false,
+      unavailable: false,
+    },
+    {
+      name: "physical source alias",
+      readAt: "2026-08-07T01:00:00Z",
+      filtered: false,
+      physicalAlias: true,
+      observed: undefined,
+      otherCell: false,
+      unavailable: true,
+    },
+    {
+      name: "partly observed conflict",
+      readAt: "2026-08-07T01:00:00Z",
+      filtered: false,
+      physicalAlias: false,
+      observed: 0.25,
+      otherCell: true,
+      unavailable: true,
+    },
+  ])(
+    "preserves credit availability independently of complete-scan precedence: $name",
+    ({ readAt, filtered, physicalAlias, observed, otherCell, unavailable }) => {
+      const source = {
+        provider: "kiro" as const,
+        hostId: "host",
+        homePath: "/home/user/.kiro",
+        ...(physicalAlias ? { physicalSourceId: "physical-kiro" } : {}),
+      };
+      const alias = {
+        ...source,
+        homePath: physicalAlias ? "/mnt/home/user/.kiro" : source.homePath,
+      };
+      const kiro = (overrides: Partial<UsageBucket> = {}) =>
+        bucket({
+          provider: "kiro",
+          model: "kiro-model",
+          sourcePath: source.homePath,
+          totals: {
+            uncachedInputTokens: 0,
+            cachedInputTokens: 0,
+            cacheCreationTokens: 0,
+            outputTokens: 0,
+            reasoningTokens: 0,
+          },
+          costUsd: 0,
+          cacheSavingsUsd: 0,
+          records: 2,
+          credits: 2.5,
+          ...overrides,
+        });
+      const complete = environment(
+        "old",
+        summary(
+          [
+            kiro(),
+            ...(otherCell ? [kiro({ day: "2026-08-08" as UsageDay, credits: 3, records: 1 })] : []),
+          ],
+          [source],
+        ),
+      );
+      const { credits: _credits, ...conflict } = kiro({
+        sourcePath: alias.homePath,
+        records: observed === undefined ? 1 : 2,
+        creditsUnavailableRecords: 1,
+      });
+      const partialSummary = summary(
+        [{ ...conflict, ...(observed === undefined ? {} : { credits: observed }) }],
+        [alias],
+      );
+      const partial = environment("new", {
+        ...partialSummary,
+        readAt,
+        ...(filtered ? { modelFilter: { include: [{ model: "kiro-model" }] } } : {}),
+        sources: partialSummary.sources.map((entry) => ({ ...entry, status: "partial" as const })),
+      });
+      for (const ordered of [
+        [complete, partial],
+        [partial, complete],
+      ]) {
+        const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+        const expected = {
+          credits: (otherCell ? 3 : 0) + (unavailable ? 0 : 2.5),
+          creditsUnavailableRecords: unavailable ? 2 : 0,
+          records: otherCell ? 3 : 2,
+        };
+        expect(merged.providers[0]).toMatchObject(expected);
+        expect(merged.models[0]).toMatchObject(expected);
+        expect(merged.sessions).toBe(1);
+        expect(merged.contributingEnvironments).toEqual(["old"]);
+      }
+      const resolved = environment("resolved", {
+        ...complete.summary,
+        readAt: "2026-08-07T02:00:00Z",
+      });
+      expect(mergeUsage([partial, resolved], USAGE_CONTRACT_VERSION).providers[0]).toMatchObject({
+        credits: 2.5 + (otherCell ? 3 : 0),
+        creditsUnavailableRecords: 0,
+      });
+    },
+  );
+
+  it.each([
+    { resolution: "day", conflictReadAt: "2026-08-08T02:00:00Z", unavailable: true },
+    { resolution: "hour", conflictReadAt: "2026-08-08T02:00:00Z", unavailable: true },
+    { resolution: "day", conflictReadAt: "2026-08-08T01:00:00Z", unavailable: false },
+  ])(
+    "preserves supplemental $resolution credit conflicts from $conflictReadAt in either environment order",
+    ({ resolution, conflictReadAt, unavailable }) => {
+      const source = { provider: "kiro" as const, hostId: "host", homePath: "/kiro" };
+      const base = bucket({
+        provider: "kiro",
+        model: "kiro-model",
+        sourcePath: source.homePath,
+        totals: {
+          uncachedInputTokens: 0,
+          cachedInputTokens: 0,
+          cacheCreationTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+        },
+        costUsd: 0,
+        credits: 1,
+        records: 1,
+        ...(resolution === "hour" ? { hourStart: "2026-08-07T00:00:00Z" } : {}),
+      });
+      const missingCell = {
+        ...base,
+        ...(resolution === "hour"
+          ? { hourStart: "2026-08-07T01:00:00Z" }
+          : { day: "2026-08-08" as UsageDay }),
+      };
+      const complete = environment("complete", summary([base], [source]));
+      const partial = (id: string, cell: UsageBucket, readAt: string) => {
+        const scanned = summary([cell], [source]);
+        return environment(id, {
+          ...scanned,
+          readAt,
+          sources: scanned.sources.map((entry) => ({ ...entry, status: "partial" as const })),
+        });
+      };
+      const { credits: _credits, ...conflictingCell } = missingCell;
+      for (const [observedId, conflictingId] of [
+        ["a", "z"],
+        ["z", "a"],
+      ] as const) {
+        const observed = partial(
+          observedId,
+          { ...missingCell, credits: 2.5 },
+          "2026-08-08T02:00:00Z",
+        );
+        const conflicting = partial(
+          conflictingId,
+          { ...conflictingCell, creditsUnavailableRecords: 1 },
+          conflictReadAt,
+        );
+        const environments = [complete, observed, conflicting];
+        for (const ordered of [environments, environments.toReversed()]) {
+          const merged = mergeUsage(ordered, USAGE_CONTRACT_VERSION);
+          const expected = {
+            credits: unavailable ? 1 : 3.5,
+            creditsUnavailableRecords: unavailable ? 1 : 0,
+            records: 2,
+          };
+          expect(merged.providers[0]).toMatchObject(expected);
+          expect(merged.models[0]).toMatchObject(expected);
+          expect(merged.sessions).toBe(1);
+        }
+      }
+    },
+  );
 
   it("retains a complete cell when a larger partial cell may have skipped old records", () => {
     const source = { provider: "claude" as const, hostId: "mac", homePath: "/home/theo/.claude" };

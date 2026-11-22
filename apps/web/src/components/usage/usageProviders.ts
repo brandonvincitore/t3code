@@ -62,11 +62,18 @@ export function providersWithUsage(
     readonly costUsd: number;
     readonly totalTokens: number;
     readonly credits?: number;
+    readonly records?: number;
   }[],
 ): readonly UsageProviderKind[] {
   const active = new Set(
     totals
-      .filter((entry) => entry.totalTokens > 0 || entry.costUsd > 0 || (entry.credits ?? 0) > 0)
+      .filter(
+        (entry) =>
+          entry.totalTokens > 0 ||
+          entry.costUsd > 0 ||
+          (entry.credits ?? 0) > 0 ||
+          (entry.provider === "kiro" && (entry.records ?? 0) > 0),
+      )
       .map((entry) => entry.provider),
   );
   return PROVIDER_ORDER.filter((provider) => active.has(provider));

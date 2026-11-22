@@ -48,6 +48,8 @@ known prices still contribute tokens and appear as unpriced; set custom prices t
 Kiro history reports credits per turn when available. Credits are not tokens or USD, so Kiro rows show
 credits separately and are excluded from dollar and token totals. Set `KIRO_HOME` on the provider
 account to read Kiro history from a different home; otherwise Usage follows that account's `HOME`.
+Kiro replies also show credits when the native turn reports them while connected. These cover the
+main agent's reported work, excluding child agents and unreported work; they are not an account bill.
 Use absolute paths or `~/` paths in the account's environment settings; relative environment paths
 depend on each project's working directory and cannot be reliably discovered by Usage. Accounts
 sharing a history directory count once.

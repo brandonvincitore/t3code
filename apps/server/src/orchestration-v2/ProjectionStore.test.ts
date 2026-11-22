@@ -3998,6 +3998,14 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
       const providerThreadId = ProviderThreadId.make("provider-thread:provider-usage-reload");
       const providerTurnId = ProviderTurnId.make("provider-turn:provider-usage-reload");
       const nodeId = NodeId.make("node:provider-usage-reload");
+      const creditUsage = {
+        credits: 0.000123456789,
+        usageScope: "main_agent",
+        coverage: "observed",
+        source: "providerReported",
+        nativeSessionId: "native-session",
+        nativeTurnId: '["execution","turn"]',
+      } as const;
       const initialUsage = {
         usedTokens: 12_000,
         maxTokens: 200_000,
@@ -4061,7 +4069,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
         nodeId,
         driver,
         occurredAt: now,
-        payload: { ...providerTurn, tokenUsage: initialUsage },
+        payload: { ...providerTurn, tokenUsage: initialUsage, turnCreditUsage: creditUsage },
       });
       yield* projectionStore.apply({
         id: EventId.make("event:provider-usage-reload:completed"),
@@ -4075,6 +4083,7 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
 
       const reloaded = yield* projectionStore.getThreadProjection(threadId);
       assert.deepEqual(reloaded.providerTurns[0]?.tokenUsage, initialUsage);
+      assert.deepEqual(reloaded.providerTurns[0]?.turnCreditUsage, creditUsage);
       assert.strictEqual(reloaded.providerTurns[0]?.status, "completed");
 
       yield* projectionStore.apply({
@@ -4094,6 +4103,35 @@ it.layer(layerTest)("ProjectionStoreV2", (it) => {
 
       const replaced = yield* projectionStore.getThreadProjection(threadId);
       assert.deepEqual(replaced.providerTurns[0]?.tokenUsage, replacementUsage);
+      assert.deepEqual(replaced.providerTurns[0]?.turnCreditUsage, creditUsage);
+
+      const { credits: _credits, ...creditIdentity } = creditUsage;
+      const conflicting = { ...creditIdentity, coverage: "conflicting" as const };
+      for (const [id, turnCreditUsage] of [
+        ["conflicting", conflicting],
+        ["queued-terminal", creditUsage],
+      ] as const) {
+        yield* projectionStore.apply({
+          id: EventId.make(`event:provider-usage-reload:${id}`),
+          type: "provider-turn.updated",
+          threadId,
+          nodeId,
+          driver,
+          occurredAt: now,
+          payload: {
+            ...providerTurn,
+            status: "completed",
+            completedAt: now,
+            tokenUsage: replacementUsage,
+            turnCreditUsage,
+          },
+        });
+      }
+      const afterQueuedTerminal = (yield* projectionStore.getThreadProjection(threadId))
+        .providerTurns[0];
+      assert.deepEqual(afterQueuedTerminal?.turnCreditUsage, conflicting);
+      assert.equal(afterQueuedTerminal?.status, "completed");
+      assert.deepEqual(afterQueuedTerminal?.tokenUsage, replacementUsage);
     }),
   );
 

@@ -4,6 +4,7 @@ import { m } from "../../i18n/messages";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { toServerClock } from "@t3tools/client-runtime/clock";
 import { formatDuration } from "@t3tools/shared/orchestrationTimingCopy";
+import { formatCredits } from "@t3tools/shared/usageFormat";
 import { Sheet } from "../../components/ui/Sheet";
 import { ListActionRow } from "../../components/ui/ListActionRow";
 import { ListSection } from "../../components/ui/ListSection";
@@ -544,6 +545,43 @@ function AssistantForkButton(props: {
         />
       )}
     </Pressable>
+  );
+}
+
+function AssistantTurnCredits(props: {
+  readonly environmentId: EnvironmentId;
+  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
+}) {
+  const support = useV2ItemSupport({
+    environmentId: props.environmentId,
+    sourceThreadId: props.projectedItem.sourceThreadId,
+    sourceItemId: props.projectedItem.sourceItemId,
+  });
+  const gt = useGT();
+  const locale = useLocale();
+  const m = useMessages();
+  const usage = support.providerTurn?.turnCreditUsage;
+  if (usage === undefined) return null;
+  const amount =
+    usage.coverage === "conflicting"
+      ? gt("Credits unavailable")
+      : formatCredits(usage.credits, locale, m);
+  const description =
+    usage.coverage === "conflicting"
+      ? gt(
+          "Conflicting native credit reports for this turn’s main agent. Unreported and child work are excluded.",
+        )
+      : gt(
+          "Native-reported credits for this turn’s main agent. Unreported and child work are excluded.",
+        );
+
+  return (
+    <Text
+      className="font-t3-medium text-xs tabular-nums text-foreground-secondary"
+      accessibilityLabel={gt("{amount}. {description}", { amount, description })}
+    >
+      {amount}
+    </Text>
   );
 }
 
@@ -2722,6 +2760,12 @@ function renderFeedEntry(
             <Text className="font-t3-medium text-xs tabular-nums text-foreground-secondary">
               {timestampLabel}
             </Text>
+            {message.projectedItem?.item.type === "assistant_message" ? (
+              <AssistantTurnCredits
+                environmentId={props.environmentId}
+                projectedItem={message.projectedItem}
+              />
+            ) : null}
           </View>
         ) : null}
       </Animated.View>

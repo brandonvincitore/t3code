@@ -137,6 +137,7 @@ export const ProviderAdapterV2Event = Schema.Union([
     driver: ProviderDriverKind,
     threadId: Schema.optional(ThreadId),
     providerTurn: OrchestrationV2ProviderTurn,
+    creditUsageOnly: Schema.optional(Schema.Boolean),
     /** Questions the adapter keeps open after this turn ends; the rest of the turn's are dismissed. */
     retainedRuntimeRequestIds: Schema.optional(Schema.Array(RuntimeRequestId)),
   }),

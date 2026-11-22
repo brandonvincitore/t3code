@@ -3455,7 +3455,7 @@ describe("UsageService", () => {
             60 + 20 * (version === 4 ? 1 : 2),
           );
           yield* upgraded.awaitPersisted;
-          assert.strictEqual(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v17.json");
+          assert.strictEqual(SCAN_CACHE_FILE_NAME, "usage-scan-cache-v18.json");
           assert.deepStrictEqual(
             (yield* Effect.promise(() => NodeFSP.readdir(stateDir)))
               .filter((name) => name.startsWith("usage-scan-cache"))
@@ -3793,6 +3793,183 @@ describe("UsageService", () => {
         assert.strictEqual(totalOutputTokens(yield* restarted.readSummary(window)), 11);
       }).pipe(Effect.provide(layerService({ prefix: "usage-retention-race", home, settings })));
     }),
+  );
+
+  it.effect(
+    "keeps Kiro turn credits distinct across copied sessions, revisions, cleanup and restart",
+    () =>
+      Effect.gen(function* () {
+        const { settings, home } = yield* setup;
+        const sessions = NodePath.join(home, ".kiro", "sessions");
+        const original = NodePath.join(sessions, "original", "session-a", "messages.jsonl");
+        const other = NodePath.join(sessions, "other", "session-a", "messages.jsonl");
+        const moved = NodePath.join(sessions, "moved", "session-a", "messages.jsonl");
+        const usage = (turnId: string | null, credits: number, second = 0) =>
+          JSON.stringify({
+            timestamp: `2026-08-01T10:00:0${second}Z`,
+            payload: {
+              type: "usage_summary",
+              ...(turnId === null ? {} : { executionId: "execution-a", turnId }),
+              promptTurnSummaries: [{ unit: "credit", usage: credits }],
+            },
+          }) + "\n";
+        yield* Effect.promise(async () => {
+          for (const file of [original, other, moved])
+            await NodeFSP.mkdir(NodePath.dirname(file), { recursive: true });
+          await NodeFSP.writeFile(original, usage("turn-a", 1.25) + usage(null, 0.125));
+          await NodeFSP.writeFile(other, usage("turn-b", 2) + usage(null, 0.25));
+        });
+        yield* Effect.gen(function* () {
+          const creditTotal = (summary: UsageSummary) =>
+            summary.buckets.reduce((sum, bucket) => sum + (bucket.credits ?? 0), 0);
+          const source = (summary: UsageSummary) =>
+            summary.sources.find((entry) => entry.fingerprint.provider === "kiro");
+          const service = yield* UsageService.make;
+          const first = yield* service.readSummary(WINDOW);
+          assert.strictEqual(creditTotal(first), 3.625);
+          assert.strictEqual(
+            first.buckets.find((bucket) => bucket.provider === "kiro")?.records,
+            4,
+          );
+          yield* Effect.promise(() => NodeFSP.copyFile(original, moved));
+          assert.deepStrictEqual((yield* service.readSummary(WINDOW)).buckets, first.buckets);
+          yield* Effect.promise(() => NodeFSP.rm(original));
+          assert.deepStrictEqual((yield* service.readSummary(WINDOW)).buckets, first.buckets);
+          yield* Effect.promise(() => NodeFSP.appendFile(moved, usage("turn-a", 0.5, 1)));
+          assert.strictEqual(creditTotal(yield* service.readSummary(WINDOW)), 2.875);
+          yield* Effect.promise(() => NodeFSP.appendFile(other, usage("turn-a", 0.75, 1)));
+          const conflict = yield* service.readSummary(WINDOW);
+          assert.strictEqual(creditTotal(conflict), 2.375);
+          assert.strictEqual(source(conflict)?.status, "partial");
+          assert.strictEqual(source(conflict)?.malformedRecords, 1);
+          yield* service.awaitPersisted;
+          const restarted = yield* UsageService.make;
+          const restored = yield* restarted.readSummary(WINDOW);
+          assert.deepStrictEqual(restored.buckets, conflict.buckets);
+          assert.strictEqual(source(restored)?.status, "partial");
+          yield* Effect.promise(() => NodeFSP.appendFile(moved, usage("turn-a", 0, 2)));
+          const resolved = yield* restarted.readSummary(WINDOW);
+          assert.strictEqual(creditTotal(resolved), 2.375);
+          assert.strictEqual(source(resolved)?.status, "ok");
+          assert.strictEqual(source(resolved)?.malformedRecords, 0);
+          yield* Effect.promise(() => NodeFSP.rm(sessions, { recursive: true }));
+          const deleted = yield* restarted.readSummary(WINDOW);
+          assert.deepStrictEqual(deleted.buckets, resolved.buckets);
+          yield* restarted.awaitPersisted;
+          assert.deepStrictEqual(
+            (yield* (yield* UsageService.make).readSummary(WINDOW)).buckets,
+            resolved.buckets,
+          );
+        }).pipe(
+          Effect.provide(
+            layerService({ prefix: "usage-service-kiro-copies-test", home, settings }),
+          ),
+        );
+      }),
+  );
+
+  it.effect.each(["turn", "row", "ambiguous", "arbitrary-row", "different-time"] as const)(
+    "reconciles retained legacy Kiro credits with %s identities after migration",
+    (identity) =>
+      Effect.gen(function* () {
+        const { settings, home } = yield* setup;
+        const sessions = NodePath.join(home, ".kiro", "sessions");
+        const original = NodePath.join(sessions, "original", "session-a", "messages.jsonl");
+        const surviving = NodePath.join(sessions, "surviving", "session-a", "messages.jsonl");
+        const deleted = NodePath.join(sessions, "deleted", "session-b", "messages.jsonl");
+        const usage = (executionId: string, credits: number, turnId?: string) =>
+          JSON.stringify({
+            id: identity === "arbitrary-row" ? `row-${executionId}` : `${executionId}-usage`,
+            timestamp: "2026-08-01T10:00:00Z",
+            payload: {
+              type: "usage_summary",
+              executionId,
+              ...(turnId === undefined ? {} : { turnId }),
+              promptTurnSummaries: [{ unit: "credit", usage: credits }],
+            },
+          }) + "\n";
+        const content = usage(
+          "execution-a",
+          1.25,
+          identity === "row" || identity === "arbitrary-row" ? undefined : "turn-a",
+        );
+        yield* Effect.promise(async () => {
+          for (const file of [original, surviving, deleted])
+            await NodeFSP.mkdir(NodePath.dirname(file), { recursive: true });
+          await NodeFSP.writeFile(original, content);
+          await NodeFSP.writeFile(deleted, usage("deleted-execution", 4));
+        });
+        yield* Effect.gen(function* () {
+          const { stateDir } = yield* ServerConfig.ServerConfig;
+          const first = yield* UsageService.make;
+          yield* first.readSummary(WINDOW);
+          yield* first.awaitPersisted;
+          yield* Effect.promise(async () => {
+            const cachePath = NodePath.join(stateDir, SCAN_CACHE_FILE_NAME);
+            const document = decodeUnknownJsonString(await NodeFSP.readFile(cachePath, "utf8")) as {
+              files: Record<string, { r: unknown[][] }>;
+            };
+            document.files[original]!.r[0]![8] = "kiro:execution-a";
+            document.files[deleted]!.r[0]![8] = "kiro:deleted-execution";
+            await NodeFSP.writeFile(
+              NodePath.join(stateDir, "usage-scan-cache-v17.json"),
+              encodeUnknownJsonString({ ...document, version: 17 }),
+            );
+            await NodeFSP.rm(cachePath);
+            await NodeFSP.rm(original);
+            await NodeFSP.rm(deleted);
+            await NodeFSP.writeFile(
+              surviving,
+              identity === "different-time"
+                ? content.replace("10:00:00Z", "10:00:01Z")
+                : content + (identity === "ambiguous" ? usage("execution-a", 2, "turn-b") : ""),
+            );
+          });
+          const upgraded = yield* UsageService.make;
+          const summary = yield* upgraded.readSummary(WINDOW);
+          assert.strictEqual(
+            summary.buckets.reduce((sum, bucket) => sum + (bucket.credits ?? 0), 0),
+            identity === "ambiguous" ? 7.25 : 5.25,
+          );
+          const source = summary.sources.find((entry) => entry.fingerprint.provider === "kiro");
+          const ambiguous =
+            identity === "ambiguous" ||
+            identity === "arbitrary-row" ||
+            identity === "different-time";
+          assert.strictEqual(source?.status, ambiguous ? "partial" : "ok");
+          assert.strictEqual(source?.malformedRecords, ambiguous ? 1 : 0);
+          assert.strictEqual(
+            summary.buckets.reduce(
+              (sum, bucket) => sum + (bucket.creditsUnavailableRecords ?? 0),
+              0,
+            ),
+            ambiguous ? 1 : 0,
+          );
+          yield* upgraded.awaitPersisted;
+          const persisted = yield* Effect.promise(
+            async () =>
+              decodeUnknownJsonString(
+                await NodeFSP.readFile(NodePath.join(stateDir, SCAN_CACHE_FILE_NAME), "utf8"),
+              ) as {
+                files: Record<string, { r: unknown[][] }>;
+              },
+          );
+          assert.strictEqual(persisted.files[original]!.r[0]![14], 1.25);
+          const restarted = yield* UsageService.make;
+          const restored = yield* restarted.readSummary(WINDOW);
+          assert.deepStrictEqual(restored.buckets, summary.buckets);
+          assert.strictEqual(
+            restored.sources.find((entry) => entry.fingerprint.provider === "kiro")?.status,
+            source?.status,
+          );
+          yield* Effect.promise(() => NodeFSP.rm(surviving));
+          assert.deepStrictEqual((yield* restarted.readSummary(WINDOW)).buckets, summary.buckets);
+        }).pipe(
+          Effect.provide(
+            layerService({ prefix: `usage-service-kiro-legacy-${identity}`, home, settings }),
+          ),
+        );
+      }),
   );
 
   it.effect("credits the same copy of a duplicate after its transcripts are deleted", () =>

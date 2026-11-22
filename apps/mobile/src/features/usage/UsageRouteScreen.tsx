@@ -18,7 +18,7 @@ import {
   enumerateDays,
   enumerateHourStarts,
   formatCount,
-  formatCredits,
+  formatCreditUsage,
   formatPercent,
   formatTokens,
   formatUsd,
@@ -545,20 +545,34 @@ function ChartCard(props: {
 function UsageSummary(props: { readonly merged: MergedUsage; readonly metric: UsageChartMetric }) {
   const { merged, metric } = props;
   const gt = useGT();
+  const locale = useLocale();
+  const m = useMessages();
+  const creditTotals = merged.providers.find(
+    (provider) =>
+      provider.provider === "kiro" && provider.records > 0 && provider.records === merged.records,
+  );
   return (
     <View className="gap-0.5">
       <Text className="text-sm text-foreground-muted">
-        {metric === "cost" ? gt("Raw token cost") : gt("Processed tokens")}
+        {creditTotals !== undefined
+          ? gt("Credits")
+          : metric === "cost"
+            ? gt("Raw token cost")
+            : gt("Processed tokens")}
       </Text>
       <Text className="text-4xl font-t3-bold tabular-nums text-foreground">
-        {metric === "cost" ? `${formatUsd(merged.costUsd)}*` : formatTokens(merged.totalTokens)}
+        {creditTotals !== undefined
+          ? formatCreditUsage(creditTotals, locale, m)
+          : metric === "cost"
+            ? `${formatUsd(merged.costUsd, locale)}*`
+            : formatTokens(merged.totalTokens)}
       </Text>
       <Text className="text-sm text-foreground-muted">
-        {metric === "cost"
+        {metric === "cost" && creditTotals === undefined
           ? gt("* if billed at full API rate")
           : gt("{count, plural, other {Across {sessions} sessions}}", {
               count: merged.sessions,
-              sessions: formatCount(merged.sessions),
+              sessions: formatCount(merged.sessions, locale),
             })}
       </Text>
     </View>
@@ -617,13 +631,13 @@ function ProviderSection(props: {
                 }
               >
                 {isCreditsOnly(provider)
-                  ? formatCredits(provider.credits, locale, m)
+                  ? formatCreditUsage(provider, locale, m)
                   : metric === "cost"
                     ? formatUsd(provider.costUsd)
                     : formatTokens(provider.totalTokens)}
               </Text>
             </View>
-            {props.compact ? null : (
+            {props.compact || isCreditsOnly(provider) ? null : (
               <View className="h-1 flex-row overflow-hidden rounded-full bg-subtle">
                 <View
                   className="h-full rounded-full"
@@ -659,6 +673,14 @@ function TotalsSection(props: {
 }) {
   const { merged } = props;
   const gt = useGT();
+  if (
+    merged.providers.some(
+      (provider) =>
+        provider.provider === "kiro" && provider.records > 0 && provider.records === merged.records,
+    )
+  ) {
+    return null;
+  }
   const activePeriods = (props.isPast24Hours ? merged.hourly : merged.daily).filter(
     (period) => period.totalTokens > 0,
   ).length;
@@ -890,9 +912,7 @@ function ModelsSection(props: {
               </Text>
               <Text className="text-sm text-foreground-muted">
                 {isCreditsOnly(model)
-                  ? gt("Billed in {credits} · no token data", {
-                      credits: formatCredits(model.credits, locale, m),
-                    })
+                  ? gt("Billed in credits · no token data")
                   : metric === "tokens"
                     ? isModelCostUnknown(model)
                       ? gt("{share} of tokens · no known rates", {
@@ -914,7 +934,7 @@ function ModelsSection(props: {
             </View>
             <Text className="text-base tabular-nums text-foreground">
               {isCreditsOnly(model)
-                ? formatCredits(model.credits, locale, m)
+                ? formatCreditUsage(model, locale, m)
                 : metric === "tokens"
                   ? formatTokens(model.totalTokens)
                   : isModelCostUnknown(model)

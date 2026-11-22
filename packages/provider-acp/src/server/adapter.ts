@@ -36,6 +36,7 @@ import {
   isDelegatedAppThread,
   isOrchestrationV2WorkActive,
   type TurnTokenUsage,
+  type TurnCreditUsage,
 } from "@t3tools/contracts";
 import { AgentScope, AgentScopeThreadId } from "@t3tools/shared/AgentScope";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -797,6 +798,7 @@ export interface AcpAdapterV2Flavor {
         readonly boundary?: "start" | "end";
         readonly stopReason?: EffectAcpSchema.StopReason;
         readonly messageId?: string;
+        readonly turnCreditUsage?: TurnCreditUsage;
       }
     | { readonly replay: true }
     | undefined;
@@ -1842,6 +1844,7 @@ interface ActiveAcpTurn {
   promptSettledStatus: "completed" | "interrupted" | "failed" | "cancelled" | null;
   workAccepted: boolean;
   foregroundNativeTurnId?: string;
+  turnCreditUsage?: TurnCreditUsage;
   /** Settles with the turn's latest prompt; a prompt-steer replaces a settled one. */
   promptWireSettled: Deferred.Deferred<void, never>;
   /** Completed once `session/prompt` is the runtime's active prompt. */
@@ -2735,6 +2738,36 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           options.testHooks?.onNativeResponseLifecycle ?? (() => Effect.void);
         const nextElicitationOrdinal = yield* Ref.make(0);
         const providerTurns = yield* Ref.make(new Map<string, OrchestrationV2ProviderTurn>());
+        const creditTurnRouteKey = (sessionId: string, turnId: string) =>
+          JSON.stringify([sessionId, turnId]);
+        const creditTurnRoutes = new Map<
+          string,
+          {
+            readonly providerTurnId: OrchestrationV2ProviderTurn["id"];
+            readonly threadId: ThreadId;
+          }
+        >();
+        const rememberCreditTurn = (context: ActiveAcpTurn) => {
+          if (context.foregroundNativeTurnId === undefined) return;
+          const key = creditTurnRouteKey(context.nativeThreadId, context.foregroundNativeTurnId);
+          creditTurnRoutes.set(key, {
+            providerTurnId: context.providerTurnId,
+            threadId: context.input.threadId,
+          });
+          if (creditTurnRoutes.size > 128)
+            creditTurnRoutes.delete(creditTurnRoutes.keys().next().value!);
+        };
+        const mergeTurnCredits = (
+          current: TurnCreditUsage | undefined,
+          incoming: TurnCreditUsage,
+        ): TurnCreditUsage => {
+          if (current === undefined) return incoming;
+          if (current.coverage === "conflicting" || incoming.coverage === "conflicting")
+            return current.coverage === "conflicting" ? current : incoming;
+          if (current.credits === incoming.credits) return current;
+          const { credits: _credits, ...identity } = current;
+          return { ...identity, coverage: "conflicting" };
+        };
         const snapshot = yield* Ref.make(emptySnapshotState());
 
         // Native load spans cover this serialized snapshot transaction.
@@ -6805,6 +6838,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                 !acpIsProviderContinuationMessage(context.input.message)
               ) {
                 context.foregroundNativeTurnId = native.id;
+                rememberCreditTurn(context);
               } else {
                 if (context !== null && !context.finalized && context.promptSettled)
                   yield* finalizeTurn(context, context.promptSettledStatus ?? "completed");
@@ -6817,6 +6851,48 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             if (queued !== undefined) {
               queued.notifications.push(notification);
               return;
+            }
+            if (
+              native !== undefined &&
+              native.turnCreditUsage !== undefined &&
+              targetRuntime === runtime &&
+              native.turnCreditUsage.nativeSessionId === notification.sessionId
+            ) {
+              if (
+                context !== null &&
+                !context.finalized &&
+                context.nativeThreadId === notification.sessionId &&
+                context.foregroundNativeTurnId === native.id
+              ) {
+                context.turnCreditUsage = mergeTurnCredits(
+                  context.turnCreditUsage,
+                  native.turnCreditUsage,
+                );
+              } else {
+                const route = creditTurnRoutes.get(
+                  creditTurnRouteKey(notification.sessionId, native.id),
+                );
+                const turns = yield* Ref.get(providerTurns);
+                const previous =
+                  route === undefined ? undefined : turns.get(String(route.providerTurnId));
+                if (route !== undefined && previous !== undefined) {
+                  const turnCreditUsage = mergeTurnCredits(
+                    previous.turnCreditUsage,
+                    native.turnCreditUsage,
+                  );
+                  if (turnCreditUsage !== previous.turnCreditUsage) {
+                    const updated = { ...previous, turnCreditUsage };
+                    yield* Ref.set(providerTurns, new Map(turns).set(String(previous.id), updated));
+                    yield* emitProviderEvent({
+                      type: "provider_turn.updated",
+                      driver,
+                      threadId: route.threadId,
+                      providerTurn: updated,
+                      creditUsageOnly: true,
+                    });
+                  }
+                }
+              }
             }
             if (
               native?.boundary === "end" &&
@@ -9439,6 +9515,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             yield* Ref.set(compactionMarkers, new Map());
             yield* Ref.set(completedCompactionIds, new Set());
             yield* Ref.set(providerTurns, new Map());
+            creditTurnRoutes.clear();
             yield* Ref.set(snapshot, emptySnapshotState());
             yield* continuationPermit.withPermit(
               Effect.gen(function* () {
@@ -9989,6 +10066,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           status,
           startedAt: context.startedAt,
           completedAt,
+          ...(context.turnCreditUsage == null ? {} : { turnCreditUsage: context.turnCreditUsage }),
           ...(status === "running" || status === "pending"
             ? {}
             : {
@@ -11338,6 +11416,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                     yield* Deferred.succeed(context.promptDispatched, undefined);
                     yield* Deferred.succeed(context.promptStarted, undefined);
                   }
+                  rememberCreditTurn(context);
                   yield* Ref.set(activeTurn, context);
                   lastWorkflowAnchor = context;
                   yield* Ref.set(stoppedRunQuarantine, false);

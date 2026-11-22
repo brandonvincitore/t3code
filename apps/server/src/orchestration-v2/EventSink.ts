@@ -7,6 +7,7 @@ import {
   type OrchestrationV2TurnItem,
   OrchestrationV2StoredEvent,
   ProviderThreadId,
+  type ProviderSessionId,
   RunAttemptId,
   RunId,
   RuntimeRequestId,
@@ -120,6 +121,7 @@ export interface EventSinkV2Shape {
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
   }) => Effect.Effect<ReadonlyArray<OrchestrationV2StoredEvent>, EventSinkV2Error>;
   readonly writeWithEffects: (input: {
+    readonly updateTurnCreditUsageOnly?: { readonly providerSessionId: ProviderSessionId };
     /**
      * Rebuilds each run.updated from the stored row with only its delegatedCompletion replaced.
      * The batch must not also change that run's lifecycle.
@@ -574,6 +576,43 @@ const layerBase: Layer.Layer<
       return owners.length > 0;
     });
 
+    // The write span owns this transaction; late credits preserve the stored lifecycle and tokens.
+    const updateTurnCreditUsageOnly = Effect.fnUntraced(function* (
+      events: ReadonlyArray<OrchestrationV2DomainEvent>,
+      providerSessionId: ProviderSessionId,
+    ) {
+      const updated: OrchestrationV2DomainEvent[] = [];
+      for (const event of events) {
+        if (event.type !== "provider-turn.updated" || event.payload.turnCreditUsage === undefined)
+          continue;
+        const projection = yield* projectionStore.getThreadRecords(
+          event.threadId,
+          ["providerTurns", "providerThreads"],
+          {
+            providerTurnIds: [event.payload.id],
+            providerThreadIds: [event.payload.providerThreadId],
+          },
+        );
+        const current = projection.providerTurns.find((turn) => turn.id === event.payload.id);
+        const thread = projection.providerThreads.find(
+          (thread) => thread.id === event.payload.providerThreadId,
+        );
+        if (
+          current === undefined ||
+          current.providerThreadId !== event.payload.providerThreadId ||
+          current.runAttemptId !== event.payload.runAttemptId ||
+          thread?.providerSessionId !== providerSessionId ||
+          thread?.nativeThreadRef?.nativeId !== event.payload.turnCreditUsage.nativeSessionId
+        )
+          continue;
+        updated.push({
+          ...event,
+          payload: { ...current, turnCreditUsage: event.payload.turnCreditUsage },
+        });
+      }
+      return updated;
+    });
+
     const writeEffect = Effect.fn("orchestrationV2.EventSink.write")(function* (
       input: Parameters<EventSinkV2Shape["writeWithEffects"]>[0],
     ) {
@@ -597,10 +636,16 @@ const layerBase: Layer.Layer<
           const events = input.updateDelegatedCompletionOnly
             ? yield* updateDelegatedCompletionOnly(input.events, () => true)
             : input.events;
+          const metered = input.updateTurnCreditUsageOnly
+            ? yield* updateTurnCreditUsageOnly(
+                events,
+                input.updateTurnCreditUsageOnly.providerSessionId,
+              )
+            : events;
           const normalized = yield* normalizeEvents(
             input.guardPendingUserInputCancellations === true
-              ? yield* guardUserInputCancellations(events)
-              : events,
+              ? yield* guardUserInputCancellations(metered)
+              : metered,
           );
           const committed = yield* eventStore.append({
             ...(input.commandId === undefined ? {} : { commandId: input.commandId }),

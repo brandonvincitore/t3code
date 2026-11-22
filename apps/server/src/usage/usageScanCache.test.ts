@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 
 import {
   decodeScanCache,
+  dedupeWithinFile,
   makeScanCacheWriter,
   type CachedFile,
   type ScanCache,
@@ -381,10 +382,60 @@ describe("scan cache round trip", () => {
       },
     };
     const migrated = decodeScanCache(legacy, TEST_FORMAT_MAP);
-    expect(migrated.get("/deleted-kiro.jsonl")).toEqual(kiroEntry);
+    expect(migrated.get("/deleted-kiro.jsonl")).toEqual({
+      ...kiroEntry,
+      size: -1,
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+    });
     expect(decodeScanCache(parse(makeScanCacheWriter()(migrated, {})), TEST_FORMAT_MAP)).toEqual(
       migrated,
     );
+  });
+
+  it("keeps deleted Kiro credits but re-parses pre-v18 transcripts with legacy keys", () => {
+    const original = cacheWith([
+      [
+        "/kiro/messages.jsonl",
+        100,
+        [record({ provider: "kiro", credits: 0, dedupeKey: "kiro:execution-a" })],
+      ],
+    ]);
+    const entry = { ...original.get("/kiro/messages.jsonl")!, provider: "kiro" as const };
+    original.set("/kiro/messages.jsonl", entry);
+    const encoded = parse(makeScanCacheWriter()(original, {}));
+    const restored = decodeScanCache({ ...encoded, version: 17 }, TEST_FORMAT_MAP);
+    expect(restored.get("/kiro/messages.jsonl")).toEqual({
+      ...entry,
+      size: -1,
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+    });
+    expect(decodeScanCache(parse(makeScanCacheWriter()(restored, {})), TEST_FORMAT_MAP)).toEqual(
+      restored,
+    );
+  });
+
+  it("retains the newest Kiro credit revision and conflicts through cache round trips", () => {
+    const first = record({ provider: "kiro", credits: 2, dedupeKey: "kiro:turn-a" });
+    const revised = { ...first, timestampMs: first.timestampMs + 2, credits: 0.123456789 };
+    const older = { ...first, timestampMs: first.timestampMs + 1, credits: 3 };
+    const merged = dedupeWithinFile([first, revised, older]);
+    expect(merged).toEqual([
+      { ...first, credits: revised.credits, creditsUpdatedAtMs: revised.timestampMs },
+    ]);
+    const conflicted = dedupeWithinFile([...merged, { ...revised, credits: 0.25 }]);
+    expect(conflicted[0]).toMatchObject({
+      creditsConflict: true,
+      creditsUpdatedAtMs: revised.timestampMs,
+    });
+    expect(conflicted[0]).not.toHaveProperty("credits");
+    const cache = cacheWith([["/kiro/messages.jsonl", 100, conflicted]]);
+    cache.set("/kiro/messages.jsonl", { ...cache.get("/kiro/messages.jsonl")!, provider: "kiro" });
+    const restored = decodeScanCache(parse(makeScanCacheWriter()(cache, {})), TEST_FORMAT_MAP);
+    expect(restored).toEqual(cache);
+    const next = { ...first, timestampMs: revised.timestampMs + 1, credits: 0 };
+    expect(dedupeWithinFile([...restored.get("/kiro/messages.jsonl")!.records, next])).toEqual([
+      { ...first, credits: 0, creditsUpdatedAtMs: next.timestampMs },
+    ]);
   });
 
   it.each(["s:p:grok-4.5", "s:p:1786000000000:grok-4.5"])(

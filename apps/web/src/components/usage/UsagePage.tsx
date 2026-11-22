@@ -45,7 +45,7 @@ import {
   enumerateDays,
   enumerateHourStarts,
   formatCount,
-  formatCredits,
+  formatCreditUsage,
   formatDateTimeShort,
   formatDayShort,
   formatHourShort,
@@ -672,6 +672,10 @@ function UsageOverview({
     0,
   );
   const rankedProviders = rankProvidersByMetric(activeProviders, merged.providers, metric);
+  const creditTotals = merged.providers.find(
+    (provider) =>
+      provider.provider === "kiro" && provider.records > 0 && provider.records === merged.records,
+  );
 
   return (
     <div aria-busy={loadingPartial} className="flex flex-col gap-6">
@@ -689,9 +693,11 @@ function UsageOverview({
                 figureClass(loadingPartial),
               )}
             >
-              {metric === "cost"
-                ? formatUsd(merged.costUsd, locale)
-                : formatTokens(merged.totalTokens)}
+              {creditTotals !== undefined
+                ? formatCreditUsage(creditTotals, locale, m)
+                : metric === "cost"
+                  ? formatUsd(merged.costUsd, locale)
+                  : formatTokens(merged.totalTokens)}
             </p>
             <p className="inline-flex items-center gap-1 text-xs text-muted-foreground">
               <span>
@@ -701,25 +707,28 @@ function UsageOverview({
                     formatted: formatCount(merged.sessions, locale),
                   })}
                 </span>
-                {metric === "cost" && ` · ${gt("API estimate")}`}
+                {metric === "cost" && creditTotals === undefined && ` · ${gt("API estimate")}`}
               </span>
-              {metric === "cost" && merged.costQuality.unpricedShare > 0 && (
-                <Popover>
-                  <PopoverTrigger
-                    openOnHover
-                    render={<InlineButton tone="muted" />}
-                    aria-label={gt("Unpriced usage details")}
-                  >
-                    <InfoIcon className="size-3" aria-hidden />
-                  </PopoverTrigger>
-                  <PopoverPopup side="top" tooltipStyle>
-                    <T>
-                      API estimate excludes{" "}
-                      <Var>{formatPercent(merged.costQuality.unpricedShare)}</Var> unpriced records.
-                    </T>
-                  </PopoverPopup>
-                </Popover>
-              )}
+              {metric === "cost" &&
+                creditTotals === undefined &&
+                merged.costQuality.unpricedShare > 0 && (
+                  <Popover>
+                    <PopoverTrigger
+                      openOnHover
+                      render={<InlineButton tone="muted" />}
+                      aria-label={gt("Unpriced usage details")}
+                    >
+                      <InfoIcon className="size-3" aria-hidden />
+                    </PopoverTrigger>
+                    <PopoverPopup side="top" tooltipStyle>
+                      <T>
+                        API estimate excludes{" "}
+                        <Var>{formatPercent(merged.costQuality.unpricedShare)}</Var> unpriced
+                        records.
+                      </T>
+                    </PopoverPopup>
+                  </Popover>
+                )}
             </p>
           </div>
 
@@ -776,7 +785,7 @@ function UsageOverview({
                     {awaitingData
                       ? "-"
                       : totals !== undefined && isCreditsOnly(totals)
-                        ? formatCredits(totals.credits, locale, m)
+                        ? formatCreditUsage(totals, locale, m)
                         : metric === "cost"
                           ? formatUsd(totals?.costUsd ?? 0, locale)
                           : formatTokens(totals?.totalTokens ?? 0)}
@@ -816,54 +825,62 @@ function UsageOverview({
                 ? gt("Daily processed tokens")
                 : gt("Daily cost")}
           </h2>
-          <UsageProviderChart
-            providers={activeProviders}
-            loadingProviders={chartLoadingProviders}
-            days={days}
-            daily={merged.daily}
-            hours={hours}
-            hourly={merged.hourly}
-            metric={metric}
-            referenceTime={shownWindow.untilTime}
-            resolution={shownHourly ? "hour" : "day"}
-            timeZone={shownWindow.timeZone}
-            hour12={hour12}
-          />
+          {creditTotals !== undefined ? (
+            <p className="text-sm text-muted-foreground">
+              <T>Kiro reports credits. Token and dollar charts are unavailable.</T>
+            </p>
+          ) : (
+            <UsageProviderChart
+              providers={activeProviders}
+              loadingProviders={chartLoadingProviders}
+              days={days}
+              daily={merged.daily}
+              hours={hours}
+              hourly={merged.hourly}
+              metric={metric}
+              referenceTime={shownWindow.untilTime}
+              resolution={shownHourly ? "hour" : "day"}
+              timeZone={shownWindow.timeZone}
+              hour12={hour12}
+            />
+          )}
         </div>
       </section>
 
-      <section className="flex flex-col gap-2">
-        <h2 className="text-sm font-medium text-foreground">
-          <T>Totals</T>
-        </h2>
-        <dl className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
-          <Metric
-            loading={loadingPartial}
-            label={gt("Processed tokens")}
-            value={formatTokens(merged.totalTokens)}
-          />
-          <Metric
-            loading={loadingPartial}
-            label={gt("Cached input")}
-            value={formatTokens(merged.cachedInputTokens)}
-          />
-          <Metric
-            loading={loadingPartial}
-            label={gt("Uncached input")}
-            value={formatTokens(merged.uncachedInputTokens)}
-          />
-          <Metric
-            loading={loadingPartial}
-            label={gt("Output", { $context: "output tokens" })}
-            value={formatTokens(merged.outputTokens)}
-          />
-          <Metric
-            loading={loadingPartial}
-            label={gt("Cache savings")}
-            value={formatUsd(merged.costQuality.cacheSavingsUsd, locale)}
-          />
-        </dl>
-      </section>
+      {creditTotals === undefined ? (
+        <section className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium text-foreground">
+            <T>Totals</T>
+          </h2>
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
+            <Metric
+              loading={loadingPartial}
+              label={gt("Processed tokens")}
+              value={formatTokens(merged.totalTokens)}
+            />
+            <Metric
+              loading={loadingPartial}
+              label={gt("Cached input")}
+              value={formatTokens(merged.cachedInputTokens)}
+            />
+            <Metric
+              loading={loadingPartial}
+              label={gt("Uncached input")}
+              value={formatTokens(merged.uncachedInputTokens)}
+            />
+            <Metric
+              loading={loadingPartial}
+              label={gt("Output", { $context: "output tokens" })}
+              value={formatTokens(merged.outputTokens)}
+            />
+            <Metric
+              loading={loadingPartial}
+              label={gt("Cache savings")}
+              value={formatUsd(merged.costQuality.cacheSavingsUsd, locale)}
+            />
+          </dl>
+        </section>
+      ) : null}
 
       {merged.totalTokens > 0 ? (
         <section
@@ -987,7 +1004,7 @@ function UsageOverview({
                       </td>
                       <td className={cn("py-2.5 pl-6 text-foreground", rowFigures)}>
                         {isCreditsOnly(model) ? (
-                          formatCredits(model.credits, locale, m)
+                          formatCreditUsage(model, locale, m)
                         ) : isModelCostUnknown(model) ? (
                           <span className="text-muted-foreground">
                             <T>Unpriced</T>
@@ -1000,7 +1017,9 @@ function UsageOverview({
                         {share === null ? "" : formatPercent(share)}
                       </td>
                       <td className={cn("py-2.5 pr-2 pl-6", rowFigures)}>
-                        {formatTokens(model.totalTokens)}
+                        {model.provider === "kiro"
+                          ? gt("Unavailable")
+                          : formatTokens(model.totalTokens)}
                       </td>
                     </tr>
                   );
@@ -1075,7 +1094,9 @@ function UsageOverview({
                           figureClass(loadingPartial),
                         )}
                       >
-                        {formatUsd(period.costUsd, locale)}
+                        {creditTotals === undefined
+                          ? formatUsd(period.costUsd, locale)
+                          : gt("Unavailable")}
                       </td>
                       <td
                         className={cn(
@@ -1083,7 +1104,9 @@ function UsageOverview({
                           figureClass(loadingPartial),
                         )}
                       >
-                        {formatTokens(period.totalTokens)}
+                        {creditTotals === undefined
+                          ? formatTokens(period.totalTokens)
+                          : gt("Unavailable")}
                       </td>
                     </tr>
                   ))

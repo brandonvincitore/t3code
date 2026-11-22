@@ -1,8 +1,9 @@
 import { shouldPreserveAssistantLineBreaks } from "@t3tools/shared/assistantInsights";
+import { formatCredits } from "@t3tools/shared/usageFormat";
 import { MessageId, type RunId, type TurnItemId } from "@t3tools/contracts";
 import { canForkProjectedAssistantItem } from "@t3tools/client-runtime/state/thread-workflows";
 import { agentWorkingDirectories } from "@t3tools/client-runtime/workspace-basename-lookup";
-import { T, useGT, useMessages } from "gt-react";
+import { T, useGT, useLocale, useMessages } from "gt-react";
 import { memo, use, useState } from "react";
 import { type ChatMessage, type TurnDiffSummary } from "../../types";
 import ChatMarkdown from "../ChatMarkdown";
@@ -277,7 +278,52 @@ function AssistantMessageMeta({
           </TooltipPopup>
         </Tooltip>
       )}
+      {!message.streaming && projectedItem?.item.type === "assistant_message" ? (
+        <AssistantTurnCredits projectedItem={projectedItem} />
+      ) : null}
     </div>
+  );
+}
+
+function AssistantTurnCredits({
+  projectedItem,
+}: {
+  readonly projectedItem: NonNullable<Extract<TimelineRow, { kind: "message" }>["projectedItem"]>;
+}) {
+  const ctx = use(TimelineRowCtx);
+  const support = useV2ItemSupport({
+    environmentId: ctx.activeThreadEnvironmentId,
+    sourceThreadId: projectedItem.sourceThreadId,
+    sourceItemId: projectedItem.sourceItemId,
+  });
+  const gt = useGT();
+  const locale = useLocale();
+  const m = useMessages();
+  const usage = support.providerTurn?.turnCreditUsage;
+  if (usage === undefined) return null;
+  const amount =
+    usage.coverage === "conflicting"
+      ? gt("Credits unavailable")
+      : formatCredits(usage.credits, locale, m);
+  const description =
+    usage.coverage === "conflicting"
+      ? gt(
+          "Conflicting native credit reports for this turn’s main agent. Unreported and child work are excluded.",
+        )
+      : gt(
+          "Native-reported credits for this turn’s main agent. Unreported and child work are excluded.",
+        );
+
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        aria-label={gt("{amount}. {description}", { amount, description })}
+        render={<span className="text-muted-foreground" tabIndex={0} />}
+      >
+        {amount}
+      </TooltipTrigger>
+      <TooltipPopup>{description}</TooltipPopup>
+    </Tooltip>
   );
 }
 

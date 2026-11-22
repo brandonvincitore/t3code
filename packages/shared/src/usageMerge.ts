@@ -21,6 +21,7 @@ export interface ProviderTotals {
   readonly totalTokens: number;
   /** Provider-billed credits; not convertible to costUsd. */
   readonly credits: number;
+  readonly creditsUnavailableRecords?: number;
   readonly records: number;
   readonly sessions: number;
   readonly costShare: number;
@@ -34,6 +35,7 @@ export interface ModelTotals {
   readonly totalTokens: number;
   readonly tokens: UsageTokenTotals;
   readonly credits: number;
+  readonly creditsUnavailableRecords?: number;
   readonly records: number;
   readonly unpricedRecords: number;
   readonly unpricedTokens: number;
@@ -162,12 +164,20 @@ function bucketKey(bucket: UsageBucket): string {
   return JSON.stringify([bucket.day, bucket.hourStart ?? null, bucket.provider, bucket.model]);
 }
 
+function unavailableCreditRecords(bucket: UsageBucket): number {
+  return (
+    bucket.creditsUnavailableRecords ??
+    (bucket.provider === "kiro" && bucket.credits === undefined ? bucket.records : 0)
+  );
+}
+
 function claimSources(
   environments: readonly EnvironmentUsage[],
   sourceKey: (fingerprint: UsageSourceFingerprint) => string,
 ): {
   readonly ownerScanByFingerprint: ReadonlyMap<string, { readonly source: UsageSource }>;
   readonly supplementalBucketsByEnvironment: ReadonlyMap<EnvironmentId, ReadonlySet<UsageBucket>>;
+  readonly creditUnavailableBuckets: ReadonlySet<UsageBucket>;
   readonly sessionsByFingerprint: ReadonlyMap<string, number>;
   readonly duplicates: readonly string[];
 } {
@@ -175,8 +185,12 @@ function claimSources(
     string,
     { environment: EnvironmentUsage; source: UsageSource }
   >();
-  const seenBucketKeysByFingerprint = new Map<string, Set<string>>();
+  const selectedBucketsByFingerprint = new Map<
+    string,
+    Map<string, { readonly bucket: UsageBucket; readonly readAtMs: number }>
+  >();
   const supplementalBucketsByEnvironment = new Map<EnvironmentId, Set<UsageBucket>>();
+  const creditUnavailableBuckets = new Set<UsageBucket>();
   const sessionsByFingerprint = new Map<string, number>();
   const duplicates: string[] = [];
 
@@ -209,25 +223,44 @@ function claimSources(
       const owner = ownerScanByFingerprint.get(key);
       // A scan under another model filter counts different records, so its cells are not missing ones.
       if (
-        owner?.source.status !== "ok" ||
-        Date.parse(environment.summary.readAt) <= Date.parse(owner.environment.summary.readAt) ||
+        owner === undefined ||
+        owner.source === source ||
         JSON.stringify(environment.summary.modelFilter) !==
           JSON.stringify(owner.environment.summary.modelFilter)
       ) {
         continue;
       }
-      let seen = seenBucketKeysByFingerprint.get(key);
-      if (seen === undefined) {
-        seen = new Set(bucketsForSource(owner.environment.summary, owner.source).map(bucketKey));
-        seenBucketKeysByFingerprint.set(key, seen);
+      const readAtMs = Date.parse(environment.summary.readAt);
+      const ownerReadAtMs = Date.parse(owner.environment.summary.readAt);
+      if (readAtMs < ownerReadAtMs) continue;
+      const partialBuckets = bucketsForSource(environment.summary, source);
+      let selected = selectedBucketsByFingerprint.get(key);
+      if (selected === undefined) {
+        selected = new Map(
+          bucketsForSource(owner.environment.summary, owner.source).map((bucket) => [
+            bucketKey(bucket),
+            { bucket, readAtMs: ownerReadAtMs },
+          ]),
+        );
+        selectedBucketsByFingerprint.set(key, selected);
+      }
+      // A newer or equally timed conflict invalidates the selected amount; cells cannot isolate its credits.
+      for (const bucket of partialBuckets) {
+        if (unavailableCreditRecords(bucket) === 0) continue;
+        const held = selected.get(bucketKey(bucket));
+        if (held !== undefined && readAtMs >= held.readAtMs)
+          creditUnavailableBuckets.add(held.bucket);
+      }
+      if (owner.source.status !== "ok" || readAtMs === ownerReadAtMs) {
+        continue;
       }
       const supplemental =
         supplementalBucketsByEnvironment.get(environment.environmentId) ?? new Set<UsageBucket>();
       let added = false;
-      for (const bucket of bucketsForSource(environment.summary, source)) {
+      for (const bucket of partialBuckets) {
         const cell = bucketKey(bucket);
-        if (seen.has(cell)) continue;
-        seen.add(cell);
+        if (selected.has(cell)) continue;
+        selected.set(cell, { bucket, readAtMs });
         supplemental.add(bucket);
         added = true;
       }
@@ -243,6 +276,7 @@ function claimSources(
   return {
     ownerScanByFingerprint,
     supplementalBucketsByEnvironment,
+    creditUnavailableBuckets,
     sessionsByFingerprint,
     duplicates,
   };
@@ -360,6 +394,7 @@ export function mergeUsage(
   const {
     ownerScanByFingerprint,
     supplementalBucketsByEnvironment,
+    creditUnavailableBuckets,
     sessionsByFingerprint,
     duplicates,
   } = claimSources(current, sourceKey);
@@ -380,7 +415,14 @@ export function mergeUsage(
 
   const providerAccumulator = new Map<
     UsageProviderKind,
-    { costUsd: number; totalTokens: number; credits: number; records: number; sessions: number }
+    {
+      costUsd: number;
+      totalTokens: number;
+      credits: number;
+      creditsUnavailableRecords: number;
+      records: number;
+      sessions: number;
+    }
   >();
   const modelAccumulator = new Map<
     string,
@@ -390,6 +432,7 @@ export function mergeUsage(
       totalTokens: number;
       tokens: UsageTokenTotals;
       credits: number;
+      creditsUnavailableRecords: number;
       records: number;
       unpricedRecords: number;
       unpricedTokens: number;
@@ -432,6 +475,7 @@ export function mergeUsage(
         costUsd: 0,
         totalTokens: 0,
         credits: 0,
+        creditsUnavailableRecords: 0,
         records: 0,
         sessions: 0,
       };
@@ -441,6 +485,12 @@ export function mergeUsage(
 
     for (const bucket of buckets) {
       const tokens = bucketTokens(bucket);
+      const unavailable = unavailableCreditRecords(bucket);
+      const invalidated = creditUnavailableBuckets.has(bucket);
+      const credits = invalidated ? 0 : (bucket.credits ?? 0);
+      const creditsUnavailableRecords = invalidated
+        ? Math.max(bucket.records, unavailable)
+        : unavailable;
 
       costUsd += bucket.costUsd;
       cacheSavingsUsd += bucket.cacheSavingsUsd;
@@ -466,12 +516,14 @@ export function mergeUsage(
         costUsd: 0,
         totalTokens: 0,
         credits: 0,
+        creditsUnavailableRecords: 0,
         records: 0,
         sessions: 0,
       };
       provider.costUsd += bucket.costUsd;
       provider.totalTokens += tokens;
-      provider.credits += bucket.credits ?? 0;
+      provider.credits += credits;
+      provider.creditsUnavailableRecords += creditsUnavailableRecords;
       provider.records += bucket.records;
       providerAccumulator.set(bucket.provider, provider);
 
@@ -488,6 +540,7 @@ export function mergeUsage(
           reasoningTokens: 0,
         },
         credits: 0,
+        creditsUnavailableRecords: 0,
         records: 0,
         unpricedRecords: 0,
         unpricedTokens: 0,
@@ -501,7 +554,8 @@ export function mergeUsage(
         outputTokens: model.tokens.outputTokens + bucket.totals.outputTokens,
         reasoningTokens: model.tokens.reasoningTokens + bucket.totals.reasoningTokens,
       };
-      model.credits += bucket.credits ?? 0;
+      model.credits += credits;
+      model.creditsUnavailableRecords += creditsUnavailableRecords;
       model.records += bucket.records;
       model.unpricedRecords += bucket.unpricedRecords;
       if (bucket.unpricedTokens !== undefined) {
@@ -554,6 +608,7 @@ export function mergeUsage(
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
       credits: totals.credits,
+      creditsUnavailableRecords: totals.creditsUnavailableRecords,
       records: totals.records,
       sessions: totals.sessions,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
@@ -569,6 +624,7 @@ export function mergeUsage(
       totalTokens: totals.totalTokens,
       tokens: totals.tokens,
       credits: totals.credits,
+      creditsUnavailableRecords: totals.creditsUnavailableRecords,
       records: totals.records,
       unpricedRecords: totals.unpricedRecords,
       unpricedTokens: totals.unpricedTokens,

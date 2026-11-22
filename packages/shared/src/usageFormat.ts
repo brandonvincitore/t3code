@@ -5,7 +5,7 @@ import {
   type UsageSource,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
-import { msg } from "gt-i18n";
+import { mFallback, msg } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
 const NUMBER_FORMAT_OPTIONS = {
@@ -88,10 +88,14 @@ export function formatUsd(value: number, locale?: string): string {
 
 export function formatCredits(
   value: number,
-  locale: string | undefined,
-  resolve: MFunctionType,
+  locale?: string,
+  resolve: MFunctionType = mFallback,
 ): string {
-  const amount = numberFormatter(formatLocale(locale), "credits").format(value);
+  const formatter = numberFormatter(formatLocale(locale), "credits");
+  if (value > 0 && value < 0.01) {
+    return resolve(msg("<{amount} credits", { amount: formatter.format(0.01) }));
+  }
+  const amount = formatter.format(value);
   return resolve(
     msg("{count, plural, one {{amount} credit} other {{amount} credits}}", {
       amount,
@@ -100,13 +104,34 @@ export function formatCredits(
   );
 }
 
+export function formatCreditUsage(
+  totals: {
+    readonly credits: number;
+    readonly records: number;
+    readonly creditsUnavailableRecords?: number;
+  },
+  locale?: string,
+  resolve: MFunctionType = mFallback,
+): string {
+  const unavailable = totals.creditsUnavailableRecords ?? 0;
+  if (unavailable > 0 && unavailable >= totals.records) {
+    return resolve(msg("Credits unavailable"));
+  }
+  const amount = formatCredits(totals.credits, locale, resolve);
+  return unavailable > 0 ? resolve(msg("{amount} observed", { amount })) : amount;
+}
+
 /** Credit-metered usage has no token count or dollar cost to show. */
 export function isCreditsOnly(totals: {
+  readonly provider?: string;
   readonly credits: number;
   readonly totalTokens: number;
   readonly costUsd: number;
 }): boolean {
-  return totals.credits > 0 && totals.totalTokens === 0 && totals.costUsd === 0;
+  return (
+    totals.provider === "kiro" ||
+    (totals.credits > 0 && totals.totalTokens === 0 && totals.costUsd === 0)
+  );
 }
 
 export function formatCount(value: number, locale?: string): string {

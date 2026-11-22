@@ -1,5 +1,10 @@
 import { T, useGT, useLocale, useMessages, Var } from "gt-react";
-import { formatCredits, formatPercent, formatTokens, formatUsd } from "@t3tools/shared/usageFormat";
+import {
+  formatCreditUsage,
+  formatPercent,
+  formatTokens,
+  formatUsd,
+} from "@t3tools/shared/usageFormat";
 import { isModelCostUnknown, type ModelTotals } from "@t3tools/shared/usageMerge";
 
 import { mergeAnsweredUsage, type EnvironmentUsageStatus } from "../../state/usage";
@@ -63,7 +68,7 @@ export function UsageModelDialog({
   const perMillion = costPerMillionTokens(model);
   const stats =
     model.provider === "kiro"
-      ? [{ label: gt("Credits"), value: formatCredits(model.credits, locale, m) }]
+      ? [{ label: gt("Credits"), value: formatCreditUsage(model, locale, m) }]
       : [
           {
             label: gt("Cost"),

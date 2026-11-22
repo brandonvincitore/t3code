@@ -12,6 +12,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import type { KiroSettings } from "../settings.ts";
+import { readKiroCredits } from "./creditSummary.ts";
 
 const KiroScanState = Schema.Struct({
   sessionId: Schema.String,
@@ -26,24 +27,8 @@ function modelSlug(display: string): string {
   return display.trim().toLowerCase().replace(/\s+/g, "-");
 }
 
-function readCredits(summaries: unknown): number | null {
-  if (!Array.isArray(summaries)) return null;
-  let credits = 0;
-  let found = false;
-  for (const summary of summaries) {
-    if (typeof summary !== "object" || summary === null) continue;
-    const entry = summary as { unit?: unknown; usage?: unknown };
-    if (
-      entry.unit !== "credit" ||
-      typeof entry.usage !== "number" ||
-      !Number.isFinite(entry.usage)
-    ) {
-      continue;
-    }
-    credits += Math.max(0, entry.usage);
-    found = true;
-  }
-  return found && Number.isFinite(credits) ? credits : null;
+function nativeId(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
 }
 
 function sessionIdOf(filePath: string): string {
@@ -53,12 +38,14 @@ function sessionIdOf(filePath: string): string {
 function parseRecord(parsed: unknown, state: KiroScanState): readonly UsageRecord[] {
   if (typeof parsed !== "object" || parsed === null) return [];
   const entry = parsed as {
+    id?: unknown;
     timestamp?: unknown;
     payload?: {
       type?: unknown;
       content?: unknown;
       promptTurnSummaries?: unknown;
       executionId?: unknown;
+      turnId?: unknown;
     };
   };
   const payload = entry.payload;
@@ -70,8 +57,11 @@ function parseRecord(parsed: unknown, state: KiroScanState): readonly UsageRecor
   }
   if (payload.type !== "usage_summary") return [];
   const timestampMs = parseTimestampMs(entry.timestamp);
-  const credits = readCredits(payload.promptTurnSummaries);
+  const credits = readKiroCredits(payload.promptTurnSummaries);
   if (timestampMs === null || credits === null) return [];
+  const executionId = nativeId(payload.executionId);
+  const turnId = nativeId(payload.turnId);
+  const rowId = nativeId(entry.id);
   return [
     {
       provider: "kiro",
@@ -82,18 +72,28 @@ function parseRecord(parsed: unknown, state: KiroScanState): readonly UsageRecor
       reportedCostUsd: null,
       credits,
       speed: "standard",
-      dedupeKey:
-        typeof payload.executionId === "string" && payload.executionId.length > 0
-          ? `kiro:${payload.executionId}`
-          : null,
+      dedupeKey: turnId
+        ? `kiro:turn:${JSON.stringify([executionId, turnId])}`
+        : rowId
+          ? `kiro:row:${rowId}`
+          : executionId
+            ? `kiro:${executionId}`
+            : null,
     },
   ];
 }
 
 export const kiroUsageFormat: TranscriptUsageFormat<KiroScanState> = {
   selectFields: {
+    id: true,
     timestamp: true,
-    payload: { type: true, content: true, promptTurnSummaries: true, executionId: true },
+    payload: {
+      type: true,
+      content: true,
+      promptTurnSummaries: true,
+      executionId: true,
+      turnId: true,
+    },
   },
   usageMarkers: ['"usage_summary"', '"agent_note"'],
   parseLine: (line, state) => {

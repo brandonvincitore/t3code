@@ -68,6 +68,8 @@ export const UsageBucket = Schema.Struct({
   credits: Schema.optional(
     Schema.Number.check(Schema.isFinite(), Schema.isGreaterThanOrEqualTo(0)),
   ),
+  /** Records whose credit amount is unavailable; absent from older servers. */
+  creditsUnavailableRecords: Schema.optional(NonNegativeInt),
   costSource: UsageCostSource,
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,

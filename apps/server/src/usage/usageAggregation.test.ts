@@ -214,6 +214,42 @@ describe("UsageAggregator", () => {
     });
   });
 
+  it.each([0, 0.000000123456789])("preserves an explicit credit amount of %s", (credits) => {
+    const [bucket] = aggregate([record({ provider: "kiro", credits })]).buckets;
+    expect(bucket?.credits).toBe(credits);
+    expect(aggregate([record({ provider: "kiro" })]).buckets[0]).not.toHaveProperty("credits");
+  });
+
+  it("replaces Kiro credit snapshots by revision time while keeping their first bucket", () => {
+    const first = record({ provider: "kiro", dedupeKey: "kiro:turn-a", credits: 2 });
+    const revised = { ...first, timestampMs: first.timestampMs + 86400000, credits: 1.234567891 };
+    const stale = { ...first, timestampMs: first.timestampMs + 1000, credits: 3 };
+    const result = aggregate([first, revised, stale, revised]);
+    expect(result.duplicatesDropped).toBe(3);
+    expect(result.buckets).toEqual(aggregate([{ ...first, credits: revised.credits }]).buckets);
+  });
+
+  it("leaves conflicting equal-time Kiro credits unavailable until a newer snapshot arrives", () => {
+    const first = record({ provider: "kiro", dedupeKey: "kiro:turn-a", credits: 2 });
+    const contradictory = { ...first, credits: 1 };
+    for (const copies of [
+      [first, contradictory, first],
+      [contradictory, first, contradictory],
+    ]) {
+      const result = aggregate(copies);
+      expect(result.buckets[0]).not.toHaveProperty("credits");
+      expect(result.buckets[0]?.creditsUnavailableRecords).toBe(1);
+      expect(result.creditConflicts).toEqual([{ provider: "kiro", sourcePath: "", records: 1 }]);
+    }
+    const result = aggregate([
+      first,
+      contradictory,
+      { ...first, timestampMs: first.timestampMs + 1, credits: 0 },
+    ]);
+    expect(result.buckets[0]?.credits).toBe(0);
+    expect(result.creditConflicts).toEqual([]);
+  });
+
   it("buckets by the day in the requested time zone", () => {
     const utc = aggregate([record()], "UTC");
     const losAngeles = aggregate([record()], "America/Los_Angeles");
