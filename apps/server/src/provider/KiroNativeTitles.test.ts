@@ -18,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Exit from "effect/Exit";
@@ -128,18 +129,19 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
   };
   const bind = (support: Effect.Success<ReturnType<typeof makeKiroNativeTitles>>) =>
     support.bindRuntime(runtime, { HOME: `${root}/user`, KIRO_HOME: nativeHome }, cwd);
-  let receiptWrite: Effect.Effect<void> = Effect.void;
+  const host = yield* ProviderHost.ProviderHost;
+  const path = yield* Path.Path;
+  const receiptDirectory = path.join(host.paths.stateDir, "kiro-native-title-v1");
+  let beforeReceiptRename: Effect.Effect<void> = Effect.void;
   const support = yield* makeKiroNativeTitles(instanceId).pipe(
     Effect.provideService(FileSystem.FileSystem, {
       ...fs,
-      writeFileString: (...args) =>
-        args[0].includes("/kiro-native-title-v1/")
-          ? receiptWrite.pipe(Effect.andThen(fs.writeFileString(...args)))
-          : fs.writeFileString(...args),
+      rename: (from, to) =>
+        path.dirname(to) === receiptDirectory
+          ? beforeReceiptRename.pipe(Effect.andThen(fs.rename(from, to)))
+          : fs.rename(from, to),
     }),
   );
-  const host = yield* ProviderHost.ProviderHost;
-  const receiptDirectory = `${host.paths.stateDir}/kiro-native-title-v1`;
   const observe = (title: string, target = support) =>
     target.observe({ runtime, providerThread, title });
   const scope = yield* Scope.make();
@@ -179,8 +181,8 @@ const fixture = Effect.fn("test.nativeTitles.fixture")(function* () {
     external,
     observe,
     receiptDirectory,
-    setReceiptWrite: (effect: Effect.Effect<void>) => {
-      receiptWrite = effect;
+    setBeforeReceiptRename: (effect: Effect.Effect<void>) => {
+      beforeReceiptRename = effect;
     },
     onRename: (callback: typeof duringRename) => {
       duringRename = callback;
@@ -298,7 +300,7 @@ it.effect(
       yield* interrupted.initialize;
       const entered = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
-      interrupted.setReceiptWrite(
+      interrupted.setBeforeReceiptRename(
         Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(release))),
       );
       const retirement = yield* interrupted.observe("Manual before close").pipe(Effect.forkScoped);
