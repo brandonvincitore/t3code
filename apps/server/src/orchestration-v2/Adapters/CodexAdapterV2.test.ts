@@ -7250,6 +7250,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         const settled = yield* orchestrator.streamDomainEvents.pipe(
           Stream.filter(
             (event) =>
+              event.threadId === threadId &&
               event.type === "run.updated" &&
               (event.payload.status === "waiting" || event.payload.status === "completed"),
           ),
@@ -7268,7 +7269,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           dispatchMode: { type: "start_immediately" },
         });
         yield* worker.drain();
-        yield* Fiber.join(settled);
+        const sourceRunId = Option.getOrThrow(yield* Fiber.join(settled)).runId;
         yield* worker.drain();
         // regression: #37290 the command stayed running, and the thread waiting, until Stop.
         const projection = yield* orchestrator.getThreadProjection(threadId);
@@ -7278,7 +7279,7 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           ),
           ["interrupted"],
         );
-        assert.equal(projection.runs.at(-1)?.status, "completed");
+        assert.equal(projection.runs.find((run) => run.id === sourceRunId)?.status, "completed");
         assert.deepEqual(
           (yield* orchestrator.getThreadShell(threadId))?.pendingBackgroundTasks,
           [],

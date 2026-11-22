@@ -1,4 +1,3 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   isActiveSubagentStatus,
   type RuntimeSubagent,
@@ -23,7 +22,7 @@ import { ListRowLayout } from "../../components/ui/ListRowLayout";
 import { ListSection } from "../../components/ui/ListSection";
 import { RowPressable } from "../../components/ui/RowPressable";
 import { cn } from "../../lib/cn";
-import { useEnvironmentServerConfig, useThreadShell } from "../../state/entities";
+import { useEnvironmentServerConfig } from "../../state/entities";
 import { SUBAGENT_TONE_TEXT_CLASS, SubagentStatusDot } from "./SubagentStatusDot";
 import { SubagentStopButton } from "./SubagentStopButton";
 import {
@@ -152,7 +151,6 @@ export function ThreadWorkflowGroup(props: {
           open.members.map((member) => (
             <WorkflowMemberRow
               key={member.id}
-              environmentId={props.environmentId}
               member={member}
               provider={provider}
               onOpen={props.onOpen}
@@ -165,7 +163,6 @@ export function ThreadWorkflowGroup(props: {
 }
 
 function WorkflowMemberRow(props: {
-  readonly environmentId: EnvironmentId;
   readonly member: RuntimeSubagent;
   readonly provider: ServerProvider | undefined;
   readonly onOpen: (threadId: ThreadId) => void;
@@ -174,10 +171,6 @@ function WorkflowMemberRow(props: {
   const gt = useGT();
   const m = useMessages();
   const threadId = member.childThreadId === null ? null : ThreadId.make(member.childThreadId);
-  const shell = useThreadShell(
-    threadId === null ? null : scopeThreadRef(props.environmentId, threadId),
-  );
-  const canOpen = threadId !== null && shell !== null;
   const presentation = resolveSubagentRowPresentation(
     {
       title: member.title,
@@ -189,6 +182,7 @@ function WorkflowMemberRow(props: {
     false,
     m,
   );
+  const canOpen = presentation.canOpenThread;
   const { detail, error } = workflowMemberDetail(member);
   const metadata = workflowMemberMetadata(member, props.provider, m);
   const labels = [metadata.model, metadata.effort].filter((value) => value !== null);

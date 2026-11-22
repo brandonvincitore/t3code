@@ -1114,8 +1114,8 @@ describe("AcpRuntimeModel", () => {
       }).events[0];
       if (event?._tag !== "ToolCallUpdated") throw new Error("expected a compaction tool update");
       patched = mergeToolCallState(patched, event.toolCall);
-      const { rawOutput, compactionError: error, meta } = patched.data;
-      return { summary: rawOutput, compactionError: error, meta };
+      const { rawOutput, compactionError, meta } = patched.data;
+      return { summary: rawOutput, compactionError, meta };
     };
     const kept = [{ type: "text" as const, text: "Kept the plan." }];
     expect(
@@ -1139,17 +1139,17 @@ describe("AcpRuntimeModel", () => {
     });
     expect(patchCompaction({ status: "failed", error: "Context is still too large." })).toEqual({
       summary: undefined,
-      error: "Context is still too large.",
+      compactionError: "Context is still too large.",
       meta: undefined,
     });
     expect(patchCompaction({ status: "failed" })).toEqual({
       summary: undefined,
-      error: "Context is still too large.",
+      compactionError: "Context is still too large.",
       meta: undefined,
     });
     expect(patchCompaction({ status: "failed", error: null })).toEqual({
       summary: undefined,
-      error: undefined,
+      compactionError: undefined,
       meta: undefined,
     });
 
