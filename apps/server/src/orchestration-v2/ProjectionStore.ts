@@ -106,6 +106,7 @@ import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
 import { threadHtmlRenderAttachmentIds } from "../attachmentStore.ts";
 import { DELEGATED_TASK_MESSAGE_CONDITION } from "./delegatedTaskMessage.ts";
 import {
+  BUFFERED_PROVIDER_NOTIFICATION_CONDITION,
   DEFERRED_COMMAND_MESSAGE_CONDITION,
   JAVASCRIPT_TRIM_WHITESPACE,
 } from "./deferredCommandMessage.ts";
@@ -5578,9 +5579,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 WHERE thread_id = ${threadId} AND ${sql.literal(DEFERRED_COMMAND_MESSAGE_CONDITION)}
                 UNION
                 SELECT payload_json, created_at, message_id FROM orchestration_v2_projection_messages
-                WHERE thread_id = ${threadId} AND role = 'user'
-                  AND json_extract(payload_json, '$.creationSource') = 'provider'
-                  AND json_type(payload_json, '$.notification') = 'object'
+                WHERE thread_id = ${threadId} AND ${sql.literal(BUFFERED_PROVIDER_NOTIFICATION_CONDITION)}
               ) ORDER BY created_at ASC, message_id ASC
             `.pipe(Effect.flatMap(decodeRows(decodeMessagePayload, threadId)));
             const conversation = yield* sql<{ present: number }>`
