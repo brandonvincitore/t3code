@@ -1293,7 +1293,7 @@ export const layer: Layer.Layer<
                     createdAt: yield* DateTime.now,
                   }),
                 ];
-          if (goalCommand || isCompactionCommandMessage(providerMessage)) {
+          if (slashCommand) {
             return { handoffs, attachments: [] };
           }
           // History delivery (inline or injected) is text only, so missed images ride on prompts
