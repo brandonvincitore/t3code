@@ -51,11 +51,9 @@ export function useKiroMemory(
   const [draft, setDraft] = useState<Draft | null>(null);
   const [query, setQuery] = useState("");
   const [scopeFilter, setScopeFilter] = useState("");
-  const [pending, setPending] = useState<ReturnType<typeof msg> | null>(
-    msg("Loading Kiro memory…"),
-  );
-  const [error, setError] = useState<ReturnType<typeof msg> | null>(null);
-  const [notice, setNotice] = useState<ReturnType<typeof msg> | null>(null);
+  const [pending, setPending] = useState<string | null>(msg("Loading Kiro memory…"));
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const busy = useRef(true);
   const generation = useRef(0);
   const criteria = useRef<KiroMemoryListOptions>({ limit: 50 });
@@ -79,11 +77,7 @@ export function useKiroMemory(
     };
   }, [actions]);
 
-  async function run<A>(
-    label: ReturnType<typeof msg>,
-    operation: () => Promise<A>,
-    commit: (result: A) => void,
-  ) {
+  async function run<A>(label: string, operation: () => Promise<A>, commit: (result: A) => void) {
     if (busy.current) return;
     const token = generation.current;
     busy.current = true;
@@ -288,9 +282,9 @@ export function useKiroMemory(
     draft,
     query,
     scopeFilter,
-    pending: pending === null ? null : resolve(pending),
-    error: error === null ? null : resolve(error),
-    notice: notice === null ? null : resolve(notice),
+    pending: resolve(pending),
+    error: resolve(error),
+    notice: resolve(notice),
     setQuery,
     setScopeFilter,
     refresh,
