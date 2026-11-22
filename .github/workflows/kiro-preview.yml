@@ -52,7 +52,7 @@ jobs:
       - name: Check the integrated changes
         env:
           COMPARISON_BASE: ${{ steps.comparison.outputs.base }}
-        run: vp run check:changed "$COMPARISON_BASE" --concurrency 1
+        run: vp run check:changed "$COMPARISON_BASE" --concurrency 1 --timeout 1500
 
       - name: Replay the Kiro protocol fixtures
         working-directory: apps/server
