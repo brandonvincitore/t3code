@@ -11899,7 +11899,11 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                             (yield* titleInput.isCurrent)
                           );
                         });
-                        if (titleInput.appThread.titleManuallySet !== true && !(yield* isCurrent))
+                        if (
+                          (titleInput.appThread.titleRenamed ??
+                            titleInput.appThread.titleManuallySet) !== true &&
+                          !(yield* isCurrent)
+                        )
                           return;
                         yield* (
                           flavor.syncGeneratedTitle?.({

@@ -287,7 +287,7 @@ function InstanceSessionManagement(
     if (result._tag === "Success")
       toastManager.add({
         type: result.value.status === "synced" ? "success" : "info",
-        title: nativeHistorySyncMessage(result.value),
+        title: nativeHistorySyncMessage(result.value, m),
       });
     else reportFailure(gt("Could not sync native history"), result);
   };

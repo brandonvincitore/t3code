@@ -6,6 +6,7 @@ import type {
   ProviderInstanceId,
   KiroPowersState,
 } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { useContext, useState } from "react";
 import { serverEnvironment } from "../../state/server";
 import { Button } from "../ui/button";
@@ -23,11 +24,12 @@ export function KiroRefinementSection(props: {
   readonly projects: ReadonlyArray<Project>;
   readonly readOnly: boolean;
 }) {
+  const gt = useGT();
   const [selected, setSelected] = useState<ProjectId | null>(null);
   const [panel, setPanel] = useState<"specs" | "powers" | "memory" | null>(null);
   const project = props.projects.find((item) => item.id === selected) ?? props.projects[0];
   return (
-    <SettingsSection title="Kiro workspace">
+    <SettingsSection title={gt("Kiro workspace")}>
       <div className="flex flex-col gap-3 px-3 py-3 sm:px-4">
         {project ? (
           <>
@@ -38,7 +40,7 @@ export function KiroRefinementSection(props: {
                 if (next) setSelected(next.id);
               }}
             >
-              <SelectTrigger aria-label="Kiro project">
+              <SelectTrigger aria-label={gt("Kiro project")}>
                 <SelectValue />
               </SelectTrigger>
               <SelectPopup>
@@ -57,7 +59,7 @@ export function KiroRefinementSection(props: {
                   size="sm"
                   onClick={() => setPanel(panel === item ? null : item)}
                 >
-                  {item === "specs" ? "Specs" : item === "powers" ? "Powers" : "Memory"}
+                  {item === "specs" ? gt("Specs") : item === "powers" ? gt("Powers") : gt("Memory")}
                 </Button>
               ))}
             </div>
@@ -72,7 +74,7 @@ export function KiroRefinementSection(props: {
           </>
         ) : (
           <p className="text-sm text-muted-foreground">
-            Add a project on this environment to manage its Kiro resources.
+            <T>Add a project on this environment to manage its Kiro resources.</T>
           </p>
         )}
       </div>

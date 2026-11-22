@@ -8,6 +8,7 @@ import {
   parseKiroTaskProgress,
   type KiroSpecDocumentId,
 } from "@t3tools/shared/kiroSpecs";
+import { T, useGT, Var } from "gt-react-native";
 import { useState } from "react";
 import { TextInput, View } from "react-native";
 
@@ -47,6 +48,7 @@ function KiroSpecsPanelContent(props: {
   readonly onOpenFile?: (relativePath: string) => void;
   readonly onContinue?: (input: KiroSpecsContinueInput) => void;
 }) {
+  const gt = useGT();
   const [selectedSpec, setSelectedSpec] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<KiroSpecDocumentId | null>(null);
   const [editPath, setEditPath] = useState<string | null>(null);
@@ -133,7 +135,9 @@ function KiroSpecsPanelContent(props: {
       readQuery.refresh();
       tasksQuery.refresh();
     } else {
-      setSaveError("Could not save this spec file. Check workspace write access and try again.");
+      setSaveError(
+        gt("Could not save this spec file. Check workspace write access and try again."),
+      );
     }
   };
 
@@ -141,11 +145,15 @@ function KiroSpecsPanelContent(props: {
     <View className="gap-3">
       <View className="flex-row items-center justify-between gap-2">
         <View className="flex-1 gap-1">
-          <AppText className="font-t3-medium">Kiro Specs</AppText>
-          <AppText>Native Kiro artifacts in this project</AppText>
+          <AppText className="font-t3-medium">
+            <T>Kiro Specs</T>
+          </AppText>
+          <AppText>
+            <T>Native Kiro artifacts in this project</T>
+          </AppText>
         </View>
         <Button
-          label="Refresh"
+          label={gt("Refresh")}
           size="compact"
           onPress={() => {
             rootQuery.refresh();
@@ -159,13 +167,21 @@ function KiroSpecsPanelContent(props: {
       </View>
 
       {rootQuery.error ? (
-        <AppText>Could not list project files.</AppText>
+        <AppText>
+          <T>Could not list project files.</T>
+        </AppText>
       ) : rootQuery.isPending || (hasSpecs && specsQuery.isPending) ? (
-        <AppText>Looking for .kiro/specs…</AppText>
+        <AppText>
+          <T>
+            Looking for <Var>{".kiro/specs"}</Var>…
+          </T>
+        </AppText>
       ) : specs.length === 0 ? (
         <AppText>
-          No spec artifacts found under .kiro/specs/. Start a Spec, Quick Spec, or Bug Fix session
-          in Kiro to create them.
+          <T>
+            No spec artifacts found under <Var>{".kiro/specs/"}</Var>. Start a Spec, Quick Spec, or
+            Bug Fix session in Kiro to create them.
+          </T>
         </AppText>
       ) : (
         <>
@@ -187,13 +203,25 @@ function KiroSpecsPanelContent(props: {
 
           {specPath ? (
             <AppText>
-              {kind === "bugfix" ? "Bugfix spec" : "Feature spec (including Quick Spec artifacts)"}{" "}
-              · {progress.checked} of {progress.total} tasks checked
+              {kind === "bugfix" ? (
+                <T>
+                  Bugfix spec · <Var>{String(progress.checked)}</Var> of{" "}
+                  <Var>{String(progress.total)}</Var> tasks checked
+                </T>
+              ) : (
+                <T>
+                  Feature spec (including Quick Spec artifacts) ·{" "}
+                  <Var>{String(progress.checked)}</Var> of <Var>{String(progress.total)}</Var> tasks
+                  checked
+                </T>
+              )}
             </AppText>
           ) : null}
 
           {documents.length === 0 ? (
-            <AppText>This spec folder has no recognized artifacts yet.</AppText>
+            <AppText>
+              <T>This spec folder has no recognized artifacts yet.</T>
+            </AppText>
           ) : (
             <>
               <View className="flex-row flex-wrap gap-2">
@@ -216,7 +244,7 @@ function KiroSpecsPanelContent(props: {
                     <View className="flex-row flex-wrap gap-2">
                       {props.onOpenFile ? (
                         <Button
-                          label="Open in Files"
+                          label={gt("Open in Files")}
                           size="compact"
                           onPress={() => props.onOpenFile?.(document.path)}
                         />
@@ -224,7 +252,7 @@ function KiroSpecsPanelContent(props: {
                       {editing ? (
                         <>
                           <Button
-                            label="Cancel"
+                            label={gt("Cancel")}
                             size="compact"
                             disabled={saving}
                             onPress={() => {
@@ -233,7 +261,7 @@ function KiroSpecsPanelContent(props: {
                             }}
                           />
                           <Button
-                            label={saving ? "Saving…" : "Save"}
+                            label={saving ? gt("Saving…") : gt("Save")}
                             size="compact"
                             disabled={!canWrite || saving}
                             onPress={() => void save()}
@@ -241,7 +269,7 @@ function KiroSpecsPanelContent(props: {
                         </>
                       ) : (
                         <Button
-                          label="Edit"
+                          label={gt("Edit", { $context: "verb, edits a spec file" })}
                           size="compact"
                           disabled={
                             !canWrite ||
@@ -260,14 +288,22 @@ function KiroSpecsPanelContent(props: {
                     </View>
                   </View>
                   {readQuery.isPending ? (
-                    <AppText>Reading {document.fileName}…</AppText>
+                    <AppText>
+                      <T>
+                        Reading <Var>{document.fileName}</Var>…
+                      </T>
+                    </AppText>
                   ) : readQuery.error ? (
-                    <AppText>Could not read this spec file.</AppText>
+                    <AppText>
+                      <T>Could not read this spec file.</T>
+                    </AppText>
                   ) : content === null ? (
-                    <AppText>This artifact is not available in the workspace.</AppText>
+                    <AppText>
+                      <T>This artifact is not available in the workspace.</T>
+                    </AppText>
                   ) : editing ? (
                     <TextInput
-                      accessibilityLabel={`Edit ${document.fileName}`}
+                      accessibilityLabel={gt("Edit {fileName}", { fileName: document.fileName })}
                       value={draft}
                       onChangeText={setDraft}
                       multiline
@@ -280,7 +316,7 @@ function KiroSpecsPanelContent(props: {
                   {saveError ? <AppText>{saveError}</AppText> : null}
                   {props.onContinue && specName ? (
                     <Button
-                      label="Continue in Kiro"
+                      label={gt("Continue in Kiro")}
                       size="compact"
                       disabled={editing}
                       onPress={() =>

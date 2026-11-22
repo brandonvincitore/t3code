@@ -2,6 +2,7 @@ import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { makeKiroMcpActions } from "@t3tools/client-runtime/kiro-actions";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import type { EnvironmentId, KiroMcpStatus, ThreadId } from "@t3tools/contracts";
+import { T, useGT } from "gt-react";
 import { useContext, useState } from "react";
 import { ensureLocalApi } from "../../localApi";
 import { useQuietThreadShell } from "../../state/entities";
@@ -33,6 +34,7 @@ function KiroThreadMcpControls(props: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
 }) {
+  const gt = useGT();
   const registry = useContext(RegistryContext);
   const environment = useEnvironment(props.environmentId);
   const actions = makeKiroMcpActions({
@@ -73,11 +75,11 @@ function KiroThreadMcpControls(props: {
           setExpanded(!expanded);
           if (!expanded && canManage)
             void refresh().catch(() =>
-              setError("Start a Kiro session in this thread, then refresh MCP status."),
+              setError(gt("Start a Kiro session in this thread, then refresh MCP status.")),
             );
         }}
       >
-        MCP servers
+        <T>MCP servers</T>
       </Button>
       {error ? (
         <p role="status" className="text-sm text-muted-foreground">

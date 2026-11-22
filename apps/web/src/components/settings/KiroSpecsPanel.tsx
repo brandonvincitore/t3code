@@ -8,6 +8,7 @@ import {
   parseKiroTaskProgress,
   type KiroSpecDocumentId,
 } from "@t3tools/shared/kiroSpecs";
+import { T, useGT, Var } from "gt-react";
 import { useState } from "react";
 
 import { Button } from "../ui/button";
@@ -46,6 +47,7 @@ function KiroSpecsPanelContent(props: {
   readonly onOpenFile?: (relativePath: string) => void;
   readonly onContinue?: (input: KiroSpecsContinueInput) => void;
 }) {
+  const gt = useGT();
   const [selectedSpec, setSelectedSpec] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState<KiroSpecDocumentId | null>(null);
   const [editPath, setEditPath] = useState<string | null>(null);
@@ -144,7 +146,9 @@ function KiroSpecsPanelContent(props: {
       readQuery.refresh();
       taskQuery.refresh();
     } else {
-      setSaveError("Could not save this spec file. Check workspace write access and try again.");
+      setSaveError(
+        gt("Could not save this spec file. Check workspace write access and try again."),
+      );
     }
   };
 
@@ -158,33 +162,41 @@ function KiroSpecsPanelContent(props: {
   };
 
   return (
-    <section aria-label="Kiro Specs" className="flex flex-col gap-3 text-sm">
+    <section aria-label={gt("Kiro Specs")} className="flex flex-col gap-3 text-sm">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="font-medium">Specs</h2>
-          <p className="text-xs text-muted-foreground">Native Kiro artifacts in this project</p>
+          <h2 className="font-medium">
+            <T>Specs</T>
+          </h2>
+          <p className="text-xs text-muted-foreground">
+            <T>Native Kiro artifacts in this project</T>
+          </p>
         </div>
         <Button size="sm" variant="outline" onClick={refresh}>
-          Refresh
+          <T>Refresh</T>
         </Button>
       </div>
 
       {workspaceQuery.error ? (
         <p role="alert" className="text-muted-foreground">
-          Could not list project files.
+          <T>Could not list project files.</T>
         </p>
       ) : workspaceQuery.isPending || (specsDirectory && specsQuery.isPending) ? (
         <p role="status" className="text-muted-foreground">
-          Looking for `.kiro/specs`…
+          <T>
+            Looking for <Var>{"`.kiro/specs`"}</Var>…
+          </T>
         </p>
       ) : specs.length === 0 ? (
         <p className="text-muted-foreground">
-          No spec artifacts found under `.kiro/specs/`. Start a Spec, Quick Spec, or Bug Fix session
-          in Kiro to create them.
+          <T>
+            No spec artifacts found under <Var>{"`.kiro/specs/`"}</Var>. Start a Spec, Quick Spec,
+            or Bug Fix session in Kiro to create them.
+          </T>
         </p>
       ) : (
         <>
-          <div className="flex flex-wrap gap-1.5" aria-label="Kiro specs">
+          <div className="flex flex-wrap gap-1.5" aria-label={gt("Kiro specs")}>
             {specs.map((name) => (
               <Button
                 key={name}
@@ -206,27 +218,32 @@ function KiroSpecsPanelContent(props: {
             <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
               <span>
                 {kind === "bugfix"
-                  ? "Bugfix spec"
-                  : "Feature spec (including Quick Spec artifacts)"}
+                  ? gt("Bugfix spec")
+                  : gt("Feature spec (including Quick Spec artifacts)")}
               </span>
               <span aria-hidden="true">·</span>
               {taskProgress.total > 0 ? (
                 <span>
-                  {taskProgress.checked} of {taskProgress.total} tasks checked
+                  <T>
+                    <Var>{taskProgress.checked}</Var> of <Var>{taskProgress.total}</Var> tasks
+                    checked
+                  </T>
                 </span>
               ) : (
-                <span>No checklist tasks recorded</span>
+                <span>
+                  <T>No checklist tasks recorded</T>
+                </span>
               )}
             </div>
           ) : null}
 
           {documents.length === 0 ? (
             <p className="text-muted-foreground">
-              This spec folder has no recognized artifacts yet.
+              <T>This spec folder has no recognized artifacts yet.</T>
             </p>
           ) : (
             <>
-              <div className="flex flex-wrap gap-1.5" aria-label="Spec phase and document">
+              <div className="flex flex-wrap gap-1.5" aria-label={gt("Spec phase and document")}>
                 {documents.map((entry) => (
                   <Button
                     key={entry.id}
@@ -252,7 +269,7 @@ function KiroSpecsPanelContent(props: {
                           variant="ghost"
                           onClick={() => props.onOpenFile?.(document.path)}
                         >
-                          Open in Files
+                          <T>Open in Files</T>
                         </Button>
                       ) : null}
                       {isEditing ? (
@@ -263,14 +280,14 @@ function KiroSpecsPanelContent(props: {
                             disabled={saving}
                             onClick={cancelEditing}
                           >
-                            Cancel
+                            <T>Cancel</T>
                           </Button>
                           <Button
                             size="sm"
                             disabled={!canWrite || saving}
                             onClick={() => void save()}
                           >
-                            {saving ? "Saving…" : "Save"}
+                            {saving ? gt("Saving…") : gt("Save")}
                           </Button>
                         </>
                       ) : (
@@ -285,26 +302,28 @@ function KiroSpecsPanelContent(props: {
                           }
                           onClick={startEditing}
                         >
-                          Edit
+                          <T>Edit</T>
                         </Button>
                       )}
                     </div>
                   </div>
                   {readQuery.isPending ? (
                     <p role="status" className="text-muted-foreground">
-                      Reading {document.fileName}…
+                      <T>
+                        Reading <Var>{document.fileName}</Var>…
+                      </T>
                     </p>
                   ) : readQuery.error ? (
                     <p role="alert" className="text-muted-foreground">
-                      Could not read this spec file.
+                      <T>Could not read this spec file.</T>
                     </p>
                   ) : content === null ? (
                     <p className="text-muted-foreground">
-                      This artifact is not available in the workspace.
+                      <T>This artifact is not available in the workspace.</T>
                     </p>
                   ) : isEditing ? (
                     <Textarea
-                      aria-label={`Edit ${document.fileName}`}
+                      aria-label={gt("Edit {fileName}", { fileName: document.fileName })}
                       value={draft}
                       onChange={(event) => setDraft(event.target.value)}
                       rows={12}
@@ -336,7 +355,7 @@ function KiroSpecsPanelContent(props: {
                           })
                         }
                       >
-                        Continue in Kiro
+                        <T>Continue in Kiro</T>
                       </Button>
                     </div>
                   ) : null}

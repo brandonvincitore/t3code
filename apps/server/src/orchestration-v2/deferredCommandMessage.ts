@@ -10,3 +10,7 @@ const whitespace = `'${JAVASCRIPT_TRIM_WHITESPACE}'`;
  * partial index on it is only used when the read spells this text the same way.
  */
 export const DEFERRED_COMMAND_MESSAGE_CONDITION = `role = 'user' AND trim(${text}, ${whitespace}) GLOB '/*'`;
+
+export const BUFFERED_PROVIDER_NOTIFICATION_CONDITION = `role = 'user'
+  AND json_extract(payload_json, '$.creationSource') = 'provider'
+  AND json_type(payload_json, '$.notification') = 'object'`;
