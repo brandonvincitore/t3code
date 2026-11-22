@@ -1,4 +1,5 @@
-import { mFallback, msg, type MFunctionType } from "gt-i18n";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 import type { NativeHistorySyncResult } from "@t3tools/contracts";
 import type { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import type { AtomRegistry } from "effect/reactivity";
