@@ -132,14 +132,14 @@ const make = Effect.gen(function* () {
           current.thread.activeProviderThreadId === providerThread.id &&
           current.thread.providerInstanceId === providerThread.providerInstanceId &&
           current.thread.title === input.title &&
-          current.thread.titleManuallySet !== true &&
+          (current.thread.titleRenamed ?? current.thread.titleManuallySet) !== true &&
           current.thread.titleRegeneration == null &&
           DateTime.formatIso(current.thread.updatedAt) === input.updatedAt &&
           bound?.providerSessionId === providerThread.providerSessionId &&
           bound?.nativeThreadRef?.nativeId === providerThread.nativeThreadRef?.nativeId
         );
       }).pipe(Effect.orElseSucceed(() => false));
-      if (thread.titleManuallySet !== true && !(yield* isCurrent)) return;
+      if ((thread.titleRenamed ?? thread.titleManuallySet) !== true && !(yield* isCurrent)) return;
       yield* runtime.value
         .syncGeneratedTitle({ appThread: thread, providerThread, isCurrent })
         .pipe(

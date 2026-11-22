@@ -16,6 +16,7 @@ import {
   ProviderTurnId,
   type RunId,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
@@ -464,30 +465,55 @@ it.live.each(["pooled", "exclusive"] as const)(
         state,
         mode === "pooled" ? pooledCapabilities : exclusiveCapabilities,
       );
-      const continuationStarted = yield* Deferred.make<void>();
+      const handoffToolId = TurnItemId.make(`turn-item:workspace-handoff:${mode}:tool`);
       // A session that closes on detach is never asked to interrupt: Claude's cannot answer.
-      const adapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
-        ...base,
-        openSession: (input) =>
-          base.openSession(input).pipe(
-            Effect.map((session) => ({
-              ...session,
-              startTurn: (turn) =>
-                session
-                  .startTurn(turn)
-                  .pipe(
-                    Effect.tap(() =>
-                      turn.runtimePolicy.cwd === handoffCwd
-                        ? Deferred.succeed(continuationStarted, undefined)
-                        : Effect.void,
-                    ),
-                  ),
-              ...(mode === "exclusive"
-                ? { interruptTurn: () => Effect.die("an exclusive handoff must not interrupt") }
-                : {}),
-            })),
-          ),
-      };
+      // Its turn is inside the handoff's own tool call, which the closed session never ends.
+      const adapter: ProviderAdapter.ProviderAdapterV2["Service"] =
+        mode === "pooled"
+          ? base
+          : {
+              ...base,
+              openSession: (input) =>
+                Effect.gen(function* () {
+                  const session = yield* base.openSession(input);
+                  const toolEvents =
+                    yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+                  return {
+                    ...session,
+                    events: Stream.merge(session.events, Stream.fromQueue(toolEvents)),
+                    startTurn: (turn) =>
+                      Effect.gen(function* () {
+                        yield* session.startTurn(turn);
+                        const now = yield* DateTime.now;
+                        yield* Queue.offer(toolEvents, {
+                          type: "turn_item.updated",
+                          driver,
+                          turnItem: {
+                            id: handoffToolId,
+                            type: "dynamic_tool",
+                            threadId: turn.threadId,
+                            runId: turn.runId,
+                            nodeId: turn.rootNodeId,
+                            providerThreadId: turn.providerThread.id,
+                            providerTurnId: ProviderTurnId.make(`provider-turn:${turn.attemptId}`),
+                            nativeItemRef: null,
+                            parentItemId: null,
+                            ordinal: 1,
+                            status: "running",
+                            title: "t3_worktree_handoff",
+                            toolName: "t3-code.t3_worktree_handoff",
+                            input: {},
+                            output: null,
+                            startedAt: now,
+                            completedAt: null,
+                            updatedAt: now,
+                          },
+                        });
+                      }),
+                    interruptTurn: () => Effect.die("an exclusive handoff must not interrupt"),
+                  };
+                }),
+            };
       const layerRegistry = ProviderAdapterRegistry.layerSingle(adapter);
 
       const projection = yield* Effect.gen(function* () {
@@ -557,6 +583,22 @@ it.live.each(["pooled", "exclusive"] as const)(
             Stream.runDrain,
             Effect.forkScoped,
           );
+        // The continuation starts from an async run.updated reaction, which drain alone does not await.
+        const continuationRunning = yield* eventSink
+          .stream({
+            threadId,
+            afterSequence: yield* eventSink.latestSequence({ threadId }),
+          })
+          .pipe(
+            Stream.map((stored) => stored.event),
+            Stream.filter(
+              (event) =>
+                event.type === "provider-turn.updated" && event.payload.status === "running",
+            ),
+            Stream.take(1),
+            Stream.runDrain,
+            Effect.forkScoped,
+          );
         // What t3_worktree_handoff dispatches while the calling turn is still running.
         const bound = yield* orchestrator.dispatch({
           type: "thread.metadata.update",
@@ -577,7 +619,7 @@ it.live.each(["pooled", "exclusive"] as const)(
           ["queued"],
         );
         yield* Fiber.join(settled);
-        yield* Deferred.await(continuationStarted);
+        yield* Fiber.join(continuationRunning);
         yield* worker.drain();
         return yield* orchestrator.getThreadProjection(threadId);
       }).pipe(
@@ -598,6 +640,13 @@ it.live.each(["pooled", "exclusive"] as const)(
         ),
         "an intentional workspace handoff must not project an interrupt result or a failure",
       );
+      if (mode === "exclusive") {
+        // regression: #39410 the handoff's tool call stayed running after its session closed.
+        assert.equal(
+          projection.turnItems.find((item) => item.id === handoffToolId)?.status,
+          "interrupted",
+        );
+      }
       assert.deepEqual(
         (yield* Ref.get(state)).started.map((turn) => turn.cwd),
         [cwd, handoffCwd],

@@ -105,9 +105,11 @@ export const make = Effect.gen(function* () {
     );
     const now = DateTime.toEpochMillis(yield* DateTime.now);
     const selected = snapshots.find((provider) => provider.instanceId === selection.instanceId);
+    const selectedDisabled = selected?.enabled === false;
     // Only a failed probe counts: a pending one is also not installed yet.
     const unusable =
       textGeneratorCannotRun ||
+      selectedDisabled ||
       (selected?.enabled === true &&
         ((operation === "generateThreadTitle"
           ? !isProviderThreadTitleGenerationCapable(selected)
@@ -130,13 +132,14 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      selection =
+      const rejected = selection;
+      const fallbackWhere = (sameInstance: boolean) =>
         fallbackTextGenerationModelSelection(
           settings.providerInstances,
           (instanceId, driver, model) => {
             const provider = snapshots.find((candidate) => candidate.instanceId === instanceId);
             return (
-              instanceId !== selection.instanceId &&
+              (sameInstance ? model !== rejected.model : instanceId !== rejected.instanceId) &&
               provider?.enabled === true &&
               resolveProjectProviderInstanceEnabled(settings, projectId ?? null, instanceId) &&
               provider.installed &&
@@ -146,6 +149,8 @@ export const make = Effect.gen(function* () {
               (operation === "generateThreadTitle"
                 ? isProviderThreadTitleGenerationCapable(provider)
                 : isProviderTextGenerationCapable(provider)) &&
+              provider.models.find((candidate) => candidate.slug === model)
+                ?.supportsTextGeneration !== false &&
               (operation !== "generateReviewGuide" || INVESTIGATING_DRIVERS.has(driver)) &&
               !exhaustedUsageWindow(provider, now, model)
             );
@@ -154,13 +159,22 @@ export const make = Effect.gen(function* () {
             defaultModelSelection: settings.defaultModelSelection,
             includeThreadTitleProviders: operation === "generateThreadTitle",
           },
-        ) ?? selection;
+        );
+      // Another instance first; the rejected instance's other models only when none qualifies.
+      selection = fallbackWhere(false) ?? fallbackWhere(true) ?? selection;
     }
     if (textGeneratorCannotRun && selection.instanceId === textGeneratorId) {
       return yield* new TextGenerationError({
         operation,
         detail:
           "Review guides need a coding agent that can read the checkout. None is ready. Pick Codex or Claude as the review guide model in Settings → Source control & issues.",
+      });
+    }
+    if (selectedDisabled && selection.instanceId === selected.instanceId) {
+      return yield* new TextGenerationError({
+        operation,
+        detail:
+          "No text generation provider is available. Enable a provider that can generate text in Settings → Providers.",
       });
     }
     return yield* installationGate.execute(

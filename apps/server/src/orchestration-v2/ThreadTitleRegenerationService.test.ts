@@ -88,6 +88,7 @@ function makeHarness(
               faviconPath: null,
               projectIcon: null,
               scripts: [],
+              trackedFolders: [],
               pinnedAt: null,
               archivedAt: null,
               createdAt: "2026-06-20T00:00:00.000Z",
@@ -346,16 +347,27 @@ describe("ThreadTitleRegenerationService", () => {
         const threads = yield* ThreadManagement.ThreadManagementService;
         const outbox = yield* EffectOutbox.EffectOutboxV2;
         // An MCP launch names the thread, or leaves a placeholder, and sends no message.
-        for (const [key, title, expectedTitle, generates, titleManuallySet] of [
+        for (const [key, title, titleOwner, compactFirst, expectedTitle, generates] of [
           [
             "preset",
-            "[API] #4821 — retry webhook deliveries after a timeout",
+            "[API] #4821 - retry webhook deliveries after a timeout",
             undefined,
             false,
             undefined,
+            false,
           ],
-          ["placeholder", placeholderThreadTitle("Parent", 0), seed, true, undefined],
-          ["manual-placeholder", placeholderThreadTitle("Parent", 0), undefined, false, true],
+          ["placeholder", placeholderThreadTitle("Parent", 0), undefined, false, seed, true],
+          [
+            "legacy manual placeholder",
+            placeholderThreadTitle("Parent", 0),
+            "legacy",
+            false,
+            undefined,
+            false,
+          ],
+          ["named like a placeholder", "Release thread 2", "renamed", false, undefined, false],
+          ["named, then compacted", "Release notes", "renamed", true, undefined, false],
+          ["draft titled by its /compact", "/compact", undefined, true, seed, true],
         ] as const) {
           const threadId = ThreadId.make(`thread:title:${key}`);
           yield* threads.dispatch({
@@ -364,7 +376,7 @@ describe("ThreadTitleRegenerationService", () => {
             threadId,
             projectId,
             title,
-            ...(titleManuallySet === undefined ? {} : { titleManuallySet }),
+            ...(titleOwner === "renamed" ? { titleRenamed: true } : {}),
             modelSelection,
             runtimeMode: "full-access",
             interactionMode: "default",
@@ -373,6 +385,36 @@ describe("ThreadTitleRegenerationService", () => {
             createdBy: "agent",
             creationSource: "mcp",
           });
+          if (titleOwner === "legacy") {
+            const { thread } = yield* threads.getThreadProjection(threadId);
+            const eventSink = yield* EventSink.EventSinkV2;
+            yield* eventSink.write({
+              events: [
+                {
+                  id: EventId.make(`event:title:${key}:legacy`),
+                  type: "thread.metadata-updated",
+                  threadId,
+                  occurredAt: thread.updatedAt,
+                  payload: { ...thread, titleRenamed: undefined, titleManuallySet: true },
+                },
+              ],
+            });
+          }
+          if (compactFirst) {
+            yield* threads.dispatch({
+              type: "message.dispatch",
+              commandId: CommandId.make(`command:title:${key}:compact`),
+              threadId,
+              messageId: MessageId.make(`command:title:${key}:compact:message`),
+              text: "/compact",
+              titleSeed: "/compact",
+              attachments: [],
+              modelSelection,
+              dispatchMode: { type: "defer_start" },
+              createdBy: "user",
+              creationSource: "web",
+            });
+          }
           const requestId = CommandId.make(`command:title:${key}:message`);
           yield* threads.dispatch({
             type: "message.dispatch",
@@ -590,7 +632,7 @@ describe("ThreadTitleRegenerationService", () => {
           });
           const afterFirstMessage = yield* threads.getThreadProjection(threadId);
           assert.equal(afterFirstMessage.thread.title, manualTitle);
-          assert.equal(afterFirstMessage.thread.titleManuallySet, true);
+          assert.equal(afterFirstMessage.thread.titleRenamed, true);
           assert.isNotOk(afterFirstMessage.thread.titleRegeneration);
           assert.isFalse(
             (yield* outbox.listByCommandId(
@@ -620,10 +662,7 @@ describe("ThreadTitleRegenerationService", () => {
             command: "command:title:explicit:release",
             threadId,
           });
-          assert.equal(
-            (yield* threads.getThreadProjection(threadId)).thread.titleManuallySet,
-            false,
-          );
+          assert.equal((yield* threads.getThreadProjection(threadId)).thread.titleRenamed, false);
           yield* service.execute({ threadId, requestId: released, kind: { type: "regenerate" } });
           const regenerated = yield* threads.getThreadProjection(threadId);
           assert.equal(regenerated.thread.title, "Generated title");

@@ -3,6 +3,13 @@ import * as NodeModule from "node:module";
 import * as React from "react";
 import { act, useLayoutEffect } from "react";
 import { createRoot } from "react-dom/client";
+import {
+  EnvironmentId,
+  NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+} from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 import * as DateTime from "effect/DateTime";
 import type { SubagentWorkflowGroup } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -11,6 +18,7 @@ const harness = vi.hoisted(() => ({
   dispatch: (_action: unknown) => {},
   getState: (): unknown => undefined,
   getRoute: (): unknown => undefined,
+  inspectorSupported: true,
 }));
 
 vi.mock("react-native", () => ({
@@ -90,7 +98,7 @@ vi.mock("@t3tools/shared/orchestrationTiming", () => ({
   formatDuration: () => "",
 }));
 vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
-  useWorkspacePaneState: () => ({ fileInspector: { supported: true } }),
+  useWorkspacePaneState: () => ({ fileInspector: { supported: harness.inspectorSupported } }),
 }));
 vi.mock("@react-navigation/native", async () => {
   const { createRequire } = await import("node:module");
@@ -104,16 +112,9 @@ vi.mock("@react-navigation/native", async () => {
   };
 });
 
-import { useOpenThreadInspector } from "./thread-inspector-navigation";
-import { useOpenLinkedThread } from "./useOpenLinkedThread";
+import { useOpenThreadInspector, useReturnToThread } from "./thread-inspector-navigation";
+import { useOpenLinkedThread, useOpenLinkedThreadRead } from "./useOpenLinkedThread";
 import { ThreadWorkflowGroup } from "./ThreadWorkflowGroup";
-import {
-  EnvironmentId,
-  NodeId,
-  ProviderDriverKind,
-  ProviderInstanceId,
-  ThreadId,
-} from "@t3tools/contracts";
 
 const requireNavigation = NodeModule.createRequire(
   NodeModule.createRequire(import.meta.url).resolve("@react-navigation/native/package.json"),
@@ -123,11 +124,20 @@ const { StackRouter, StackActions } = requireNavigation("@react-navigation/route
   StackActions: typeof import("@react-navigation/native").StackActions;
 };
 
-function setup(fromAgents: boolean, fullscreen = false) {
+function setup(fromAgents: boolean, fullscreen = false, inspectorSupported = true) {
+  harness.inspectorSupported = inspectorSupported;
   (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
   const router = StackRouter({});
   const options = {
-    routeNames: ["Home", "Thread", "ThreadAgents", "ThreadInspectorFullscreen"],
+    routeNames: [
+      "Home",
+      "Thread",
+      "ThreadAgents",
+      "ThreadInspectorFullscreen",
+      "LinkedThread",
+      "ThreadReview",
+      "GitConfirm",
+    ],
     routeParamList: {},
     routeGetIdList: {},
   };
@@ -151,12 +161,18 @@ function setup(fromAgents: boolean, fullscreen = false) {
     );
   let openInspector: ReturnType<typeof useOpenThreadInspector>;
   let openLinkedThread: ReturnType<typeof useOpenLinkedThread>;
+  let openLinkedThreadRead: ReturnType<typeof useOpenLinkedThreadRead>;
+  let returnToThread: ReturnType<typeof useReturnToThread>;
   function Probe() {
     const open = useOpenThreadInspector();
     const openLinked = useOpenLinkedThread();
+    const openLinkedRead = useOpenLinkedThreadRead();
+    const returnTo = useReturnToThread();
     useLayoutEffect(() => {
       openInspector = open;
       openLinkedThread = openLinked;
+      openLinkedThreadRead = openLinkedRead;
+      returnToThread = returnTo;
     });
     return null;
   }
@@ -178,6 +194,12 @@ function setup(fromAgents: boolean, fullscreen = false) {
     },
     openLinked(threadId: string) {
       act(() => openLinkedThread({ environmentId: source.environmentId, threadId }));
+    },
+    openLinkedRead(...input: Parameters<typeof openLinkedThreadRead>) {
+      act(() => openLinkedThreadRead(...input));
+    },
+    returnTo(thread: Parameters<typeof returnToThread>[0]) {
+      act(() => returnToThread(thread));
     },
     [Symbol.dispose]() {
       act(() => root.unmount());
@@ -319,6 +341,76 @@ it("opens a workflow member from Agents while its child shell is not cached", ()
     },
   });
 });
+
+it.each([
+  { inspectorSupported: true, fromAgents: false },
+  { inspectorSupported: true, fromAgents: true },
+  { inspectorSupported: false, fromAgents: false },
+  { inspectorSupported: false, fromAgents: true },
+])(
+  "opens a linked environment's thread in the inspector where there is one ($inspectorSupported, from Agents $fromAgents)",
+  ({ inspectorSupported, fromAgents }) => {
+    using screen = setup(fromAgents, false, inspectorSupported);
+    const thread = {
+      environmentId: EnvironmentId.make("linked-vm"),
+      threadId: ThreadId.make("there"),
+    };
+    const linked = { viaEnvironmentId: EnvironmentId.make("remote-environment"), label: "fs-17" };
+    screen.openLinkedRead(thread, linked, "Fix the build", {
+      source: screen.source,
+      replace: fromAgents,
+    });
+    if (inspectorSupported) {
+      // Beside the parent, like a subagent or a side chat; the Agents sheet gives way.
+      expect(screen.state.routes.map((route) => route.name)).toEqual(["Home", "Thread"]);
+      expect(screen.state.routes.at(-1)).toMatchObject({
+        key: screen.parentKey,
+        params: {
+          inspector: {
+            type: "linkedThread",
+            ...thread,
+            linked: { ...linked, title: "Fix the build" },
+          },
+        },
+      });
+      return;
+    }
+    // A phone has no inspector: the read-only thread takes the screen, replacing the sheet.
+    expect(screen.state.routes.map((route) => route.name)).toEqual([
+      "Home",
+      "Thread",
+      "LinkedThread",
+    ]);
+    expect(screen.state.routes.at(-1)?.params).toEqual({
+      ...thread,
+      ...linked,
+      title: "Fix the build",
+    });
+  },
+);
+
+it.each([
+  { confirmFrom: "parent", routes: ["Home", "Thread"] },
+  // A side thread's review, opened from the parent's inspector, sits above the parent's route.
+  { confirmFrom: "child", routes: ["Home", "Thread", "ThreadReview", "Thread"] },
+])(
+  "returns from a Git confirmation to the $confirmFrom thread without replacing another",
+  ({ confirmFrom, routes }) => {
+    using screen = setup(false);
+    const inspector = { type: "device", ...screen.source } as const;
+    screen.open(inspector);
+    const thread = { ...screen.source, threadId: confirmFrom };
+    if (confirmFrom !== "parent") screen.dispatch(StackActions.push("ThreadReview", thread));
+    screen.dispatch(StackActions.push("GitConfirm", thread));
+    screen.returnTo(thread);
+    expect(screen.state.routes.map((route) => route.name)).toEqual(routes);
+    expect(screen.state.routes[1]).toMatchObject({
+      key: screen.parentKey,
+      params: { ...screen.source, prompt: "retained prompt", inspector },
+    });
+    expect(screen.state.routes.at(-1)?.params).toMatchObject(thread);
+  },
+);
 
 it("switches between subagents and devices in the same parent route", () => {
   using screen = setup(false);

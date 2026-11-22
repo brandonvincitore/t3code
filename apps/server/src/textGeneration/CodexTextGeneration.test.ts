@@ -1,4 +1,5 @@
 import {
+  DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER,
   ProjectId,
   ProviderDriverKind,
   type ModelSelection,
@@ -488,9 +489,10 @@ it.layer(layerCodexTextGenerationTest)("CodexTextGeneration", (it) => {
     withFakeCodexEnv(
       {
         output: JSON.stringify({ title: "Remove default shapes" }),
-        launchArgs: "--config features.plugins=true --config features.apps=true",
+        launchArgs:
+          "--config features.plugins=true --config features.apps=true --config features.connectors=true",
         requireArg:
-          "--config features.plugins=true --config features.apps=true --config features.plugins=false --config features.apps=false --ephemeral",
+          "--config features.plugins=true --config features.apps=true --config features.connectors=true --config features.connectors=false --config features.plugins=false --config features.apps=false --ephemeral",
       },
       (textGeneration) =>
         Effect.gen(function* () {
@@ -660,6 +662,7 @@ const PREFLIGHT_PRIMARY_STATES = [
   "not installed",
   "not installed, fallback disabled for project",
   "not installed, fallback disabled for another project",
+  "not installed, fallback model cannot generate text",
   "signed out",
   "signed out, fallback failed",
   "kiro ready",
@@ -668,6 +671,9 @@ const PREFLIGHT_PRIMARY_STATES = [
   "kiro disabled",
   "cannot generate text",
   "model cannot generate text",
+  "disabled",
+  "disabled, thread default model cannot generate text",
+  "disabled, fallback disabled for project",
 ] as const;
 
 it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (primaryState) =>
@@ -705,7 +711,6 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
         slashCommands: [],
         skills: [],
         ...(kiro && instanceId === primary ? { supportsThreadTitleGeneration: true } : {}),
-        ...(state === "disabled" && instanceId === primary ? { enabled: false } : {}),
         ...(state === "pending" && instanceId === primary
           ? { installed: false, status: "warning", auth: { status: "unknown" } }
           : {}),
@@ -733,6 +738,24 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
                 },
               ],
             }
+          : {}),
+        ...((primaryState === "not installed, fallback model cannot generate text" ||
+          primaryState === "disabled, thread default model cannot generate text") &&
+        instanceId === fallback
+          ? {
+              models: [
+                {
+                  slug: threadDefault.model,
+                  name: threadDefault.model,
+                  isCustom: true,
+                  supportsTextGeneration: false,
+                  capabilities: null,
+                },
+              ],
+            }
+          : {}),
+        ...(state.startsWith("disabled") && instanceId === primary
+          ? { enabled: false, status: "disabled" }
           : {}),
         ...(state === "exhausted" && instanceId === primary
           ? {
@@ -781,13 +804,15 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
               },
             },
             defaultModelSelection: threadDefault,
-            projectSettingsOverrides: {
-              [state === "not installed, fallback disabled for another project"
-                ? ProjectId.make("project-b")
-                : projectId]: {
-                providerInstances: { [fallback]: { enabled: !state.includes("disabled for") } },
-              },
-            },
+            ...(state.includes("fallback disabled for")
+              ? {
+                  projectSettingsOverrides: {
+                    [state.endsWith("another project") ? ProjectId.make("project-b") : projectId]: {
+                      providerInstances: { [fallback]: { enabled: false } },
+                    },
+                  },
+                }
+              : {}),
           }),
           Layer.mock(TextGenerators.TextGenerators)({ runner: () => Effect.undefined }),
           Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
@@ -797,15 +822,27 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
         ),
       ),
     );
-    expect(
-      yield* service.generateThreadTitle({
+    const generated = yield* service
+      .generateThreadTitle({
         cwd: "/tmp",
         message: "hello",
         linkedContext: "",
-        modelSelection: selection,
+        modelSelection:
+          primaryState === "disabled, thread default model cannot generate text"
+            ? threadDefault
+            : selection,
         projectId,
-      }),
-    ).toEqual({ title: "Generated title" });
+      })
+      .pipe(Effect.exit);
+    if (
+      primaryState === "disabled, fallback disabled for project" ||
+      primaryState === "kiro disabled"
+    ) {
+      expect(Exit.isFailure(generated)).toBe(true);
+      expect(calls).toEqual([]);
+      return;
+    }
+    expect(generated).toEqual(Exit.succeed({ title: "Generated title" }));
     expect(calls).toEqual([
       kiro ||
       primaryState === "ready" ||
@@ -813,7 +850,14 @@ it.effect.each(PREFLIGHT_PRIMARY_STATES)("text generation preflight: %s", (prima
       primaryState === "not installed, fallback disabled for project" ||
       primaryState === "signed out, fallback failed"
         ? selection
-        : threadDefault,
+        : primaryState === "not installed, fallback model cannot generate text" ||
+            primaryState === "disabled, thread default model cannot generate text"
+          ? {
+              instanceId: fallback,
+              model:
+                DEFAULT_TEXT_GENERATION_MODEL_BY_PROVIDER[ProviderDriverKind.make("claudeAgent")],
+            }
+          : threadDefault,
     ]);
   }),
 );

@@ -73,7 +73,7 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
     assert.notInclude(paths, "backgroundActivity.overrides");
     assert.notInclude(paths, "projectSettingsOverrides");
     assert.notInclude(paths, "compactIdleThreads");
-    assert.isFalse(paths.some((path) => path.startsWith("observability.")));
+    assert.isFalse(paths.some((path) => path.startsWith("observability")));
     for (const [path, value] of listed) {
       if (value === undefined) continue;
       const managed = ManagedSettings.makeManagedSettings({ [path]: { value, locked: false } });
@@ -87,11 +87,16 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
         JSON.stringify({
           schemaVersion: 1,
           organization: "Example Corp",
-          limits: { webhookTasks: false, telemetry: true },
+          limits: { webhookTasks: false, telemetry: true, previewTunnel: false },
         }),
       );
-      assert.deepEqual(policy.summary?.limits, { webhookTasks: false, telemetry: true });
+      assert.deepEqual(policy.summary?.limits, {
+        webhookTasks: false,
+        telemetry: true,
+        previewTunnel: false,
+      });
       assert.equal(ManagedPolicy.deniedBy(policy, "webhookTasks"), "Example Corp");
+      assert.equal(ManagedPolicy.deniedBy(policy, "previewTunnel"), "Example Corp");
       assert.isUndefined(ManagedPolicy.deniedBy(policy, "telemetry"));
 
       const noTasks = yield* loadFrom(
@@ -114,6 +119,7 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
           lockedInstanceFields: { acpRegistry: ["config.commandPath", "config.commandArgs"] },
         },
       });
+      assert.equal(ManagedPolicy.deniedBy(noTasks, "scheduledTasks"), "Example Corp");
       assert.isFalse(noTasks.document?.limits?.snapShot);
       for (const providers of [
         { installs: "false", allowedAcpAgents: ["devin"] },

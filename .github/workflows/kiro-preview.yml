@@ -2,7 +2,7 @@ name: Kiro refinement
 
 on:
   push:
-    branches: [codex/kiro-refinement]
+    branches: [codex/kiro-refinement, "codex/kiro-sync/**"]
   workflow_dispatch:
 
 permissions:
@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          fetch-depth: 100
+          fetch-depth: 0
           sparse-checkout: |
             /*
             !/.repos/
@@ -36,15 +36,26 @@ jobs:
         working-directory: apps/web
         run: vp exec playwright install --with-deps chromium --only-shell
 
-      - name: Fetch the preview's upstream baseline
-        run: git fetch --no-tags --depth=1 https://github.com/pingdotgg/t3code.git 09a54f01bc0ae83865347a965ced50f8c8ec2953
+      - name: Resolve the integrated upstream base
+        id: comparison
+        run: |
+          git fetch --no-tags https://github.com/pingdotgg/t3code.git refs/heads/main:refs/remotes/t3-upstream/main
+          base=$(git merge-base HEAD refs/remotes/t3-upstream/main)
+          echo "base=$base" >> "$GITHUB_OUTPUT"
 
       - name: Check the integrated changes
-        run: vp run check:changed 09a54f01bc0ae83865347a965ced50f8c8ec2953 --concurrency 1
+        env:
+          COMPARISON_BASE: ${{ steps.comparison.outputs.base }}
+        run: vp run check:changed "$COMPARISON_BASE" --concurrency 1
 
       - name: Replay the Kiro protocol fixtures
         working-directory: apps/server
         run: vp test run src/orchestration-v2/testkit/KiroReplayFixtures.integration.test.ts --maxWorkers=1
+
+      - name: Set up Rust for the native helper
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
 
       - name: Build the bundled web client and server
         run: vp run --filter t3 --concurrency-limit 1 build
