@@ -1,4 +1,5 @@
-import { mFallback, msg, type MFunctionType } from "gt-i18n";
+import { mFallback, msg } from "gt-i18n";
+import type { MFunctionType } from "gt-i18n/types";
 import {
   KiroMemoryCreate,
   KiroMemoryUpdate,
