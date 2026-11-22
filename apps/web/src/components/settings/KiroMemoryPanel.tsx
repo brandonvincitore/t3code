@@ -1,4 +1,5 @@
 import { useKiroMemory, type KiroMemoryActions } from "@t3tools/client-runtime/kiro-memory";
+import { Plural, T, useGT, useMessages, Var } from "gt-react";
 import { useId, useState } from "react";
 
 import { Button } from "../ui/button";
@@ -13,15 +14,19 @@ export function KiroMemoryPanel({
   readonly actions: KiroMemoryActions;
   readonly canManage: boolean;
 }) {
-  const memory = useKiroMemory(actions, canManage);
+  const gt = useGT();
+  const resolve = useMessages();
+  const memory = useKiroMemory(actions, canManage, resolve);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const id = useId();
   const disabled = !canManage || memory.pending !== null;
   const draft = memory.draft;
   return (
-    <section aria-label="Kiro memory" className="flex flex-col gap-4 text-sm">
+    <section aria-label={gt("Kiro memory")} className="flex flex-col gap-4 text-sm">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-medium">Kiro memory</h3>
+        <h3 className="font-medium">
+          <T>Kiro memory</T>
+        </h3>
         <div className="flex gap-2">
           <Button
             variant="outline"
@@ -31,16 +36,18 @@ export function KiroMemoryPanel({
               void memory.refresh();
             }}
           >
-            Refresh
+            <T>Refresh</T>
           </Button>
           <Button variant="outline" size="sm" disabled={disabled} onClick={memory.add}>
-            Add memory
+            <T>Add memory</T>
           </Button>
         </div>
       </div>
       <p className="text-muted-foreground">
-        Memories belong to your Kiro account on this environment. Kiro reports each memory’s scope;
-        choosing a project does not hide memories from other scopes.
+        <T>
+          Memories belong to your Kiro account on this environment. Kiro reports each memory’s
+          scope; choosing a project does not hide memories from other scopes.
+        </T>
       </p>
       <form
         className="flex flex-wrap items-end gap-2"
@@ -50,7 +57,7 @@ export function KiroMemoryPanel({
         }}
       >
         <label className="flex min-w-40 flex-1 flex-col gap-1" htmlFor={`${id}-query`}>
-          Search
+          <T>Search</T>
           <Input
             id={`${id}-query`}
             type="search"
@@ -66,11 +73,11 @@ export function KiroMemoryPanel({
             disabled={disabled}
             onValueChange={(value) => memory.setScopeFilter(value ?? "")}
           >
-            <SelectTrigger aria-label="Filter memory scope">
+            <SelectTrigger aria-label={gt("Filter memory scope")}>
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value="">All scopes</SelectItem>
+              <SelectItem value="">{gt("All scopes")}</SelectItem>
               {Object.keys(memory.page?.counts.byScope ?? {}).map((scope) => (
                 <SelectItem key={scope} value={scope}>
                   {scope}
@@ -80,14 +87,18 @@ export function KiroMemoryPanel({
           </Select>
         </div>
         <Button variant="outline" size="sm" type="submit" disabled={disabled}>
-          Search
+          <T>Search</T>
         </Button>
       </form>
       {memory.syncStatus ? (
         <div className="flex flex-wrap items-center gap-2">
           <span>
-            Memory sync: {memory.syncStatus.state}
-            {memory.syncStatus.reason ? ` (${memory.syncStatus.reason})` : ""}
+            {memory.syncStatus.reason
+              ? gt("Memory sync: {state} ({reason})", {
+                  state: memory.syncStatus.state,
+                  reason: memory.syncStatus.reason,
+                })
+              : gt("Memory sync: {state}", { state: memory.syncStatus.state })}
           </span>
           <Button
             variant="outline"
@@ -97,14 +108,28 @@ export function KiroMemoryPanel({
               void memory.sync();
             }}
           >
-            Sync now
+            <T>Sync now</T>
           </Button>
         </div>
       ) : null}
       {memory.page ? (
         <div className="flex flex-col gap-3">
           <p className="text-muted-foreground">
-            {memory.page.total} {memory.page.total === 1 ? "memory" : "memories"} found.
+            <T>
+              <Plural
+                n={memory.page.total}
+                one={
+                  <>
+                    <Var>{memory.page.total}</Var> memory found.
+                  </>
+                }
+                other={
+                  <>
+                    <Var>{memory.page.total}</Var> memories found.
+                  </>
+                }
+              />
+            </T>
           </p>
           {memory.page.memories.map((entry) => (
             <div
@@ -117,7 +142,11 @@ export function KiroMemoryPanel({
                 <p className="text-xs text-muted-foreground">
                   {entry.scopes.join(", ")} · {entry.memoryType}
                 </p>
-                {entry.unresolvedConflict ? <p>Unresolved conflict</p> : null}
+                {entry.unresolvedConflict ? (
+                  <p>
+                    <T>Unresolved conflict</T>
+                  </p>
+                ) : null}
               </div>
               <Button
                 variant="outline"
@@ -128,7 +157,7 @@ export function KiroMemoryPanel({
                   void memory.inspect(entry.id);
                 }}
               >
-                Inspect
+                <T>Inspect</T>
               </Button>
             </div>
           ))}
@@ -142,7 +171,7 @@ export function KiroMemoryPanel({
                   void memory.more();
                 }}
               >
-                Load more
+                <T>Load more</T>
               </Button>
             </div>
           ) : null}
@@ -156,9 +185,11 @@ export function KiroMemoryPanel({
             void memory.save();
           }}
         >
-          <h4 className="font-medium">{draft.id ? "Inspect / edit memory" : "Add memory"}</h4>
+          <h4 className="font-medium">
+            {draft.id ? gt("Inspect / edit memory") : gt("Add memory")}
+          </h4>
           <label className="flex flex-col gap-1" htmlFor={`${id}-title`}>
-            Title
+            <T>Title</T>
             <Input
               id={`${id}-title`}
               value={draft.title}
@@ -168,7 +199,7 @@ export function KiroMemoryPanel({
             />
           </label>
           <p className="text-xs text-muted-foreground">
-            Letters, digits, and hyphens; up to 64 characters.
+            <T>Letters, digits, and hyphens; up to 64 characters.</T>
           </p>
           <Select
             value={draft.memoryType}
@@ -178,19 +209,19 @@ export function KiroMemoryPanel({
                 memory.change({ memoryType: value });
             }}
           >
-            <SelectTrigger aria-label="Memory type">
+            <SelectTrigger aria-label={gt("Memory type")}>
               <SelectValue />
             </SelectTrigger>
             <SelectPopup>
-              <SelectItem value="SEMANTIC">Knowledge</SelectItem>
-              <SelectItem value="USER_PREFERENCE">User preference</SelectItem>
+              <SelectItem value="SEMANTIC">{gt("Knowledge")}</SelectItem>
+              <SelectItem value="USER_PREFERENCE">{gt("User preference")}</SelectItem>
               {draft.memoryType === "UNKNOWN" ? (
-                <SelectItem value="UNKNOWN">Unknown native type</SelectItem>
+                <SelectItem value="UNKNOWN">{gt("Unknown native type")}</SelectItem>
               ) : null}
             </SelectPopup>
           </Select>
           <label className="flex flex-col gap-1" htmlFor={`${id}-scope`}>
-            Scope
+            <T>Scope</T>
             <Input
               id={`${id}-scope`}
               value={draft.scopes}
@@ -199,11 +230,13 @@ export function KiroMemoryPanel({
             />
           </label>
           <p className="text-xs text-muted-foreground">
-            Global, workspace:name, or repo:provider/owner/name. Separate multiple scopes with
-            commas. Existing scopes are preserved.
+            <T>
+              Global, <Var>workspace:name</Var>, or <Var>repo:provider/owner/name</Var>. Separate
+              multiple scopes with commas. Existing scopes are preserved.
+            </T>
           </p>
           <label className="flex flex-col gap-1" htmlFor={`${id}-summary`}>
-            Summary
+            <T>Summary</T>
             <Textarea
               id={`${id}-summary`}
               value={draft.summary}
@@ -213,7 +246,7 @@ export function KiroMemoryPanel({
             />
           </label>
           <label className="flex flex-col gap-1" htmlFor={`${id}-content`}>
-            Content
+            <T>Content</T>
             <Textarea
               id={`${id}-content`}
               rows={6}
@@ -225,7 +258,7 @@ export function KiroMemoryPanel({
           </label>
           <div className="flex flex-wrap gap-2">
             <Button size="sm" type="submit" disabled={disabled}>
-              Save memory
+              <T>Save memory</T>
             </Button>
             <Button
               variant="outline"
@@ -236,7 +269,7 @@ export function KiroMemoryPanel({
                 memory.close();
               }}
             >
-              Close
+              <T $context="button, closes the memory editor">Close</T>
             </Button>
             {draft.id ? (
               <Button
@@ -245,13 +278,15 @@ export function KiroMemoryPanel({
                 disabled={disabled}
                 onClick={() => setConfirmDeleteId(draft.id)}
               >
-                Delete…
+                <T>Delete…</T>
               </Button>
             ) : null}
           </div>
           {confirmDeleteId === draft.id && draft.id !== null ? (
             <div role="alert" className="flex flex-col gap-2">
-              <p>Delete this memory from Kiro? Kiro may sync the deletion to your account.</p>
+              <p>
+                <T>Delete this memory from Kiro? Kiro may sync the deletion to your account.</T>
+              </p>
               <div className="flex gap-2">
                 <Button
                   variant="destructive"
@@ -263,10 +298,10 @@ export function KiroMemoryPanel({
                     if (current) void memory.remove(current);
                   }}
                 >
-                  Delete memory
+                  <T>Delete memory</T>
                 </Button>
                 <Button variant="outline" size="sm" onClick={() => setConfirmDeleteId(null)}>
-                  Keep memory
+                  <T>Keep memory</T>
                 </Button>
               </div>
             </div>

@@ -430,7 +430,11 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
             return true;
           }),
         });
-        if (!title || input.turn.appThread.titleManuallySet === true) return;
+        if (
+          !title ||
+          (input.turn.appThread.titleRenamed ?? input.turn.appThread.titleManuallySet) === true
+        )
+          return;
         const source = yield* readRecord(input.runtime, input.session.sessionId);
         if (!source || source.record.title !== title) return;
         yield* writeOwned(filePath, owner, {
@@ -463,7 +467,7 @@ export const makeKiroNativeTitles = Effect.fn("KiroNativeTitles.make")(function*
     const owner = ownerFor(input.runtime, input.providerThread);
     yield* lock.withPermit(
       Effect.gen(function* () {
-        if (input.appThread.titleManuallySet === true) return;
+        if ((input.appThread.titleRenamed ?? input.appThread.titleManuallySet) === true) return;
         const filePath = yield* location(input.appThread, input.providerThread);
         if (owner.retired) return yield* retire(filePath, owner);
         const receipt = yield* readReceipt(filePath);

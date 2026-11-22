@@ -1,3 +1,4 @@
+import { mFallback, msg, type MFunctionType } from "gt-i18n";
 import type { NativeHistorySyncResult } from "@t3tools/contracts";
 import type { EnvironmentId, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import type { AtomRegistry } from "effect/reactivity";
@@ -161,25 +162,55 @@ export function makeKiroMcpActions(input: {
   };
 }
 
-export function nativeHistorySyncMessage(result: NativeHistorySyncResult): string {
+export function nativeHistorySyncMessage(
+  result: NativeHistorySyncResult,
+  resolve: MFunctionType = mFallback,
+): string {
   switch (result.status) {
     case "synced":
       return result.baselineRows > 0
-        ? `Synced ${result.addedItems} new items since the verified T3 turn. Earlier history was not reimported.`
-        : `Native snapshot synced (${result.addedItems} new items).`;
+        ? resolve(
+            msg(
+              "Synced {count} new items since the verified T3 turn. Earlier history was not reimported.",
+            ),
+            { count: result.addedItems },
+          )
+        : resolve(msg("Native snapshot synced ({count} new items)."), { count: result.addedItems });
     case "updates_available":
-      return "Native history has updates. Choose Sync from Kiro to copy them into this thread.";
+      return resolve(
+        msg("Native history has updates. Choose Sync from Kiro to copy them into this thread."),
+      );
     case "busy":
       return result.reason === "lease_present"
-        ? "Kiro's session lease is present or uncertain. Release or clear it in Kiro, then retry. T3 has not changed the lease."
-        : "The thread or native history is busy. Wait for it to finish, then retry.";
+        ? resolve(
+            msg(
+              "Kiro's session lease is present or uncertain. Release or clear it in Kiro, then retry. T3 has not changed the lease.",
+            ),
+          )
+        : resolve(msg("The thread or native history is busy. Wait for it to finish, then retry."));
     case "ambiguous":
-      return "This older thread has no verified native history boundary. Continue using Kiro, or start a new T3 conversation with selected context; the existing history has been kept.";
+      return resolve(
+        msg(
+          "This older thread has no verified native history boundary. Continue using Kiro, or start a new T3 conversation with selected context; the existing history has been kept.",
+        ),
+      );
     case "unsafe":
-      return "Native history changed or cannot be read safely. The existing thread has been kept. Continue in Kiro or start a new T3 conversation with selected context.";
+      return resolve(
+        msg(
+          "Native history changed or cannot be read safely. The existing thread has been kept. Continue in Kiro or start a new T3 conversation with selected context.",
+        ),
+      );
     case "unsupported":
-      return "Safe native history sync is unavailable for this provider, server platform or history format.";
+      return resolve(
+        msg(
+          "Safe native history sync is unavailable for this provider, server platform or history format.",
+        ),
+      );
     case "unavailable":
-      return "Native history is unavailable in this environment. Check the provider and project, then retry.";
+      return resolve(
+        msg(
+          "Native history is unavailable in this environment. Check the provider and project, then retry.",
+        ),
+      );
   }
 }

@@ -1,4 +1,5 @@
 import type { KiroPowersState } from "@t3tools/contracts";
+import { T, useGT } from "gt-react-native";
 import { useState } from "react";
 import { View } from "react-native";
 import { AppText, AppTextInput } from "../../components/ui/AppText";
@@ -17,6 +18,7 @@ export function KiroPowersPanel({
   readonly install: (target: string) => Promise<void>;
   readonly remove: (name: string) => Promise<void>;
 }) {
+  const gt = useGT();
   const [target, setTarget] = useState("");
   const [inspected, setInspected] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
@@ -33,25 +35,31 @@ export function KiroPowersPanel({
         await refresh();
       }
     } catch {
-      setError("Could not complete the Powers operation. Refresh and try again.");
+      setError(gt("Could not complete the Powers operation. Refresh and try again."));
     }
     setPending(null);
   }
   return (
     <View className="gap-3">
-      <AppText className="font-t3-medium">Kiro Powers</AppText>
+      <AppText className="font-t3-medium">
+        <T>Kiro Powers</T>
+      </AppText>
       <Button
-        label="Refresh"
+        label={gt("Refresh")}
         size="compact"
         disabled={pending !== null}
         onPress={() => {
-          void run("Refreshing Powers…", refresh);
+          void run(gt("Refreshing Powers…"), refresh);
         }}
       />
       {!state.reported ? (
-        <AppText>Kiro has not reported installed Powers.</AppText>
+        <AppText>
+          <T>Kiro has not reported installed Powers.</T>
+        </AppText>
       ) : state.powers.length === 0 ? (
-        <AppText>No Powers are available in this project.</AppText>
+        <AppText>
+          <T>No Powers are available in this project.</T>
+        </AppText>
       ) : (
         state.powers.map((power) => (
           <View key={power.name} className="gap-2">
@@ -62,54 +70,62 @@ export function KiroPowersPanel({
             />
             {inspected === power.name ? (
               <View className="gap-1">
-                <AppText>{power.description || "No description provided."}</AppText>
+                <AppText>{power.description || gt("No description provided.")}</AppText>
                 <AppText>
                   {power.scope === "workspace"
-                    ? "Project Power"
+                    ? gt("Project Power")
                     : power.canRemove
-                      ? "Installed in this Kiro environment"
-                      : "Managed by Kiro configuration"}
+                      ? gt("Installed in this Kiro environment")
+                      : gt("Managed by Kiro configuration")}
                 </AppText>
               </View>
             ) : null}
             {power.canRemove ? (
               <Button
-                label="Remove"
+                label={gt("Remove")}
                 size="compact"
                 disabled={!canManage || pending !== null}
                 onPress={() => {
-                  void run(`Removing ${power.name}…`, () => remove(power.name), true);
+                  void run(
+                    gt("Removing {name}…", { name: power.name }),
+                    () => remove(power.name),
+                    true,
+                  );
                 }}
               />
             ) : null}
           </View>
         ))
       )}
-      <AppText>Catalog name or absolute path on the Kiro environment</AppText>
+      <AppText>
+        <T>Catalog name or absolute path on the Kiro environment</T>
+      </AppText>
       <AppTextInput
-        accessibilityLabel="Power catalog name or absolute path"
+        accessibilityLabel={gt("Power catalog name or absolute path")}
         value={target}
         onChangeText={setTarget}
         editable={canManage && state.canInstall && pending === null}
         autoCapitalize="none"
         autoCorrect={false}
-        placeholder="Power name or /path/to/power"
+        placeholder={gt("Power name or {path}", { path: "/path/to/power" })}
       />
       <Button
-        label="Install Power"
+        label={gt("Install Power")}
         size="compact"
         disabled={!canManage || !state.canInstall || !target.trim() || pending !== null}
         onPress={() => {
-          void run("Installing Power…", () => install(target.trim()), true);
+          void run(gt("Installing Power…"), () => install(target.trim()), true);
         }}
       />
       {!state.canInstall && state.reported ? (
-        <AppText>Kiro policy manages Power installation.</AppText>
+        <AppText>
+          <T>Kiro policy manages Power installation.</T>
+        </AppText>
       ) : null}
       {pending ? <AppText accessibilityRole="alert">{pending}</AppText> : null}
       {changed ? (
         <AppText>
-          Powers updated. Start a new Kiro session to use the updated configuration.
+          <T>Powers updated. Start a new Kiro session to use the updated configuration.</T>
         </AppText>
       ) : null}
       {error ? <AppText accessibilityRole="alert">{error}</AppText> : null}

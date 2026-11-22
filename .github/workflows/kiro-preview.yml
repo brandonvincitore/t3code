@@ -43,6 +43,12 @@ jobs:
           base=$(git merge-base HEAD refs/remotes/t3-upstream/main)
           echo "base=$base" >> "$GITHUB_OUTPUT"
 
+      - name: Set up Rust for the native helper
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
+        with:
+          toolchain: stable
+          components: rustfmt
+
       - name: Check the integrated changes
         env:
           COMPARISON_BASE: ${{ steps.comparison.outputs.base }}
@@ -51,11 +57,6 @@ jobs:
       - name: Replay the Kiro protocol fixtures
         working-directory: apps/server
         run: vp test run src/orchestration-v2/testkit/KiroReplayFixtures.integration.test.ts --maxWorkers=1
-
-      - name: Set up Rust for the native helper
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8
-        with:
-          toolchain: stable
 
       - name: Build the bundled web client and server
         run: vp run --filter t3 --concurrency-limit 1 build

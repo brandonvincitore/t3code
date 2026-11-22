@@ -4089,16 +4089,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
 
     const now = yield* DateTime.now;
     const emitEvent = emit(events, command);
+    const titleRenamed = command.titleRenamed ?? command.titleManuallySet;
     const thread: OrchestrationV2AppThread = {
       createdBy: command.createdBy,
       creationSource: command.creationSource,
       id: command.threadId,
       projectId: command.projectId,
       title: command.title,
-      titleRenamed:
-        command.titleRenamed ??
-        command.titleManuallySet ??
-        (command.title.trim() !== "New thread" && !isPlaceholderThreadTitle(command.title.trim())),
+      ...(titleRenamed === undefined ? {} : { titleRenamed }),
       providerInstanceId: command.modelSelection.instanceId,
       modelSelection: command.modelSelection,
       runtimeMode: command.runtimeMode,

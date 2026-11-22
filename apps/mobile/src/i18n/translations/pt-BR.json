@@ -22,6 +22,7 @@
   "5b7ff1208620c2c2": "{organization} limita as threads a Acesso total.",
   "9bf017edd3847eb1": "A política de {organization} não permite conexões de outros dispositivos.",
   "ef9533bcc048f17b": "A política de {organization} não permite o T3 Connect.",
+  "fcef2c112c4388f0": "A política de {organization} não permite tarefas agendadas.",
   "986b0873f913a840": "A política de {organization} não permite tarefas de webhook.",
   "eebc538e25b09fe2": "A política de {organization} não permite importar cookies do navegador.",
   "7642a133db05f164": "A política de {organization} não permite abrir os servidores locais desta máquina em outros dispositivos.",
@@ -71,6 +72,7 @@
   "cd03eb1b84271c02": "Agente",
   "bfe1a60f3f9c60fb": "Turno {turn} · {what}",
   "dfdaa6255a416140": "Resumo de {turns, plural, one {{turns} turno recente} other {{turns} turnos recentes}}, {textTurns, plural, =0 {sem texto das mensagens} one {com o texto das mensagens do último turno} other {com o texto das mensagens dos últimos {textTurns} turnos}}{truncated, select, yes {, encurtado para caber} other {}}",
+  "260c6b45f52d2f27": "Adiciona o texto das suas mensagens e das respostas do agente {textTurns, plural, one {no último turno} other {nos últimos {textTurns} turnos}}.",
   "afac52a5cc2dc801": "Não foi possível enviar sua resposta. Tente novamente.",
   "79d776428f4d0650": "Não foi possível carregar o arquivo. Reconecte e tente novamente.",
   "3ea34cbb1ca5ba9b": "Pré-visualização cancelada.",
@@ -94,6 +96,30 @@
   "1861f909464425a6": "alterou o estado",
   "bd672d0adf5e6d9a": "Escrever neste rastreador exige a permissão de escrita no controle de versão.",
   "bfe81d615f5f8f75": "Esta issue está fora do escopo de todos os projetos, então aqui ela é somente leitura.",
+  "326946edec570a63": "Synced {count} new items since the verified T3 turn. Earlier history was not reimported.",
+  "4b7ca5c30b1c9296": "Native snapshot synced ({count} new items).",
+  "0ee0d752a33e2977": "Native history has updates. Choose Sync from Kiro to copy them into this thread.",
+  "b05d80a5a4e7c743": "Kiro's session lease is present or uncertain. Release or clear it in Kiro, then retry. T3 has not changed the lease.",
+  "b7cd96a9dffc2bad": "The thread or native history is busy. Wait for it to finish, then retry.",
+  "b2012daf0330a587": "This older thread has no verified native history boundary. Continue using Kiro, or start a new T3 conversation with selected context; the existing history has been kept.",
+  "cc8404ddbadde1d6": "Native history changed or cannot be read safely. The existing thread has been kept. Continue in Kiro or start a new T3 conversation with selected context.",
+  "99911f6ba7644220": "Safe native history sync is unavailable for this provider, server platform or history format.",
+  "daac636c5d8f60f0": "Native history is unavailable in this environment. Check the provider and project, then retry.",
+  "77038be2765b66f6": "Kiro could not complete this memory operation. Check that memory is enabled and your account has access. Refresh before trying again.",
+  "26773a6aadd0248b": "Loading Kiro memory…",
+  "b74762ff89b93ff8": "Refreshing Kiro memory…",
+  "dcb79081ac4b3d5b": "Searching Kiro memory…",
+  "5b53930889feac82": "Loading more memories…",
+  "c6daef22fc593848": "Reading memory…",
+  "a37b5388025ccaae": "Use a title of letters, digits, and hyphens (up to 64 characters), a summary up to 250 characters, content up to 20,000 characters, and a valid Kiro scope.",
+  "364d5a44217e3857": "Saving memory…",
+  "3af96da0481b931a": "Memory saved in Kiro.",
+  "0c87a79433d417c7": "Memory was saved, but the list could not refresh. Refresh to see it.",
+  "9ea0ecb77a2e294e": "Deleting memory…",
+  "71af50cdf9bdc893": "Memory deleted from Kiro.",
+  "07e61442f1e4725b": "Memory was deleted, but the list could not refresh. Refresh to update it.",
+  "25bdc099456f4909": "Requesting Kiro memory sync…",
+  "610d0ab6a86492d3": "Kiro memory sync requested. Refresh to see its current state.",
   "8b876f2953338661": "Ainda não se sabe se está vinculada",
   "b8c2bbba2243b429": "Já vinculada",
   "4f1ab8a69f4a85e5": "Este app não está conectado a ela",
@@ -138,9 +164,9 @@
   "c4eb2b21c8c58a54": "Normal",
   "f42c2a36b3507308": "{label} ativado",
   "77cc5f738cb7d459": "{label} desativado",
-  "2159a4897d4a4d73": "{runtime, select, codex {Atualize a CLI do Codex para {version} ou mais recente para usar {names}.} other {Atualize o {providerName} para {version} ou mais recente para usar {names}.}}",
-  "a0854b0f9604fc7b": "{runtime, select, codex {Usar {names} requer a CLI do Codex {version} ou mais recente, mas esta instalação só pode ser atualizada até {latestVersion}. Instale a CLI do Codex de outra forma ou aguarde uma versão mais recente.} other {Usar {names} requer {providerName} {version} ou mais recente, mas esta instalação só pode ser atualizada até {latestVersion}. Instale {providerName} de outra forma ou aguarde uma versão mais recente.}}",
   "aba3bb73ce212f0c": "Usar {names} requer {providerName} {version} ou mais recente, mas o cask claude-code do Homebrew só tem {latestVersion}. Mude para o cask claude-code@latest: {command}",
+  "a0854b0f9604fc7b": "{runtime, select, codex {Usar {names} requer a CLI do Codex {version} ou mais recente, mas esta instalação só pode ser atualizada até {latestVersion}. Instale a CLI do Codex de outra forma ou aguarde uma versão mais recente.} other {Usar {names} requer {providerName} {version} ou mais recente, mas esta instalação só pode ser atualizada até {latestVersion}. Instale {providerName} de outra forma ou aguarde uma versão mais recente.}}",
+  "2159a4897d4a4d73": "{runtime, select, codex {Atualize a CLI do Codex para {version} ou mais recente para usar {names}.} other {Atualize o {providerName} para {version} ou mais recente para usar {names}.}}",
   "d887bea446534de5": "Nenhum projeto neste ambiente consegue ler {host}/{repository}.",
   "4e466d60e2f7736b": "Cole a URL completa do pull request; esta thread não tem repositório para resolver o número.",
   "302625058bacbe38": "Cole uma URL completa; o host deste projeto não tem uma URL de {changeRequest} conhecida.",
@@ -780,7 +806,10 @@
   "9891bcfd7736e790": "Workspace",
   "4ada574c56e1ff5c": "{count, plural, =1 {Aguardando um subagente} other {Aguardando {count} subagentes}}",
   "690e94edaae9496b": "Fase {number}",
+  "53b6a1bb66a65417": "{count} aguardando",
+  "5e729fc4c34f2821": "{count} na fila",
   "101bf926f0721df4": "Workflow",
+  "43aeffb7e3aa5337": "{count, plural, one {{count} etapa} other {{count} etapas}}",
   "d3f66f03a1c8ddc8": "{count, plural, one {{count} agente} other {{count} agentes}}",
   "624506a403296638": "Trabalhando",
   "7bfe35051f932b93": "Precisa de aprovação",
@@ -1266,6 +1295,7 @@
   "c13753167634f7aa": "Leu o arquivo",
   "5ce648cd03020fd9": "Leu {path} e mais {count}",
   "5d6c2898401c94e6": "Leu {path}",
+  "561112eb900de6b5": "{count, plural, one {{amount} crédito} other {{amount} créditos}}",
   "612170d804b03320": "{count, plural, one {{count} registro de uso malformado ou inconsistente foi ignorado; o uso pode estar incompleto.} other {{count} registros de uso malformados ou inconsistentes foram ignorados; o uso pode estar incompleto.}}",
   "ee448ceb6820ce2f": "{environment} roda uma versão mais antiga do servidor e fica fora dos totais.",
   "732708950237004e": "Este cliente é mais antigo que o servidor em {environment}; o uso dele fica fora dos totais.",
@@ -1487,7 +1517,6 @@
   "a3e28a8c31f041e8": "''{name}'' está vazio ou não pôde ser lido.",
   "ebb9d93e29740cd2": "Você pode anexar até {max} arquivos por mensagem.",
   "d78267d3a06a1ed9": "Não foi possível abrir o seletor de arquivos.",
-  "1dc797c5c01c5d70": "''{name}'' excede o limite de 10 MB por anexo.",
   "e10bbaba7f1a497a": "Não foi possível ler ''{name}''.",
   "b16f0603494e657d": "A biblioteca de fotos não está disponível no momento.",
   "8026ece12b90f356": "Você pode anexar até {max} arquivos por mensagem.",
@@ -1495,6 +1524,7 @@
   "cb7049baa8fdacc4": "Anexos de vídeo não estão disponíveis aqui.",
   "6c5e9cc01a8fd18f": "Tipo de arquivo sem suporte para ''{name}''.",
   "a8c3d59b323e4d6b": "Falha ao ler ''{name}''.",
+  "1dc797c5c01c5d70": "''{name}'' excede o limite de 10 MB por anexo.",
   "e4991173a9124f38": "Uma imagem colada excede o limite de 10 MB por anexo.",
   "218c111b4aa6e029": "Não foi possível ler uma imagem colada.",
   "ce88bed3d928cf6b": "Este anexo não está mais disponível. Anexe o arquivo novamente.",
@@ -1971,9 +2001,9 @@
   "a5e3ff0d1a60b766": "Não foi possível configurar o acesso do ambiente ao relay: {detail}",
   "7d508fe978cb0f3b": "Desligado",
   "3ae222ec888dd171": "ID do trace:",
-  "be00d572b18076d8": "Mantenha pressionado para remover deste dispositivo",
   "46e2a0e828785d97": "Gerenciar {environment}",
   "5392155ec0c8b0be": "Remover {environment} deste dispositivo",
+  "be00d572b18076d8": "Mantenha pressionado para remover deste dispositivo",
   "782a518513f0777a": "Ativar {environment}",
   "a35685d9ad9de747": "Carregando ambientes na nuvem vinculados.",
   "91ca3ba7b2f9d6b6": "Nenhum outro ambiente na nuvem vinculado.",
@@ -2776,6 +2806,7 @@
   "665abe47a0f4612b": "Verificações falhando",
   "09d74034d376c535": "Verificações pendentes",
   "91e832d25ff2aba9": "{term, select, mr {Merge request} cr {Solicitação de alteração} other {Pull request}} {number}",
+  "bbb7d40a7ad7ab71": "Privado",
   "37f84b2c7830febb": "pilha {position} de {size}",
   "0469747f4bb9caac": "{additions} adições, {deletions} remoções",
   "4e3cdb7e814e8962": "Toque duas vezes para abrir. Toque e segure para ver ações rápidas.",
@@ -2870,7 +2901,6 @@
   "f9d3c8aa453829ce": "Toque em alguém para solicitar uma revisão. Toque em um revisor solicitado para remover a solicitação. As alterações são enviadas quando você fecha esta folha.",
   "8d3770f150f0bcb4": "Solicitado",
   "fff1c3d17603f394": "Este provedor aceita um ID de revisor, mas não consegue listar candidatos.",
-  "bbb7d40a7ad7ab71": "Privado",
   "85ae9979ad3b0c1e": "Copiar branch base {branch}",
   "06a684782801e8f7": "Copiar branch head {branch}",
   "8e4f3c862193b8a5": "Editar",
@@ -3295,6 +3325,214 @@
   "d3eba7e16b39920c": "Rota {position} de {count}",
   "d0110e3a6d4e35ef": "{address} · encontrada automaticamente",
   "369d06ab8037283f": "Vale para a rota marcada como Em uso. As outras rotas podem ter permissões diferentes e não foram verificadas.",
+  "eaa6c91a05d95ce7": "Atualizar",
+  "b86d1fc542760652": "Add memory",
+  "1475159f07e9bfa3": "Search Kiro memory",
+  "2143d1fe74c6c59e": "Filter Kiro memory scope",
+  "0e95566c90ff711f": "Search",
+  "ca78d6e5cd1bd8a3": "Sync now",
+  "78fea3acd9f19d61": "Inspect",
+  "da37788b8832bb38": "Inspect / edit memory",
+  "556e7981150987d2": "Memory title",
+  "04883349c954d332": "Knowledge",
+  "48d0b8b7b6c69c57": "User preference",
+  "baac92b128c90701": "Memory scope",
+  "754df0bd7c1a6dd2": "Memory summary",
+  "f0e445f879140f87": "Memory content",
+  "1105db011b10183e": "Save memory",
+  "671e94c81f356a7c": "Close",
+  "ac7f3986fabb191e": "Delete…",
+  "5713b15d15fcbcfe": "Delete memory?",
+  "d615066f7da9993e": "Delete this memory from Kiro? Kiro may sync the deletion to your account.",
+  "778cce0ef96dd16a": "Delete memory",
+  "0f53223d084db39c": "Kiro memory",
+  "7c91dee6cce10726": "Memories belong to your Kiro account on this environment. Choosing a project does not hide memories from other scopes.",
+  "cd3e7fe61a8e3b3c": "Search",
+  "350a25afc17f1f26": "Scope filter (empty for all scopes)",
+  "506c25804469a480": [
+    "Memory sync: ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " (",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    ")"
+  ],
+  "f1306d81355fab36": [
+    "Memory sync: ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "9105d61cc8fd891b": {
+    "t": "Plural",
+    "i": 1,
+    "d": {
+      "b": {
+        "one": {
+          "t": "C2",
+          "i": 2,
+          "c": [
+            {
+              "i": 3,
+              "k": "_gt_value_3",
+              "v": "v"
+            },
+            " memories found."
+          ]
+        },
+        "other": {
+          "t": "C2",
+          "i": 2,
+          "c": [
+            {
+              "i": 3,
+              "k": "_gt_value_3",
+              "v": "v"
+            },
+            " memories found."
+          ]
+        }
+      },
+      "t": "p"
+    }
+  },
+  "1c00c76295a2e4ef": "Unresolved conflict",
+  "67e3a0c4066815c8": "Title (letters, digits, and hyphens; up to 64 characters)",
+  "0bc68798cf37e9a0": [
+    "Type: ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "c0abbbebfb65767e": [
+    "Scope: ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    ", ",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    ", or",
+    " ",
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    "; separate multiple scopes with commas."
+  ],
+  "c710ee112651e1dd": "Summary",
+  "b057ae16f512220b": "Content",
+  "5968bf00c195f99d": "Specs",
+  "6a287d666dfc09c7": "Powers",
+  "2f890e1e55af5ae5": "Memory",
+  "17f44cd586f9d381": "Sessions",
+  "724baefb1716842b": "MCP servers",
+  "a4a5c6910dad087c": "Kiro project",
+  "5814394abbe064bb": "Choose Kiro project",
+  "825601856cc74f35": "Kiro conversation",
+  "6bddff7d539284dd": "Choose Kiro conversation",
+  "e481bc9d691aafac": "Could not load Kiro sessions. Check the environment's CLI sign-in and refresh.",
+  "1101aa03a51788a2": "Could not import the Kiro session. Refresh and try again.",
+  "037cf4fbe76df35a": "Could not sync native history.",
+  "a4e3f54ca6a43218": "Could not delete the native session. Refresh and try again.",
+  "25a59c66e472534e": "Delete Kiro session?",
+  "a8a9e10e0bcadf85": "This removes its native Kiro history from this environment.",
+  "77fc821767d33547": "Kiro session",
+  "8a5ef4083323cf68": "Open",
+  "e3f8064f1e4ba82b": "Import",
+  "0895342b8f773e71": "Checking / syncing",
+  "ce045a87c1ac2bc9": "Sync from Kiro",
+  "6b02ae77feedafa4": "Kiro workspace",
+  "5681c83b1162dade": "Add a project on this environment to manage its Kiro resources.",
+  "6def7332b1894e04": "Start a Kiro conversation in this project to inspect its MCP servers.",
+  "32d352c619a92e7a": "Native Kiro sessions",
+  "e816ada68de8bc18": "Could not save this spec file. Check workspace write access and try again.",
+  "9476599110dd07f3": "Open in Files",
+  "cefab31eb6585094": "Edit",
+  "86bdf4c4e998cc01": "Edit {fileName}",
+  "3ac711c59804b6c9": "Continue in Kiro",
+  "39fca77c299f8add": "Kiro Specs",
+  "16e41a231b0905b3": "Native Kiro artifacts in this project",
+  "c9d3654caa0d4784": "Could not list project files.",
+  "cf752333681d7961": [
+    "Looking for ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    "…"
+  ],
+  "37c0e4d8435cf209": [
+    "No spec artifacts found under ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    ". Start a Spec, Quick Spec, or Bug Fix session in Kiro to create them."
+  ],
+  "ac7ec3968ff9287e": [
+    "Bugfix spec · ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " of",
+    " ",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    " tasks checked"
+  ],
+  "3c7b7d3df9ada820": [
+    "Feature spec (including Quick Spec artifacts) ·",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " of ",
+    {
+      "i": 2,
+      "k": "_gt_value_2",
+      "v": "v"
+    },
+    " tasks checked"
+  ],
+  "accc3882ca558d17": "This spec folder has no recognized artifacts yet.",
+  "a6f0726d7ccf03d1": [
+    "Reading ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    "…"
+  ],
+  "50197bc261656857": "Could not read this spec file.",
+  "bcfa541219c693fb": "This artifact is not available in the workspace.",
   "6f3a2e63e085cf36": "Atualizar {environment}?",
   "2a7f4a26dd17b132": "Instalar {product} {version}. O {product} reinicia nessa máquina e se reconecta. As threads em execução podem ser interrompidas.",
   "99568715d786f38a": "Atualizar",
@@ -4175,7 +4413,6 @@
   "4e0710d19dfc2e7e": "Enviar este relatório para a equipe do T3?",
   "bddfc683c21e1362": "Isto é tudo o que sai da sua máquina. Nada é enviado até você tocar em Enviar.",
   "bf19826f81484328": "Incluir a conversa",
-  "260c6b45f52d2f27": "Adiciona o texto das suas mensagens e das respostas do agente {textTurns, plural, one {no último turno} other {nos últimos {textTurns} turnos}}.",
   "ddb7e6f8ce99e657": "Somente quem pode executar agentes nesta máquina pode enviar ou recusar o relatório.",
   "433e4a9af4b69ebb": "Sua próxima mensagem inicia uma sessão nova. O agente não verá as mensagens anteriores desta thread.",
   "e1189d2e582b008d": "Manter a sessão atual",
@@ -4184,6 +4421,39 @@
   "ce591b4de647ecda": "Abrir {title}",
   "4a9a6f6111329b54": "Recarregar {title}",
   "12f0890f800baa7a": "Página indisponível",
+  "2bc24128621f0a0b": "Could not refresh MCP status.",
+  "aa689b6b6782f216": "Authorization needed",
+  "345e5fda6084c683": "Kiro MCP servers",
+  "4762ea85e6883399": "Kiro has not reported MCP status for this session yet.",
+  "47b5399d3113e3d0": "Kiro reported no MCP servers in this session.",
+  "def82b59373f01b6": [
+    "MCP sign-in must finish in a browser on the machine running Kiro. Remote callback forwarding is not supported. Open this T3 server through ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    " on that machine and start sign-in there. CLI MCP credentials are separate from T3."
+  ],
+  "d58db6d0297a2ede": "MCP sign-in is unavailable in this connection. Update Kiro CLI on its server and start a new session, then retry from a local T3 browser.",
+  "6f1b1b1696d81595": "A sign-in is still finishing on the Kiro environment. Refresh to check its status.",
+  "f683a95eb4a42f8a": "Could not complete the Powers operation. Refresh and try again.",
+  "7724af3a663d6aef": "Refreshing Powers…",
+  "2d98551f5e3365ac": "No description provided.",
+  "3073fc03fb8a1078": "Project Power",
+  "cb3484a5ca2cccd0": "Installed in this Kiro environment",
+  "118720eaef243c65": "Managed by Kiro configuration",
+  "8a78ad9494da7e06": "Removing {name}…",
+  "4175aaafb2af90fa": "Power catalog name or absolute path",
+  "f56f18110d0e9af0": "Power name or {path}",
+  "5361f737cbbd464a": "Install Power",
+  "d7ba46be8e4ad4d0": "Installing Power…",
+  "5ed5e86286dbe996": "Kiro Powers",
+  "9d7674d66449a4f6": "Kiro has not reported installed Powers.",
+  "7d767e44daea8248": "No Powers are available in this project.",
+  "66e1d4f9ab34c480": "Catalog name or absolute path on the Kiro environment",
+  "bfd6e6c6e39d83f8": "Kiro policy manages Power installation.",
+  "67750f912789fc8c": "Powers updated. Start a new Kiro session to use the updated configuration.",
   "9c5a2e144cefdf2f": "Somente leitura",
   "12d03e02951725b0": "Lê projetos e threads. Não pode iniciar, enviar mensagens nem alterar nada.",
   "63fd02d55f0e4417": "Vincular uma máquina a este ambiente",
@@ -4315,7 +4585,6 @@
   "d9f6244b252d11f6": "Concluir login",
   "8aecbd38f1facf71": "Aprove o acesso no navegador. Depois ele abre uma página que pode não carregar: copie o endereço dessa página e cole aqui.",
   "12ba9fa1445f92a2": "Trabalho de subagentes",
-  "eaa6c91a05d95ce7": "Atualizar",
   "4740c38b2edd194d": "Somente leitura. Estes subagentes não aceitam mensagens.",
   "5a0125dd9241cdec": "Carregando…",
   "292cccd1075abd6e": "O provedor não tem registro de quais subagentes esta chamada iniciou.",
@@ -4753,10 +5022,10 @@
   "c11a66f71057f074": "Seu prompt contém \"ultrathink\" no texto. Remova para mudar esta opção.",
   "b589c01784b9a88c": "Encontrar um modelo",
   "9b0277205d8a9b04": "Todos os provedores",
-  "72ae7e7c5ca1c5fc": "Somente favoritos",
   "279ab25bdca98778": "Configurações da thread",
   "0ef86daa831dde67": "Cancelar configurações da thread",
   "cb27bc9ea63671c0": "Filtros de modelos",
+  "72ae7e7c5ca1c5fc": "Somente favoritos",
   "441bfc4afe4b5760": "Provedor",
   "33c68c5151a81e31": "Mostrar modelos legados",
   "ce9438608fd47e03": "Salvar",
@@ -4773,6 +5042,7 @@
   "e463c05a687abdd3": "Fase {title}, {tone, select, working {em andamento} completed {concluída} failed {com falha} stopped {parada} other {na fila}}, {count} concluídas",
   "3607b0330d0f2d37": "Fase {title}, {tone, select, working {em andamento} completed {concluída} failed {com falha} stopped {parada} other {na fila}}",
   "815190b32ad959c9": "A thread dele ainda não está disponível",
+  "5d83968531de1d49": "Ainda não há etapas",
   "2a61b633ec5035a5": "Nenhum agente ainda",
   "fe32057bfc66015e": "Retoma {date}.",
   "7792e72ddecb6733": "Redefinido em {date}.",
@@ -4911,6 +5181,7 @@
   "cceea5cef0684b31": "Aceitar edições automaticamente",
   "3fe210c30bf00152": "Aprova edições automaticamente e pergunta antes de outras ações.",
   "fd064d8807f0aaa2": "Automático",
+  "7b4d68333dadeb4a": "As ações rotineiras são aprovadas automaticamente. O recurso “Approve for Me” usa seu plano Kiro e pede confirmação em caso de dúvida.",
   "1eed3d794eed6b65": "Acesso total",
   "7f284f51644bb125": "Permite comandos e edições sem perguntar.",
   "3bb848279618550f": "{label}, {summary}",
@@ -4934,6 +5205,7 @@
   "83be7aade7ff6360": "Conectado",
   "ec21b232e0eacd4a": "Entrar",
   "2b1ed298db8e25c9": "Mostrar menos",
+  "69b7d628fb45cda4": "Mostrar plano completo",
   "ad6717b82320da35": "Mostrar script completo",
   "24eea689f67a94a3": "Workflow iniciado",
   "7af2d98441d9aa67": "Trabalhando",
@@ -5157,6 +5429,7 @@
   "ea4beda46b22b8b0": "Tokens processados",
   "212d974007cacf3f": "* se cobrado pela taxa cheia da API",
   "82bc7f1cc5a039fc": "{count, plural, one {Em {sessions} sessões} other {Em {sessions} sessões}}",
+  "8378f1586eac80ba": "Cobrança em créditos · sem dados de tokens",
   "2a57181a9d128463": "{share} do custo · {tokens} tokens",
   "d8a6a99fbdda0d3e": "{share} dos tokens · {cost}",
   "19a3f4f2ba09e787": "Totais",
@@ -5185,6 +5458,7 @@
   "999c1e12be2b0b07": "Por velocidade",
   "acdde9c11660b3e7": "{cost} de adicional",
   "52eb4ae22e3de46b": "Por modelo",
+  "ce1386a3ae96da48": "Cobrança em {credits} · sem dados de tokens",
   "0f806caee7d50d39": "{share} dos tokens · sem taxas conhecidas",
   "fa8c94215417c702": "sem taxas conhecidas · {tokens} tokens",
   "77798cfa0f392e89": "Sem preço",
@@ -5198,6 +5472,7 @@
     }
   ],
   "d1c32e217a2344a5": "Verificando as transcrições dos provedores…",
+  "c4b268c6c8fe2912": "Os créditos do Kiro aparecem nos totais. Os gráficos de tokens e dólares não estão disponíveis.",
   "49c4cd88ca4d260a": "Nenhuma atividade nesta janela.",
   "d2bf6b6ea7fab036": "Dispensar erro da entrada de voz",
   "2ddb62c94293eb14": "Cancelar ditado",
@@ -5501,16 +5776,5 @@
   "ad208e3e32c85029": "Ocultar todas",
   "3328503592789bed": "Zen",
   "856812e7e1fc445e": "Chamadas de ferramentas no chat",
-  "8d545d54c0a9e950": "Oculta os comandos, edições e pesquisas que os agentes executam. \"Ocultar bem-sucedidas\" mantém as falhas. Zen mostra só as respostas finais. Aprovações, perguntas e erros sempre aparecem.",
-  "fcef2c112c4388f0": "A política de {organization} não permite tarefas agendadas.",
-  "53b6a1bb66a65417": "{count} aguardando",
-  "5e729fc4c34f2821": "{count} na fila",
-  "43aeffb7e3aa5337": "{count, plural, one {{count} etapa} other {{count} etapas}}",
-  "5d83968531de1d49": "Ainda não há etapas",
-  "7b4d68333dadeb4a": "As ações rotineiras são aprovadas automaticamente. O recurso “Approve for Me” usa seu plano Kiro e pede confirmação em caso de dúvida.",
-  "69b7d628fb45cda4": "Mostrar plano completo",
-  "8378f1586eac80ba": "Cobrança em créditos · sem dados de tokens",
-  "ce1386a3ae96da48": "Cobrança em {credits} · sem dados de tokens",
-  "c4b268c6c8fe2912": "Os créditos do Kiro aparecem nos totais. Os gráficos de tokens e dólares não estão disponíveis.",
-  "561112eb900de6b5": "{count, plural, one {{amount} crédito} other {{amount} créditos}}"
+  "8d545d54c0a9e950": "Oculta os comandos, edições e pesquisas que os agentes executam. \"Ocultar bem-sucedidas\" mantém as falhas. Zen mostra só as respostas finais. Aprovações, perguntas e erros sempre aparecem."
 }

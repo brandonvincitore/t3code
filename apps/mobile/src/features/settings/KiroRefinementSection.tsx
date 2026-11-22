@@ -1,3 +1,4 @@
+import { m } from "../../i18n/messages";
 import { nativeHistorySyncMessage } from "@t3tools/client-runtime/kiro-actions";
 import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { makeKiroMcpActions, makeKiroResourceActions } from "@t3tools/client-runtime/kiro-actions";
@@ -12,6 +13,7 @@ import type {
   ThreadId,
 } from "@t3tools/contracts";
 import { StackActions, useNavigation } from "@react-navigation/native";
+import { T, useGT } from "gt-react-native";
 import { useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Alert, View } from "react-native";
 import { AppText as Text } from "../../components/ui/AppText";
@@ -31,17 +33,27 @@ export function KiroRefinementSection(props: {
   readonly environmentId: EnvironmentId;
   readonly instanceId: ProviderInstanceId;
 }) {
+  const gt = useGT();
   const projects = useProjects().filter((project) => project.environmentId === props.environmentId);
   const [selected, setSelected] = useState<ProjectId | null>(null);
   const [panel, setPanel] = useState<Panel | null>(null);
   const project = projects.find((item) => item.id === selected) ?? projects[0];
+  const panelLabels = {
+    specs: gt("Specs"),
+    powers: gt("Powers"),
+    memory: gt("Memory"),
+    sessions: gt("Sessions"),
+    mcp: gt("MCP servers"),
+  };
   return (
     <View className="gap-3 p-4">
-      <Text className="font-t3-medium text-foreground">Kiro workspace</Text>
+      <Text className="font-t3-medium text-foreground">
+        <T>Kiro workspace</T>
+      </Text>
       {project ? (
         <>
           <Menu
-            title="Kiro project"
+            title={gt("Kiro project")}
             actions={projects.map((item) => ({
               id: item.id,
               title: item.title,
@@ -52,15 +64,13 @@ export function KiroRefinementSection(props: {
               if (next) setSelected(next.id);
             }}
           >
-            <ControlPill label={project.title} accessibilityLabel="Choose Kiro project" />
+            <ControlPill label={project.title} accessibilityLabel={gt("Choose Kiro project")} />
           </Menu>
           <View className="flex-row flex-wrap gap-2">
             {(["specs", "powers", "memory", "sessions", "mcp"] as const).map((item) => (
               <Button
                 key={item}
-                label={
-                  item === "mcp" ? "MCP servers" : item.charAt(0).toUpperCase() + item.slice(1)
-                }
+                label={panelLabels[item]}
                 onPress={() => setPanel(panel === item ? null : item)}
               />
             ))}
@@ -77,7 +87,7 @@ export function KiroRefinementSection(props: {
         </>
       ) : (
         <Text className="text-foreground-muted">
-          Add a project on this environment to manage its Kiro resources.
+          <T>Add a project on this environment to manage its Kiro resources.</T>
         </Text>
       )}
     </View>
@@ -145,6 +155,7 @@ function KiroSessionMcp(props: {
   readonly instanceId: ProviderInstanceId;
   readonly projectId: ProjectId;
 }) {
+  const gt = useGT();
   const threads = useThreadShells().filter(
     (thread) =>
       thread.environmentId === props.environmentId &&
@@ -156,13 +167,13 @@ function KiroSessionMcp(props: {
   if (!thread)
     return (
       <Text className="text-foreground-muted">
-        Start a Kiro conversation in this project to inspect its MCP servers.
+        <T>Start a Kiro conversation in this project to inspect its MCP servers.</T>
       </Text>
     );
   return (
     <View className="gap-3">
       <Menu
-        title="Kiro conversation"
+        title={gt("Kiro conversation")}
         actions={threads.map((item) => ({
           id: item.id,
           title: item.title,
@@ -173,7 +184,7 @@ function KiroSessionMcp(props: {
           if (next) setSelected(next.id);
         }}
       >
-        <ControlPill label={thread.title} accessibilityLabel="Choose Kiro conversation" />
+        <ControlPill label={thread.title} accessibilityLabel={gt("Choose Kiro conversation")} />
       </Menu>
       <KiroMcpStatusSection
         key={thread.id}
@@ -219,6 +230,7 @@ function KiroNativeSessions(props: {
   readonly projectId: ProjectId;
 }) {
   const registry = useContext(RegistryContext);
+  const gt = useGT();
   const navigation = useNavigation();
   const canImport = useAtomValue(
     serverEnvironment.importAcpRegistrySession.permissionAtom(props.environmentId),
@@ -270,7 +282,9 @@ function KiroNativeSessions(props: {
       setCursor(result.value.nextCursor);
       setDeletable(result.value.canDelete);
     } else
-      setError("Could not load Kiro sessions. Check the environment's CLI sign-in and refresh.");
+      setError(
+        gt("Could not load Kiro sessions. Check the environment's CLI sign-in and refresh."),
+      );
   }
   async function importSession(session: AcpRegistrySession) {
     if (busy || !canImport) return;
@@ -296,7 +310,7 @@ function KiroNativeSessions(props: {
     if (!alive.current) return;
     setBusy(false);
     if (result._tag === "Success") open(result.value.threadId);
-    else setError("Could not import the Kiro session. Refresh and try again.");
+    else setError(gt("Could not import the Kiro session. Refresh and try again."));
   }
   async function syncHistory(session: AcpRegistrySession) {
     if (busy || !canSync || !session.importedThreadId) return;
@@ -314,8 +328,8 @@ function KiroNativeSessions(props: {
     );
     if (!alive.current) return;
     setBusy(false);
-    if (result._tag === "Success") setSyncMessage(nativeHistorySyncMessage(result.value));
-    else setError("Could not sync native history.");
+    if (result._tag === "Success") setSyncMessage(nativeHistorySyncMessage(result.value, m));
+    else setError(gt("Could not sync native history."));
   }
   async function remove(session: AcpRegistrySession) {
     if (busy || !canDelete || session.importedThreadId) return;
@@ -331,16 +345,16 @@ function KiroNativeSessions(props: {
     setBusy(false);
     if (result._tag === "Success")
       setSessions((current) => current.filter((item) => item.sessionId !== session.sessionId));
-    else setError("Could not delete the native session. Refresh and try again.");
+    else setError(gt("Could not delete the native session. Refresh and try again."));
   }
   function confirmRemove(session: AcpRegistrySession) {
     Alert.alert(
-      "Delete Kiro session?",
-      "This removes its native Kiro history from this environment.",
+      gt("Delete Kiro session?"),
+      gt("This removes its native Kiro history from this environment."),
       [
-        { text: "Cancel", style: "cancel" },
+        { text: gt("Cancel"), style: "cancel" },
         {
-          text: "Delete",
+          text: gt("Delete"),
           style: "destructive",
           onPress: () => {
             void remove(session);
@@ -351,9 +365,11 @@ function KiroNativeSessions(props: {
   }
   return (
     <View className="gap-3">
-      <Text className="font-t3-medium text-foreground">Native Kiro sessions</Text>
+      <Text className="font-t3-medium text-foreground">
+        <T>Native Kiro sessions</T>
+      </Text>
       <Button
-        label="Refresh"
+        label={gt("Refresh")}
         disabled={busy}
         onPress={() => {
           void load();
@@ -361,10 +377,14 @@ function KiroNativeSessions(props: {
       />
       {sessions.map((session) => (
         <View key={session.sessionId} className="gap-2 border-b border-border pb-3">
-          <Text className="text-foreground">{session.title ?? "Kiro session"}</Text>
+          <Text className="text-foreground">{session.title ?? gt("Kiro session")}</Text>
           <View className="flex-row gap-2">
             <Button
-              label={session.importedThreadId && !session.nativeHistoryPending ? "Open" : "Import"}
+              label={
+                session.importedThreadId && !session.nativeHistoryPending
+                  ? gt("Open", { $context: "verb, opens a conversation" })
+                  : gt("Import", { $context: "verb, imports a Kiro session" })
+              }
               disabled={busy || !canImport}
               onPress={() => {
                 void importSession(session);
@@ -372,7 +392,7 @@ function KiroNativeSessions(props: {
             />
             {session.importedThreadId ? (
               <Button
-                label={busy ? "Checking / syncing" : "Sync from Kiro"}
+                label={busy ? gt("Checking / syncing") : gt("Sync from Kiro")}
                 disabled={busy || !canSync}
                 onPress={() => {
                   void syncHistory(session);
@@ -381,7 +401,7 @@ function KiroNativeSessions(props: {
             ) : null}
             {deletable && !session.importedThreadId ? (
               <Button
-                label="Delete"
+                label={gt("Delete")}
                 disabled={busy || !canDelete}
                 onPress={() => {
                   confirmRemove(session);
@@ -393,7 +413,7 @@ function KiroNativeSessions(props: {
       ))}
       {cursor ? (
         <Button
-          label="Load more"
+          label={gt("Load more")}
           disabled={busy}
           onPress={() => {
             void load(cursor);

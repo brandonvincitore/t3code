@@ -7,6 +7,7 @@ import {
   DATABASE_MIGRATIONS_STARTED_MESSAGE,
 } from "@t3tools/shared/databaseMigrationLog";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
+import { BUFFERED_PROVIDER_NOTIFICATION_CONDITION } from "../orchestration-v2/deferredCommandMessage.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -351,6 +352,20 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
       );
     }
     executedMigrations.push(...(yield* run({ loader: makeMigrationLoader(id) })));
+  }
+  // This fork-only index owns no migration ID, so upstream migrations may still use the next ID.
+  if (toMigrationInclusive === undefined) {
+    const indexes = yield* sql`
+      SELECT 1 FROM sqlite_master
+      WHERE type = 'index' AND name = 'orchestration_v2_projection_messages_buffered_notification_idx'
+    `;
+    if (indexes.length === 0) {
+      yield* sql.unsafe(`
+        CREATE INDEX IF NOT EXISTS orchestration_v2_projection_messages_buffered_notification_idx
+        ON orchestration_v2_projection_messages(thread_id, created_at, message_id)
+        WHERE ${BUFFERED_PROVIDER_NOTIFICATION_CONDITION}
+      `);
+    }
   }
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0

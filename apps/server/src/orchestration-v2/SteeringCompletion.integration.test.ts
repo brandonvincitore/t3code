@@ -3187,6 +3187,11 @@ it.effect.each(
   "dispatches $source $delivery after Stop (held queue: $held, settled: $settled, scheduled: $scheduled)",
   ({ source, delivery, held, settled, scheduled }) =>
     Effect.gen(function* () {
+      const sentText = scheduled
+        ? '[T3 Code: scheduled task "scheduled" sent this prompt, not the user typing in this chat.]\n\nsent'
+        : source === "mcp"
+          ? "[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]\n\nsent"
+          : "sent";
       const interruptReached = yield* Deferred.make<void>();
       const releaseInterrupt = yield* Deferred.make<void>();
       const { events, started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
@@ -3301,7 +3306,7 @@ it.effect.each(
           assert.equal(sent.queueHeld === true, !client && !buffered);
           assert.deepEqual(
             started.map((turn) => turn.message.text),
-            client || buffered ? ["first", "sent"] : ["first"],
+            client || buffered ? ["first", sentText] : ["first"],
           );
           if (!client && !buffered) {
             assert.deepEqual(
@@ -3392,7 +3397,7 @@ it.effect.each(
             yield* worker.drain();
             assert.deepEqual(
               started.map((turn) => turn.message.text),
-              ["first", "queued", "sent"],
+              ["first", "queued", sentText],
             );
           }
           assert.deepEqual(steered, []);
@@ -3463,7 +3468,7 @@ it.effect.each(
         yield* worker.drain();
         assert.deepEqual(
           started.map((turn) => turn.message.text),
-          remainsHeld ? ["first"] : held ? ["first", "queued"] : ["first", "sent"],
+          remainsHeld ? ["first"] : held ? ["first", "queued"] : ["first", sentText],
         );
         assert.deepEqual(steered, []);
       }).pipe(Effect.provide(layer));
@@ -3659,10 +3664,7 @@ it.effect("starts a restart that stops the running turn ahead of an older held q
           queue: ["queued"],
           started: [
             "first",
-            ...["second", "do this instead"].map(
-              (text) =>
-                `[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]\n\n${text}`,
-            ),
+            "[T3 Code: this message came through T3 Code's tools, not from the user typing in this chat.]\n\ndo this instead",
           ],
         },
       );

@@ -1,3 +1,4 @@
+import { mFallback, msg, type MFunctionType } from "gt-i18n";
 import {
   KiroMemoryCreate,
   KiroMemoryUpdate,
@@ -34,19 +35,26 @@ interface Draft {
 
 const isCreate = Schema.is(KiroMemoryCreate);
 const isUpdate = Schema.is(KiroMemoryUpdate);
-const failedMessage =
-  "Kiro could not complete this memory operation. Check that memory is enabled and your account has access. Refresh before trying again.";
+const failedMessage = msg(
+  "Kiro could not complete this memory operation. Check that memory is enabled and your account has access. Refresh before trying again.",
+);
 
 // Remount for a different environment/provider/project; actions stays stable within that target.
-export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
+export function useKiroMemory(
+  actions: KiroMemoryActions,
+  canManage: boolean,
+  resolve: MFunctionType = mFallback,
+) {
   const [page, setPage] = useState<KiroMemoryListResult | null>(null);
   const [syncStatus, setSyncStatus] = useState<KiroMemorySyncStatus | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [query, setQuery] = useState("");
   const [scopeFilter, setScopeFilter] = useState("");
-  const [pending, setPending] = useState<string | null>("Loading Kiro memory…");
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [pending, setPending] = useState<ReturnType<typeof msg> | null>(
+    msg("Loading Kiro memory…"),
+  );
+  const [error, setError] = useState<ReturnType<typeof msg> | null>(null);
+  const [notice, setNotice] = useState<ReturnType<typeof msg> | null>(null);
   const busy = useRef(true);
   const generation = useRef(0);
   const criteria = useRef<KiroMemoryListOptions>({ limit: 50 });
@@ -70,7 +78,11 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
     };
   }, [actions]);
 
-  async function run<A>(label: string, operation: () => Promise<A>, commit: (result: A) => void) {
+  async function run<A>(
+    label: ReturnType<typeof msg>,
+    operation: () => Promise<A>,
+    commit: (result: A) => void,
+  ) {
     if (busy.current) return;
     const token = generation.current;
     busy.current = true;
@@ -92,7 +104,7 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
 
   function refresh() {
     return run(
-      "Refreshing Kiro memory…",
+      msg("Refreshing Kiro memory…"),
       () => Promise.allSettled([actions.list(criteria.current), actions.getSyncStatus()]),
       ([listed, synced]) => {
         if (listed.status === "fulfilled") setPage(listed.value);
@@ -110,7 +122,7 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
       ...(scopeFilter ? { scopes: [scopeFilter] } : {}),
     };
     return run(
-      "Searching Kiro memory…",
+      msg("Searching Kiro memory…"),
       () => actions.list(filter),
       (listed) => {
         criteria.current = filter;
@@ -123,7 +135,7 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
     const cursor = page?.nextCursor;
     if (!cursor) return Promise.resolve();
     return run(
-      "Loading more memories…",
+      msg("Loading more memories…"),
       () => actions.list({ ...criteria.current, cursor }),
       (listed) =>
         setPage((current) =>
@@ -143,7 +155,7 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
 
   function inspect(id: string) {
     return run(
-      "Reading memory…",
+      msg("Reading memory…"),
       () => actions.get(id),
       ({ memory }) =>
         setDraft({
@@ -196,25 +208,27 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
     };
     if (draft.id ? !isUpdate(update) : !isCreate(input)) {
       setError(
-        "Use a title of letters, digits, and hyphens (up to 64 characters), a summary up to 250 characters, content up to 20,000 characters, and a valid Kiro scope.",
+        msg(
+          "Use a title of letters, digits, and hyphens (up to 64 characters), a summary up to 250 characters, content up to 20,000 characters, and a valid Kiro scope.",
+        ),
       );
       return Promise.resolve();
     }
     const id = draft.id;
     const token = generation.current;
     return run(
-      "Saving memory…",
+      msg("Saving memory…"),
       async () => {
         if (id) await actions.update(update);
         else if (isCreate(input)) await actions.create(input);
         if (generation.current !== token) return null;
         setDraft(null);
-        setNotice("Memory saved in Kiro.");
+        setNotice(msg("Memory saved in Kiro."));
         try {
           return await actions.list(criteria.current);
         } catch {
           if (generation.current === token)
-            setError("Memory was saved, but the list could not refresh. Refresh to see it.");
+            setError(msg("Memory was saved, but the list could not refresh. Refresh to see it."));
           return null;
         }
       },
@@ -228,7 +242,7 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
     if (!canManage) return Promise.resolve();
     const token = generation.current;
     return run(
-      "Deleting memory…",
+      msg("Deleting memory…"),
       async () => {
         await actions.delete(id);
         if (generation.current !== token) return null;
@@ -238,12 +252,14 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
             ? { ...current, memories: current.memories.filter((memory) => memory.id !== id) }
             : current,
         );
-        setNotice("Memory deleted from Kiro.");
+        setNotice(msg("Memory deleted from Kiro."));
         try {
           return await actions.list(criteria.current);
         } catch {
           if (generation.current === token)
-            setError("Memory was deleted, but the list could not refresh. Refresh to update it.");
+            setError(
+              msg("Memory was deleted, but the list could not refresh. Refresh to update it."),
+            );
           return null;
         }
       },
@@ -256,11 +272,11 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
   function sync() {
     if (!canManage) return Promise.resolve();
     return run(
-      "Requesting Kiro memory sync…",
+      msg("Requesting Kiro memory sync…"),
       () => actions.sync(),
       (synced) => {
         setSyncStatus(synced);
-        setNotice("Kiro memory sync requested. Refresh to see its current state.");
+        setNotice(msg("Kiro memory sync requested. Refresh to see its current state."));
       },
     );
   }
@@ -271,9 +287,9 @@ export function useKiroMemory(actions: KiroMemoryActions, canManage: boolean) {
     draft,
     query,
     scopeFilter,
-    pending,
-    error,
-    notice,
+    pending: pending === null ? null : resolve(pending),
+    error: error === null ? null : resolve(error),
+    notice: notice === null ? null : resolve(notice),
     setQuery,
     setScopeFilter,
     refresh,

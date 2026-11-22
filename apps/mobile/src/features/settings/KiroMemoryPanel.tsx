@@ -1,4 +1,5 @@
 import { useKiroMemory, type KiroMemoryActions } from "@t3tools/client-runtime/kiro-memory";
+import { Plural, T, useGT, useMessages, Var } from "gt-react-native";
 import { TextInput, View } from "react-native";
 
 import { AppText } from "../../components/ui/AppText";
@@ -12,47 +13,57 @@ export function KiroMemoryPanel({
   readonly actions: KiroMemoryActions;
   readonly canManage: boolean;
 }) {
-  const memory = useKiroMemory(actions, canManage);
+  const gt = useGT();
+  const resolve = useMessages();
+  const memory = useKiroMemory(actions, canManage, resolve);
   const disabled = !canManage || memory.pending !== null;
   const draft = memory.draft;
   return (
     <View className="gap-4">
-      <AppText className="font-t3-medium">Kiro memory</AppText>
+      <AppText className="font-t3-medium">
+        <T>Kiro memory</T>
+      </AppText>
       <AppText>
-        Memories belong to your Kiro account on this environment. Choosing a project does not hide
-        memories from other scopes.
+        <T>
+          Memories belong to your Kiro account on this environment. Choosing a project does not hide
+          memories from other scopes.
+        </T>
       </AppText>
       <View className="flex-row flex-wrap gap-2">
         <Button
-          label="Refresh"
+          label={gt("Refresh")}
           size="compact"
           disabled={disabled}
           onPress={() => {
             void memory.refresh();
           }}
         />
-        <Button label="Add memory" size="compact" disabled={disabled} onPress={memory.add} />
+        <Button label={gt("Add memory")} size="compact" disabled={disabled} onPress={memory.add} />
       </View>
       <View className="gap-2">
-        <AppText>Search</AppText>
+        <AppText>
+          <T context="noun, heading for searching memories">Search</T>
+        </AppText>
         <TextInput
-          accessibilityLabel="Search Kiro memory"
+          accessibilityLabel={gt("Search Kiro memory")}
           value={memory.query}
           onChangeText={memory.setQuery}
           editable={!disabled}
           maxLength={200}
           className="rounded-lg border border-divider bg-field px-3 py-2 text-foreground"
         />
-        <AppText>Scope filter (empty for all scopes)</AppText>
+        <AppText>
+          <T>Scope filter (empty for all scopes)</T>
+        </AppText>
         <TextInput
-          accessibilityLabel="Filter Kiro memory scope"
+          accessibilityLabel={gt("Filter Kiro memory scope")}
           value={memory.scopeFilter}
           onChangeText={memory.setScopeFilter}
           editable={!disabled}
           className="rounded-lg border border-divider bg-field px-3 py-2 text-foreground"
         />
         <Button
-          label="Search"
+          label={gt("Search", { $context: "verb, searches memories" })}
           size="compact"
           disabled={disabled}
           onPress={() => {
@@ -63,11 +74,19 @@ export function KiroMemoryPanel({
       {memory.syncStatus ? (
         <View className="gap-2">
           <AppText>
-            Memory sync: {memory.syncStatus.state}
-            {memory.syncStatus.reason ? ` (${memory.syncStatus.reason})` : ""}
+            {memory.syncStatus.reason ? (
+              <T>
+                Memory sync: <Var>{memory.syncStatus.state}</Var> (
+                <Var>{memory.syncStatus.reason}</Var>)
+              </T>
+            ) : (
+              <T>
+                Memory sync: <Var>{memory.syncStatus.state}</Var>
+              </T>
+            )}
           </AppText>
           <Button
-            label="Sync now"
+            label={gt("Sync now")}
             size="compact"
             disabled={disabled}
             onPress={() => {
@@ -78,7 +97,23 @@ export function KiroMemoryPanel({
       ) : null}
       {memory.page ? (
         <View className="gap-3">
-          <AppText>{memory.page.total} memories found.</AppText>
+          <AppText>
+            <T>
+              <Plural
+                n={memory.page.total}
+                one={
+                  <>
+                    <Var>{String(memory.page.total)}</Var> memories found.
+                  </>
+                }
+                other={
+                  <>
+                    <Var>{String(memory.page.total)}</Var> memories found.
+                  </>
+                }
+              />
+            </T>
+          </AppText>
           {memory.page.memories.map((entry) => (
             <View key={entry.id} className="gap-1 rounded-lg border border-divider p-3">
               <AppText className="font-t3-medium">{entry.title}</AppText>
@@ -86,9 +121,13 @@ export function KiroMemoryPanel({
               <AppText>
                 {entry.scopes.join(", ")} · {entry.memoryType}
               </AppText>
-              {entry.unresolvedConflict ? <AppText>Unresolved conflict</AppText> : null}
+              {entry.unresolvedConflict ? (
+                <AppText>
+                  <T>Unresolved conflict</T>
+                </AppText>
+              ) : null}
               <Button
-                label="Inspect"
+                label={gt("Inspect")}
                 size="compact"
                 disabled={disabled}
                 onPress={() => {
@@ -99,7 +138,7 @@ export function KiroMemoryPanel({
           ))}
           {memory.page.nextCursor ? (
             <Button
-              label="Load more"
+              label={gt("Load more")}
               size="compact"
               disabled={disabled}
               onPress={() => {
@@ -112,11 +151,13 @@ export function KiroMemoryPanel({
       {draft ? (
         <View className="gap-3 rounded-lg border border-divider p-3">
           <AppText className="font-t3-medium">
-            {draft.id ? "Inspect / edit memory" : "Add memory"}
+            {draft.id ? gt("Inspect / edit memory") : gt("Add memory")}
           </AppText>
-          <AppText>Title (letters, digits, and hyphens; up to 64 characters)</AppText>
+          <AppText>
+            <T>Title (letters, digits, and hyphens; up to 64 characters)</T>
+          </AppText>
           <TextInput
-            accessibilityLabel="Memory title"
+            accessibilityLabel={gt("Memory title")}
             value={draft.title}
             editable={!disabled}
             maxLength={64}
@@ -124,17 +165,21 @@ export function KiroMemoryPanel({
             onChangeText={(title) => memory.change({ title })}
             className="rounded-lg border border-divider bg-field px-3 py-2 text-foreground"
           />
-          <AppText>Type: {draft.memoryType}</AppText>
+          <AppText>
+            <T>
+              Type: <Var>{draft.memoryType}</Var>
+            </T>
+          </AppText>
           <View className="flex-row flex-wrap gap-2">
             <Button
-              label="Knowledge"
+              label={gt("Knowledge")}
               size="compact"
               tone={draft.memoryType === "SEMANTIC" ? "primary" : "secondary"}
               disabled={disabled}
               onPress={() => memory.change({ memoryType: "SEMANTIC" })}
             />
             <Button
-              label="User preference"
+              label={gt("User preference")}
               size="compact"
               tone={draft.memoryType === "USER_PREFERENCE" ? "primary" : "secondary"}
               disabled={disabled}
@@ -142,20 +187,24 @@ export function KiroMemoryPanel({
             />
           </View>
           <AppText>
-            Scope: Global, workspace:name, or repo:provider/owner/name; separate multiple scopes
-            with commas.
+            <T>
+              Scope: <Var>{"Global"}</Var>, <Var>{"workspace:name"}</Var>, or{" "}
+              <Var>{"repo:provider/owner/name"}</Var>; separate multiple scopes with commas.
+            </T>
           </AppText>
           <TextInput
-            accessibilityLabel="Memory scope"
+            accessibilityLabel={gt("Memory scope")}
             value={draft.scopes}
             editable={!disabled && draft.id === null}
             autoCapitalize="none"
             onChangeText={(scopes) => memory.change({ scopes })}
             className="rounded-lg border border-divider bg-field px-3 py-2 text-foreground"
           />
-          <AppText>Summary</AppText>
+          <AppText>
+            <T>Summary</T>
+          </AppText>
           <TextInput
-            accessibilityLabel="Memory summary"
+            accessibilityLabel={gt("Memory summary")}
             value={draft.summary}
             editable={!disabled}
             maxLength={250}
@@ -163,9 +212,11 @@ export function KiroMemoryPanel({
             onChangeText={(summary) => memory.change({ summary })}
             className="rounded-lg border border-divider bg-field px-3 py-2 text-foreground"
           />
-          <AppText>Content</AppText>
+          <AppText>
+            <T>Content</T>
+          </AppText>
           <TextInput
-            accessibilityLabel="Memory content"
+            accessibilityLabel={gt("Memory content")}
             value={draft.content}
             editable={!disabled}
             maxLength={20_000}
@@ -175,7 +226,7 @@ export function KiroMemoryPanel({
           />
           <View className="flex-row flex-wrap gap-2">
             <Button
-              label="Save memory"
+              label={gt("Save memory")}
               size="compact"
               disabled={disabled}
               onPress={() => {
@@ -183,24 +234,25 @@ export function KiroMemoryPanel({
               }}
             />
             <Button
-              label="Close"
+              label={gt("Close", { $context: "verb, closes the memory editor" })}
               size="compact"
               disabled={memory.pending !== null}
               onPress={memory.close}
             />
             {draft.id ? (
               <Button
-                label="Delete…"
+                label={gt("Delete…")}
                 size="compact"
                 tone="danger"
                 disabled={disabled}
                 onPress={() => {
                   const id = draft.id;
                   Dialog.confirm({
-                    title: "Delete memory?",
-                    message:
+                    title: gt("Delete memory?"),
+                    message: gt(
                       "Delete this memory from Kiro? Kiro may sync the deletion to your account.",
-                    confirmText: "Delete memory",
+                    ),
+                    confirmText: gt("Delete memory"),
                     destructive: true,
                     onConfirm: () => {
                       if (id) void memory.remove(id);
